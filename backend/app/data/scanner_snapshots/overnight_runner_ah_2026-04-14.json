@@ -1,0 +1,172 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-14",
+  "saved_at": "2026-04-15T03:40:48.494195+00:00",
+  "count": 8,
+  "rows": [
+    {
+      "symbol": "BULG",
+      "session_date": "2026-04-14",
+      "last_price": 1.72,
+      "prev_close": 1.24,
+      "ah_gap_pct": 38.71,
+      "ah_range_pct": 20.27,
+      "ah_volume": 406097,
+      "ah_score": 92.85,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression"
+      ],
+      "extra": {
+        "ah_high": 1.78,
+        "ah_low": 1.48,
+        "ah_last_close": 1.72
+      }
+    },
+    {
+      "symbol": "IONL",
+      "session_date": "2026-04-14",
+      "last_price": 16.6688,
+      "prev_close": 11.37,
+      "ah_gap_pct": 46.6,
+      "ah_range_pct": 8.8,
+      "ah_volume": 128834,
+      "ah_score": 91.04,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression"
+      ],
+      "extra": {
+        "ah_high": 16.81,
+        "ah_low": 15.45,
+        "ah_last_close": 16.6688
+      }
+    },
+    {
+      "symbol": "AHMA",
+      "session_date": "2026-04-14",
+      "last_price": 1.21,
+      "prev_close": 0.7943,
+      "ah_gap_pct": 52.34,
+      "ah_range_pct": 12.5,
+      "ah_volume": 863505,
+      "ah_score": 82.77,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.35,
+        "ah_low": 1.2,
+        "ah_last_close": 1.21
+      }
+    },
+    {
+      "symbol": "ROLR",
+      "session_date": "2026-04-14",
+      "last_price": 7.41,
+      "prev_close": 5.09,
+      "ah_gap_pct": 36.3,
+      "ah_range_pct": 13.99,
+      "ah_volume": 1460272,
+      "ah_score": 82.12,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 7.82,
+        "ah_low": 6.86,
+        "ah_last_close": 6.9378
+      }
+    },
+    {
+      "symbol": "SNAL",
+      "session_date": "2026-04-14",
+      "last_price": 0.9659,
+      "prev_close": 0.377,
+      "ah_gap_pct": 156.21,
+      "ah_range_pct": 96.84,
+      "ah_volume": 48777588,
+      "ah_score": 81.18,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.87,
+        "ah_low": 0.95,
+        "ah_last_close": 0.9659
+      }
+    },
+    {
+      "symbol": "NXXT",
+      "session_date": "2026-04-14",
+      "last_price": 0.5898,
+      "prev_close": 0.3697,
+      "ah_gap_pct": 59.53,
+      "ah_range_pct": 59.72,
+      "ah_volume": 10311544,
+      "ah_score": 79.65,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.659,
+        "ah_low": 0.4126,
+        "ah_last_close": 0.5898
+      }
+    },
+    {
+      "symbol": "AGAE",
+      "session_date": "2026-04-14",
+      "last_price": 0.7701,
+      "prev_close": 0.2844,
+      "ah_gap_pct": 170.78,
+      "ah_range_pct": 176.69,
+      "ah_volume": 102062480,
+      "ah_score": 75.67,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.9377,
+        "ah_low": 0.3389,
+        "ah_last_close": 0.7701
+      }
+    },
+    {
+      "symbol": "CIIT",
+      "session_date": "2026-04-14",
+      "last_price": 1.9539,
+      "prev_close": 1.37,
+      "ah_gap_pct": 42.62,
+      "ah_range_pct": 84.62,
+      "ah_volume": 6564930,
+      "ah_score": 75.01,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 2.4,
+        "ah_low": 1.3,
+        "ah_last_close": 1.9539
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 100000,
+      "min_gap_pct": 0.0
+    }
+  }
+}

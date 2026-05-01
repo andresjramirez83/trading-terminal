@@ -1,0 +1,132 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-02",
+  "saved_at": "2026-04-03T06:21:53.033980+00:00",
+  "count": 6,
+  "rows": [
+    {
+      "symbol": "SELX",
+      "session_date": "2026-04-02",
+      "last_price": 0.55,
+      "prev_close": 0.3501,
+      "ah_gap_pct": 57.1,
+      "ah_range_pct": 13.46,
+      "ah_volume": 866761,
+      "ah_score": 89.99,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.59,
+        "ah_low": 0.52,
+        "ah_last_close": 0.55
+      }
+    },
+    {
+      "symbol": "TMDE",
+      "session_date": "2026-04-02",
+      "last_price": 1.87,
+      "prev_close": 1.06,
+      "ah_gap_pct": 63.21,
+      "ah_range_pct": 13.86,
+      "ah_volume": 1890552,
+      "ah_score": 84.81,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.89,
+        "ah_low": 1.66,
+        "ah_last_close": 1.73
+      }
+    },
+    {
+      "symbol": "BDRX",
+      "session_date": "2026-04-02",
+      "last_price": 0.8431,
+      "prev_close": 0.614,
+      "ah_gap_pct": 37.31,
+      "ah_range_pct": 9.76,
+      "ah_volume": 1406777,
+      "ah_score": 83.62,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.9,
+        "ah_low": 0.82,
+        "ah_last_close": 0.8431
+      }
+    },
+    {
+      "symbol": "SIDU",
+      "session_date": "2026-04-02",
+      "last_price": 3.0484,
+      "prev_close": 2.1,
+      "ah_gap_pct": 45.16,
+      "ah_range_pct": 7.51,
+      "ah_volume": 2653146,
+      "ah_score": 83.61,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 3.1499,
+        "ah_low": 2.93,
+        "ah_last_close": 3.0484
+      }
+    },
+    {
+      "symbol": "SKYQ",
+      "session_date": "2026-04-02",
+      "last_price": 4.94,
+      "prev_close": 2.53,
+      "ah_gap_pct": 95.26,
+      "ah_range_pct": 18.57,
+      "ah_volume": 8608664,
+      "ah_score": 83.24,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 5.49,
+        "ah_low": 4.63,
+        "ah_last_close": 4.94
+      }
+    },
+    {
+      "symbol": "PFSA",
+      "session_date": "2026-04-02",
+      "last_price": 1.26,
+      "prev_close": 0.5787,
+      "ah_gap_pct": 117.73,
+      "ah_range_pct": 102.7,
+      "ah_volume": 8664778,
+      "ah_score": 77.36,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.5,
+        "ah_low": 0.74,
+        "ah_last_close": 1.26
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 100000,
+      "min_gap_pct": 0.0
+    }
+  }
+}

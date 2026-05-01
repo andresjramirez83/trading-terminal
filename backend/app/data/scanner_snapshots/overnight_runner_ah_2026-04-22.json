@@ -1,0 +1,137 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-22",
+  "saved_at": "2026-04-23T05:09:47.401127+00:00",
+  "count": 5,
+  "rows": [
+    {
+      "symbol": "MSOX",
+      "session_date": "2026-04-22",
+      "last_price": 4.07,
+      "prev_close": 2.97,
+      "ah_gap_pct": 46.33,
+      "ah_range_pct": 9.63,
+      "ah_volume": 602736,
+      "ah_dollar_volume": 2601940.09,
+      "ah_score": 93.35,
+      "compression_score": 89.51,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 4.44,
+        "ah_low": 4.05,
+        "ah_last_close": 4.3461
+      }
+    },
+    {
+      "symbol": "OKLL",
+      "session_date": "2026-04-22",
+      "last_price": 11.73,
+      "prev_close": 9.11,
+      "ah_gap_pct": 28.76,
+      "ah_range_pct": 6.02,
+      "ah_volume": 1079973,
+      "ah_dollar_volume": 12642587.87,
+      "ah_score": 84.19,
+      "compression_score": 73.03,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 12.16,
+        "ah_low": 11.47,
+        "ah_last_close": 11.73
+      }
+    },
+    {
+      "symbol": "ELPW",
+      "session_date": "2026-04-22",
+      "last_price": 2.47,
+      "prev_close": 1.57,
+      "ah_gap_pct": 57.32,
+      "ah_range_pct": 11.13,
+      "ah_volume": 736228,
+      "ah_dollar_volume": 1870533.93,
+      "ah_score": 82.86,
+      "compression_score": 36.8,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 2.7,
+        "ah_low": 2.4295,
+        "ah_last_close": 2.47
+      }
+    },
+    {
+      "symbol": "AGPU",
+      "session_date": "2026-04-22",
+      "last_price": 7.38,
+      "prev_close": 4.88,
+      "ah_gap_pct": 51.23,
+      "ah_range_pct": 26.02,
+      "ah_volume": 1839807,
+      "ah_dollar_volume": 14097616.99,
+      "ah_score": 82.1,
+      "compression_score": 25.4,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 8.96,
+        "ah_low": 7.11,
+        "ah_last_close": 7.38
+      }
+    },
+    {
+      "symbol": "AKAN",
+      "session_date": "2026-04-22",
+      "last_price": 13.65,
+      "prev_close": 3.25,
+      "ah_gap_pct": 320.0,
+      "ah_range_pct": 91.78,
+      "ah_volume": 8989019,
+      "ah_dollar_volume": 102819760.87,
+      "ah_score": 80.69,
+      "compression_score": 19.55,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 15.4,
+        "ah_low": 8.03,
+        "ah_last_close": 13.65
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 250000,
+      "min_gap_pct": 0.0,
+      "min_dollar_volume": 400000.0,
+      "hours_back": 96
+    }
+  }
+}

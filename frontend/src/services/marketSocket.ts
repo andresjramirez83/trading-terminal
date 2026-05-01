@@ -1,0 +1,234 @@
+type MarketSocketListener = (payload: unknown) => void;
+
+type SocketEntry = {
+  symbol: string;
+  socket: WebSocket | null;
+  listeners: Set<MarketSocketListener>;
+  reconnectTimer: number | null;
+  connectTimer: number | null;
+  shouldReconnect: boolean;
+  isConnecting: boolean;
+  intentionalClose: boolean;
+  reconnectAttempts: number;
+  connectionId: number;
+  lastConnectAt: number;
+};
+
+const MAX_RECONNECT_ATTEMPTS = 8;
+const MIN_CONNECT_SPACING_MS = 350;
+const BASE_RECONNECT_DELAY_MS = 1_200;
+const MAX_RECONNECT_DELAY_MS = 12_000;
+
+function getMarketWsUrl(symbol: string): string {
+  const isHttps = window.location.protocol === "https:";
+  const protocol = isHttps ? "wss" : "ws";
+
+  // Keep your local FastAPI backend as the default, but allow Vite env override later
+  // without changing this file again.
+  const envBase = (import.meta as any)?.env?.VITE_WS_BASE_URL as string | undefined;
+  if (envBase && envBase.trim()) {
+    const clean = envBase.trim().replace(/\/$/, "");
+    return `${clean}/ws/market?symbol=${encodeURIComponent(symbol)}`;
+  }
+
+  return `${protocol}://127.0.0.1:8000/ws/market?symbol=${encodeURIComponent(symbol)}`;
+}
+
+function isSocketAlive(socket: WebSocket | null): boolean {
+  return !!socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN);
+}
+
+class MarketSocketManager {
+  private entries = new Map<string, SocketEntry>();
+
+  subscribe(symbol: string, listener: MarketSocketListener): void {
+    const key = symbol.trim().toUpperCase();
+    if (!key) return;
+
+    const entry = this.ensureEntry(key);
+    entry.listeners.add(listener);
+    entry.shouldReconnect = true;
+    entry.intentionalClose = false;
+
+    if (!isSocketAlive(entry.socket) && !entry.isConnecting) {
+      this.scheduleConnect(entry, 0);
+    }
+  }
+
+  unsubscribe(symbol: string, listener: MarketSocketListener): void {
+    const key = symbol.trim().toUpperCase();
+    const entry = this.entries.get(key);
+    if (!entry) return;
+
+    entry.listeners.delete(listener);
+
+    if (entry.listeners.size === 0) {
+      this.closeEntry(entry, "unsubscribe");
+      this.entries.delete(key);
+    }
+  }
+
+  closeAll(): void {
+    for (const entry of Array.from(this.entries.values())) {
+      this.closeEntry(entry, "closeAll");
+    }
+    this.entries.clear();
+  }
+
+  private ensureEntry(symbol: string): SocketEntry {
+    let entry = this.entries.get(symbol);
+    if (entry) return entry;
+
+    entry = {
+      symbol,
+      socket: null,
+      listeners: new Set<MarketSocketListener>(),
+      reconnectTimer: null,
+      connectTimer: null,
+      shouldReconnect: true,
+      isConnecting: false,
+      intentionalClose: false,
+      reconnectAttempts: 0,
+      connectionId: 0,
+      lastConnectAt: 0,
+    };
+    this.entries.set(symbol, entry);
+    return entry;
+  }
+
+  private clearTimers(entry: SocketEntry): void {
+    if (entry.reconnectTimer != null) {
+      window.clearTimeout(entry.reconnectTimer);
+      entry.reconnectTimer = null;
+    }
+    if (entry.connectTimer != null) {
+      window.clearTimeout(entry.connectTimer);
+      entry.connectTimer = null;
+    }
+  }
+
+  private closeEntry(entry: SocketEntry, reason: string): void {
+    entry.shouldReconnect = false;
+    entry.intentionalClose = true;
+    entry.isConnecting = false;
+    this.clearTimers(entry);
+
+    const socket = entry.socket;
+    entry.socket = null;
+    entry.connectionId += 1;
+
+    if (!socket) return;
+
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+
+    try {
+      if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, reason);
+      }
+    } catch {
+      // Browser can throw if the socket is already closing. Safe to ignore.
+    }
+  }
+
+  private scheduleConnect(entry: SocketEntry, delayMs: number): void {
+    if (!entry.shouldReconnect || entry.listeners.size === 0) return;
+    if (entry.isConnecting || isSocketAlive(entry.socket)) return;
+
+    if (entry.connectTimer != null) {
+      window.clearTimeout(entry.connectTimer);
+      entry.connectTimer = null;
+    }
+
+    const elapsed = Date.now() - entry.lastConnectAt;
+    const safeDelay = Math.max(delayMs, elapsed < MIN_CONNECT_SPACING_MS ? MIN_CONNECT_SPACING_MS - elapsed : 0);
+
+    entry.connectTimer = window.setTimeout(() => {
+      entry.connectTimer = null;
+      this.connect(entry);
+    }, safeDelay);
+  }
+
+  private connect(entry: SocketEntry): void {
+    if (entry.isConnecting || isSocketAlive(entry.socket)) return;
+    if (!entry.shouldReconnect || entry.listeners.size === 0) return;
+
+    entry.isConnecting = true;
+    entry.intentionalClose = false;
+    entry.lastConnectAt = Date.now();
+    entry.connectionId += 1;
+
+    const connectionId = entry.connectionId;
+    const socket = new WebSocket(getMarketWsUrl(entry.symbol));
+    entry.socket = socket;
+
+    socket.onopen = () => {
+      if (entry.connectionId !== connectionId || entry.socket !== socket) return;
+      entry.isConnecting = false;
+      entry.reconnectAttempts = 0;
+      console.log("[marketSocket] connected", entry.symbol);
+    };
+
+    socket.onmessage = (event) => {
+      if (entry.connectionId !== connectionId || entry.socket !== socket) return;
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (error) {
+        console.error("[marketSocket] parse error", entry.symbol, error);
+        return;
+      }
+
+      for (const listener of Array.from(entry.listeners)) {
+        try {
+          listener(payload);
+        } catch (error) {
+          console.error("[marketSocket] listener error", entry.symbol, error);
+        }
+      }
+    };
+
+    socket.onerror = (event) => {
+      if (entry.connectionId !== connectionId || entry.socket !== socket) return;
+
+      // Avoid flooding DevTools during intentional React cleanup or rapid symbol switching.
+      if (entry.intentionalClose || !entry.shouldReconnect || entry.listeners.size === 0) return;
+
+      console.warn("[marketSocket] socket error", entry.symbol, event);
+    };
+
+    socket.onclose = () => {
+      if (entry.connectionId !== connectionId || entry.socket !== socket) return;
+
+      entry.isConnecting = false;
+      entry.socket = null;
+
+      if (entry.intentionalClose || !entry.shouldReconnect || entry.listeners.size === 0) {
+        if (entry.listeners.size === 0) this.entries.delete(entry.symbol);
+        return;
+      }
+
+      entry.reconnectAttempts += 1;
+
+      if (entry.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.warn("[marketSocket] max reconnect attempts reached", entry.symbol);
+        entry.shouldReconnect = false;
+        return;
+      }
+
+      const jitter = Math.floor(Math.random() * 350);
+      const backoff = Math.min(
+        MAX_RECONNECT_DELAY_MS,
+        BASE_RECONNECT_DELAY_MS * Math.pow(1.45, entry.reconnectAttempts - 1) + jitter
+      );
+
+      console.log("[marketSocket] closed", entry.symbol, "retry", entry.reconnectAttempts, "in", Math.round(backoff), "ms");
+      this.scheduleConnect(entry, backoff);
+    };
+  }
+}
+
+export const marketSocket = new MarketSocketManager();

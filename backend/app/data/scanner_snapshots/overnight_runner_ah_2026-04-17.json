@@ -1,0 +1,43 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-17",
+  "saved_at": "2026-04-20T12:57:56.466585+00:00",
+  "count": 1,
+  "rows": [
+    {
+      "symbol": "PBM",
+      "session_date": "2026-04-17",
+      "last_price": 12.8755,
+      "prev_close": 7.6,
+      "ah_gap_pct": 11.84,
+      "ah_range_pct": 25.0,
+      "ah_volume": 2584766,
+      "ah_dollar_volume": 22228319.07,
+      "ah_score": 66.37,
+      "compression_score": 18.25,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 9.3,
+        "ah_low": 7.44,
+        "ah_last_close": 8.5
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 250000,
+      "min_gap_pct": 0.0,
+      "min_dollar_volume": 400000.0,
+      "hours_back": 96
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "symbol": "SLNH",
+  "timeframe": "15m",
+  "trendlines": [],
+  "projections": [
+    {
+      "id": "saved-projection-1777556700-support-prediction-1777556700-1777584103528-218d1w",
+      "price": 1.1904000000000001,
+      "title": "SAVED Support Pred 1.1904",
+      "color": "#3b82f6",
+      "lineStyle": 0,
+      "lineWidth": 2,
+      "createdAt": 1777584103528
+    }
+  ],
+  "updatedAt": 1777585270229.2449
+}

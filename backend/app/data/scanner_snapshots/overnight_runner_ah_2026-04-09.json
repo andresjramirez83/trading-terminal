@@ -1,0 +1,189 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-09",
+  "saved_at": "2026-04-10T04:01:08.422122+00:00",
+  "count": 9,
+  "rows": [
+    {
+      "symbol": "IQST",
+      "session_date": "2026-04-09",
+      "last_price": 2.5,
+      "prev_close": 1.79,
+      "ah_gap_pct": 39.66,
+      "ah_range_pct": 18.25,
+      "ah_volume": 230060,
+      "ah_score": 90.72,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 2.6092,
+        "ah_low": 2.2065,
+        "ah_last_close": 2.5
+      }
+    },
+    {
+      "symbol": "EOSU",
+      "session_date": "2026-04-09",
+      "last_price": 1.26,
+      "prev_close": 0.7939,
+      "ah_gap_pct": 62.36,
+      "ah_range_pct": 11.29,
+      "ah_volume": 333830,
+      "ah_score": 86.25,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.38,
+        "ah_low": 1.24,
+        "ah_last_close": 1.289
+      }
+    },
+    {
+      "symbol": "RAYA",
+      "session_date": "2026-04-09",
+      "last_price": 0.68,
+      "prev_close": 0.4196,
+      "ah_gap_pct": 62.06,
+      "ah_range_pct": 62.3,
+      "ah_volume": 18295342,
+      "ah_score": 83.67,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.7404,
+        "ah_low": 0.4562,
+        "ah_last_close": 0.68
+      }
+    },
+    {
+      "symbol": "ZNTL",
+      "session_date": "2026-04-09",
+      "last_price": 4.4688,
+      "prev_close": 2.76,
+      "ah_gap_pct": 61.91,
+      "ah_range_pct": 26.06,
+      "ah_volume": 2586017,
+      "ah_score": 82.53,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 5.37,
+        "ah_low": 4.26,
+        "ah_last_close": 4.4688
+      }
+    },
+    {
+      "symbol": "CLIK",
+      "session_date": "2026-04-09",
+      "last_price": 3.0,
+      "prev_close": 2.1,
+      "ah_gap_pct": 42.86,
+      "ah_range_pct": 21.23,
+      "ah_volume": 404322,
+      "ah_score": 82.02,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 3.54,
+        "ah_low": 2.92,
+        "ah_last_close": 3.0
+      }
+    },
+    {
+      "symbol": "BBGI",
+      "session_date": "2026-04-09",
+      "last_price": 9.33,
+      "prev_close": 5.67,
+      "ah_gap_pct": 64.55,
+      "ah_range_pct": 65.24,
+      "ah_volume": 5087861,
+      "ah_score": 81.83,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 13.55,
+        "ah_low": 8.2,
+        "ah_last_close": 9.33
+      }
+    },
+    {
+      "symbol": "ARAI",
+      "session_date": "2026-04-09",
+      "last_price": 0.925,
+      "prev_close": 0.67,
+      "ah_gap_pct": 38.06,
+      "ah_range_pct": 29.74,
+      "ah_volume": 13409772,
+      "ah_score": 80.78,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.18,
+        "ah_low": 0.9095,
+        "ah_last_close": 0.925
+      }
+    },
+    {
+      "symbol": "CHOW",
+      "session_date": "2026-04-09",
+      "last_price": 0.53,
+      "prev_close": 0.375,
+      "ah_gap_pct": 36.11,
+      "ah_range_pct": 27.2,
+      "ah_volume": 331251,
+      "ah_score": 80.0,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.535,
+        "ah_low": 0.4206,
+        "ah_last_close": 0.5104
+      }
+    },
+    {
+      "symbol": "DKI",
+      "session_date": "2026-04-09",
+      "last_price": 0.7503,
+      "prev_close": 0.397,
+      "ah_gap_pct": 88.99,
+      "ah_range_pct": 70.11,
+      "ah_volume": 30792535,
+      "ah_score": 79.7,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.25,
+        "ah_low": 0.7348,
+        "ah_last_close": 0.7503
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 100000,
+      "min_gap_pct": 0.0
+    }
+  }
+}

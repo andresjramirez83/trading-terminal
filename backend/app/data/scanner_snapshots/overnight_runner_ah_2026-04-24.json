@@ -1,0 +1,182 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-24",
+  "saved_at": "2026-04-25T01:48:30.879557+00:00",
+  "count": 7,
+  "rows": [
+    {
+      "symbol": "POET",
+      "session_date": "2026-04-24",
+      "last_price": 16.07,
+      "prev_close": 11.72,
+      "ah_gap_pct": 37.12,
+      "ah_range_pct": 11.1,
+      "ah_volume": 1850580,
+      "ah_dollar_volume": 28921451.62,
+      "ah_score": 91.26,
+      "compression_score": 71.96,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 16.51,
+        "ah_low": 14.86,
+        "ah_last_close": 16.07
+      }
+    },
+    {
+      "symbol": "ATOM",
+      "session_date": "2026-04-24",
+      "last_price": 8.5314,
+      "prev_close": 6.19,
+      "ah_gap_pct": 37.83,
+      "ah_range_pct": 14.75,
+      "ah_volume": 669092,
+      "ah_dollar_volume": 5725445.92,
+      "ah_score": 88.62,
+      "compression_score": 52.6,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 9.18,
+        "ah_low": 8.0,
+        "ah_last_close": 8.5314
+      }
+    },
+    {
+      "symbol": "ELPW",
+      "session_date": "2026-04-24",
+      "last_price": 3.5652,
+      "prev_close": 2.67,
+      "ah_gap_pct": 33.53,
+      "ah_range_pct": 8.12,
+      "ah_volume": 467961,
+      "ah_dollar_volume": 1692824.68,
+      "ah_score": 84.94,
+      "compression_score": 63.73,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 3.73,
+        "ah_low": 3.45,
+        "ah_last_close": 3.5652
+      }
+    },
+    {
+      "symbol": "IHRT",
+      "session_date": "2026-04-24",
+      "last_price": 5.21,
+      "prev_close": 4.01,
+      "ah_gap_pct": 29.93,
+      "ah_range_pct": 26.31,
+      "ah_volume": 896283,
+      "ah_dollar_volume": 4687368.85,
+      "ah_score": 84.4,
+      "compression_score": 35.0,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 6.0,
+        "ah_low": 4.7501,
+        "ah_last_close": 5.21
+      }
+    },
+    {
+      "symbol": "SCNI",
+      "session_date": "2026-04-24",
+      "last_price": 0.6004,
+      "prev_close": 0.456,
+      "ah_gap_pct": 31.67,
+      "ah_range_pct": 38.24,
+      "ah_volume": 2824923,
+      "ah_dollar_volume": 2007328.47,
+      "ah_score": 84.38,
+      "compression_score": 34.93,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 0.83,
+        "ah_low": 0.6004,
+        "ah_last_close": 0.6004
+      }
+    },
+    {
+      "symbol": "LIDR",
+      "session_date": "2026-04-24",
+      "last_price": 2.22,
+      "prev_close": 1.69,
+      "ah_gap_pct": 31.36,
+      "ah_range_pct": 6.91,
+      "ah_volume": 803815,
+      "ah_dollar_volume": 1816719.95,
+      "ah_score": 83.42,
+      "compression_score": 64.46,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 2.32,
+        "ah_low": 2.17,
+        "ah_last_close": 2.22
+      }
+    },
+    {
+      "symbol": "DKI",
+      "session_date": "2026-04-24",
+      "last_price": 0.6699,
+      "prev_close": 0.4629,
+      "ah_gap_pct": 44.72,
+      "ah_range_pct": 63.08,
+      "ah_volume": 16190528,
+      "ah_dollar_volume": 10464079.82,
+      "ah_score": 80.13,
+      "compression_score": 17.2,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 0.75,
+        "ah_low": 0.4599,
+        "ah_last_close": 0.6699
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 250000,
+      "min_gap_pct": 0.0,
+      "min_dollar_volume": 400000.0,
+      "hours_back": 96
+    }
+  }
+}

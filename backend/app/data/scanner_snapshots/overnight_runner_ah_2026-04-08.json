@@ -1,0 +1,191 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-08",
+  "saved_at": "2026-04-09T04:13:15.213846+00:00",
+  "count": 9,
+  "rows": [
+    {
+      "symbol": "SNBR",
+      "session_date": "2026-04-08",
+      "last_price": 1.79,
+      "prev_close": 1.1,
+      "ah_gap_pct": 62.73,
+      "ah_range_pct": 12.27,
+      "ah_volume": 302066,
+      "ah_score": 95.99,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression"
+      ],
+      "extra": {
+        "ah_high": 1.83,
+        "ah_low": 1.63,
+        "ah_last_close": 1.79
+      }
+    },
+    {
+      "symbol": "MIGI",
+      "session_date": "2026-04-08",
+      "last_price": 4.5,
+      "prev_close": 2.86,
+      "ah_gap_pct": 57.34,
+      "ah_range_pct": 18.37,
+      "ah_volume": 391408,
+      "ah_score": 94.46,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression"
+      ],
+      "extra": {
+        "ah_high": 4.64,
+        "ah_low": 3.92,
+        "ah_last_close": 4.5
+      }
+    },
+    {
+      "symbol": "CLIK",
+      "session_date": "2026-04-08",
+      "last_price": 2.45,
+      "prev_close": 1.37,
+      "ah_gap_pct": 78.83,
+      "ah_range_pct": 18.36,
+      "ah_volume": 186834,
+      "ah_score": 91.36,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 2.4501,
+        "ah_low": 2.07,
+        "ah_last_close": 2.45
+      }
+    },
+    {
+      "symbol": "ARAI",
+      "session_date": "2026-04-08",
+      "last_price": 0.887,
+      "prev_close": 0.5887,
+      "ah_gap_pct": 50.67,
+      "ah_range_pct": 33.01,
+      "ah_volume": 1503286,
+      "ah_score": 89.38,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.89,
+        "ah_low": 0.6691,
+        "ah_last_close": 0.887
+      }
+    },
+    {
+      "symbol": "SAFX",
+      "session_date": "2026-04-08",
+      "last_price": 0.661,
+      "prev_close": 0.4132,
+      "ah_gap_pct": 59.97,
+      "ah_range_pct": 17.57,
+      "ah_volume": 3718287,
+      "ah_score": 84.83,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.73,
+        "ah_low": 0.6209,
+        "ah_last_close": 0.661
+      }
+    },
+    {
+      "symbol": "BBGI",
+      "session_date": "2026-04-08",
+      "last_price": 5.48,
+      "prev_close": 3.14,
+      "ah_gap_pct": 74.52,
+      "ah_range_pct": 10.19,
+      "ah_volume": 767866,
+      "ah_score": 80.68,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 5.95,
+        "ah_low": 5.4,
+        "ah_last_close": 5.48
+      }
+    },
+    {
+      "symbol": "UCAR",
+      "session_date": "2026-04-08",
+      "last_price": 3.02,
+      "prev_close": 0.5514,
+      "ah_gap_pct": 447.7,
+      "ah_range_pct": 83.33,
+      "ah_volume": 64038526,
+      "ah_score": 78.75,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 3.85,
+        "ah_low": 2.1,
+        "ah_last_close": 3.02
+      }
+    },
+    {
+      "symbol": "PMAX",
+      "session_date": "2026-04-08",
+      "last_price": 0.5399,
+      "prev_close": 0.3623,
+      "ah_gap_pct": 49.02,
+      "ah_range_pct": 82.19,
+      "ah_volume": 14770564,
+      "ah_score": 78.43,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.675,
+        "ah_low": 0.3705,
+        "ah_last_close": 0.5399
+      }
+    },
+    {
+      "symbol": "DKI",
+      "session_date": "2026-04-08",
+      "last_price": 0.78,
+      "prev_close": 0.36,
+      "ah_gap_pct": 116.67,
+      "ah_range_pct": 136.6,
+      "ah_volume": 24253691,
+      "ah_score": 76.56,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 0.93,
+        "ah_low": 0.3931,
+        "ah_last_close": 0.78
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 100000,
+      "min_gap_pct": 0.0
+    }
+  }
+}

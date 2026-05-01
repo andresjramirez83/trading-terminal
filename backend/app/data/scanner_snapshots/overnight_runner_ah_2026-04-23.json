@@ -1,0 +1,158 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-23",
+  "saved_at": "2026-04-24T04:23:42.964382+00:00",
+  "count": 6,
+  "rows": [
+    {
+      "symbol": "TRT",
+      "session_date": "2026-04-23",
+      "last_price": 13.78,
+      "prev_close": 8.26,
+      "ah_gap_pct": 66.22,
+      "ah_range_pct": 17.46,
+      "ah_volume": 548869,
+      "ah_dollar_volume": 7481612.71,
+      "ah_score": 86.94,
+      "compression_score": 45.56,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 14.73,
+        "ah_low": 12.54,
+        "ah_last_close": 13.73
+      }
+    },
+    {
+      "symbol": "PAPL",
+      "session_date": "2026-04-23",
+      "last_price": 0.87,
+      "prev_close": 0.6004,
+      "ah_gap_pct": 45.7,
+      "ah_range_pct": 16.54,
+      "ah_volume": 3467114,
+      "ah_dollar_volume": 3187758.86,
+      "ah_score": 83.97,
+      "compression_score": 33.21,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 0.9887,
+        "ah_low": 0.8484,
+        "ah_last_close": 0.8748
+      }
+    },
+    {
+      "symbol": "SST",
+      "session_date": "2026-04-23",
+      "last_price": 3.7,
+      "prev_close": 2.8,
+      "ah_gap_pct": 32.14,
+      "ah_range_pct": 32.25,
+      "ah_volume": 1303788,
+      "ah_dollar_volume": 5129838.62,
+      "ah_score": 82.88,
+      "compression_score": 28.65,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 4.47,
+        "ah_low": 3.38,
+        "ah_last_close": 3.7
+      }
+    },
+    {
+      "symbol": "CAST",
+      "session_date": "2026-04-23",
+      "last_price": 3.15,
+      "prev_close": 2.35,
+      "ah_gap_pct": 34.04,
+      "ah_range_pct": 95.4,
+      "ah_volume": 1675596,
+      "ah_dollar_volume": 4930034.39,
+      "ah_score": 81.81,
+      "compression_score": 24.21,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 3.4,
+        "ah_low": 1.74,
+        "ah_last_close": 3.15
+      }
+    },
+    {
+      "symbol": "SKLZ",
+      "session_date": "2026-04-23",
+      "last_price": 8.81,
+      "prev_close": 3.68,
+      "ah_gap_pct": 139.4,
+      "ah_range_pct": 72.46,
+      "ah_volume": 5213804,
+      "ah_dollar_volume": 59165329.42,
+      "ah_score": 79.07,
+      "compression_score": 12.8,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 13.4,
+        "ah_low": 7.77,
+        "ah_last_close": 8.81
+      }
+    },
+    {
+      "symbol": "IQST",
+      "session_date": "2026-04-23",
+      "last_price": 2.4601,
+      "prev_close": 1.58,
+      "ah_gap_pct": 55.7,
+      "ah_range_pct": 54.55,
+      "ah_volume": 1015688,
+      "ah_dollar_volume": 2478348.26,
+      "ah_score": 78.61,
+      "compression_score": 10.86,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 2.72,
+        "ah_low": 1.76,
+        "ah_last_close": 2.4601
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 250000,
+      "min_gap_pct": 0.0,
+      "min_dollar_volume": 400000.0,
+      "hours_back": 96
+    }
+  }
+}

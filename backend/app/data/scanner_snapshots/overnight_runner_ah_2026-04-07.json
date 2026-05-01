@@ -1,0 +1,114 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-07",
+  "saved_at": "2026-04-08T01:23:32.943914+00:00",
+  "count": 5,
+  "rows": [
+    {
+      "symbol": "MAXN",
+      "session_date": "2026-04-07",
+      "last_price": 1.48,
+      "prev_close": 1.06,
+      "ah_gap_pct": 39.62,
+      "ah_range_pct": 9.63,
+      "ah_volume": 158293,
+      "ah_score": 91.31,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression"
+      ],
+      "extra": {
+        "ah_high": 1.48,
+        "ah_low": 1.35,
+        "ah_last_close": 1.48
+      }
+    },
+    {
+      "symbol": "CETX",
+      "session_date": "2026-04-07",
+      "last_price": 1.1901,
+      "prev_close": 0.7957,
+      "ah_gap_pct": 49.57,
+      "ah_range_pct": 14.66,
+      "ah_volume": 3342180,
+      "ah_score": 84.87,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.33,
+        "ah_low": 1.16,
+        "ah_last_close": 1.1901
+      }
+    },
+    {
+      "symbol": "ADVB",
+      "session_date": "2026-04-07",
+      "last_price": 6.25,
+      "prev_close": 4.42,
+      "ah_gap_pct": 41.4,
+      "ah_range_pct": 10.74,
+      "ah_volume": 116709,
+      "ah_score": 83.9,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 6.7,
+        "ah_low": 6.05,
+        "ah_last_close": 6.25
+      }
+    },
+    {
+      "symbol": "UCAR",
+      "session_date": "2026-04-07",
+      "last_price": 0.875,
+      "prev_close": 0.54,
+      "ah_gap_pct": 62.04,
+      "ah_range_pct": 84.64,
+      "ah_volume": 18948267,
+      "ah_score": 80.21,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.01,
+        "ah_low": 0.547,
+        "ah_last_close": 0.875
+      }
+    },
+    {
+      "symbol": "AIXI",
+      "session_date": "2026-04-07",
+      "last_price": 1.523,
+      "prev_close": 0.8038,
+      "ah_gap_pct": 89.47,
+      "ah_range_pct": 38.19,
+      "ah_volume": 53459069,
+      "ah_score": 78.45,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.99,
+        "ah_low": 1.44,
+        "ah_last_close": 1.523
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 100000,
+      "min_gap_pct": 0.0
+    }
+  }
+}

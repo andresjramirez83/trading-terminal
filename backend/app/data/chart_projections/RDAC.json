@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "symbol": "RDAC",
+  "updated_at": "2026-04-30T01:38:35.994041+00:00",
+  "projections": [
+    {
+      "id": "saved-projection-1777498200-support-prediction-1777498200-1777513115989-dxg9lz",
+      "price": 9.04,
+      "title": "SAVED Support Pred 9.0400",
+      "color": "#3b82f6",
+      "lineStyle": 0,
+      "lineWidth": 2,
+      "createdAt": 1777513115989
+    }
+  ]
+}

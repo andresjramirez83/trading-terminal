@@ -1,0 +1,132 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-03-30",
+  "saved_at": "2026-03-31T02:57:25.042960+00:00",
+  "count": 6,
+  "rows": [
+    {
+      "symbol": "POLA",
+      "session_date": "2026-03-30",
+      "last_price": 2.43,
+      "prev_close": 1.55,
+      "ah_gap_pct": 56.77,
+      "ah_range_pct": 31.05,
+      "ah_volume": 1478232,
+      "ah_score": 92.12,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 2.4899,
+        "ah_low": 1.9,
+        "ah_last_close": 2.43
+      }
+    },
+    {
+      "symbol": "GLND",
+      "session_date": "2026-03-30",
+      "last_price": 10.8,
+      "prev_close": 8.21,
+      "ah_gap_pct": 31.55,
+      "ah_range_pct": 11.24,
+      "ah_volume": 194244,
+      "ah_score": 86.98,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 11.68,
+        "ah_low": 10.5,
+        "ah_last_close": 10.8
+      }
+    },
+    {
+      "symbol": "BFRG",
+      "session_date": "2026-03-30",
+      "last_price": 1.17,
+      "prev_close": 0.5083,
+      "ah_gap_pct": 130.18,
+      "ah_range_pct": 21.9,
+      "ah_volume": 12418119,
+      "ah_score": 84.41,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.28,
+        "ah_low": 1.05,
+        "ah_last_close": 1.17
+      }
+    },
+    {
+      "symbol": "ELAB",
+      "session_date": "2026-03-30",
+      "last_price": 3.3199,
+      "prev_close": 1.67,
+      "ah_gap_pct": 98.8,
+      "ah_range_pct": 13.93,
+      "ah_volume": 1250592,
+      "ah_score": 82.27,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 3.68,
+        "ah_low": 3.23,
+        "ah_last_close": 3.3199
+      }
+    },
+    {
+      "symbol": "JCSE",
+      "session_date": "2026-03-30",
+      "last_price": 1.52,
+      "prev_close": 1.0,
+      "ah_gap_pct": 52.0,
+      "ah_range_pct": 26.24,
+      "ah_volume": 1147071,
+      "ah_score": 82.05,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 1.78,
+        "ah_low": 1.41,
+        "ah_last_close": 1.52
+      }
+    },
+    {
+      "symbol": "ASTC",
+      "session_date": "2026-03-30",
+      "last_price": 4.13,
+      "prev_close": 2.37,
+      "ah_gap_pct": 74.26,
+      "ah_range_pct": 43.92,
+      "ah_volume": 7768286,
+      "ah_score": 78.9,
+      "notes": [
+        "AH strong",
+        "AH range"
+      ],
+      "extra": {
+        "ah_high": 5.8,
+        "ah_low": 4.03,
+        "ah_last_close": 4.13
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 40,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 100000,
+      "min_gap_pct": 0.0
+    }
+  }
+}

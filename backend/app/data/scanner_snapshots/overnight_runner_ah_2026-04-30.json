@@ -1,0 +1,146 @@
+{
+  "scanner_id": "overnight_runner",
+  "session": "afterhours",
+  "trade_date": "2026-04-30",
+  "saved_at": "2026-05-01T00:32:45.899692+00:00",
+  "count": 5,
+  "rows": [
+    {
+      "symbol": "VLN",
+      "session_date": "2026-04-30",
+      "last_price": 2.29,
+      "prev_close": 1.51,
+      "ah_gap_pct": 51.66,
+      "ah_range_pct": 11.07,
+      "ah_volume": 745822,
+      "ah_dollar_volume": 1654560.22,
+      "ah_score": 93.02,
+      "compression_score": 79.76,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 2.3213,
+        "ah_low": 2.09,
+        "ah_last_close": 2.29
+      }
+    },
+    {
+      "symbol": "XRX",
+      "session_date": "2026-04-30",
+      "last_price": 2.33,
+      "prev_close": 1.57,
+      "ah_gap_pct": 48.41,
+      "ah_range_pct": 9.09,
+      "ah_volume": 956346,
+      "ah_dollar_volume": 2184859.51,
+      "ah_score": 90.9,
+      "compression_score": 82.57,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH compression",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 2.3999,
+        "ah_low": 2.2,
+        "ah_last_close": 2.33
+      }
+    },
+    {
+      "symbol": "ISPC",
+      "session_date": "2026-04-30",
+      "last_price": 6.88,
+      "prev_close": 4.27,
+      "ah_gap_pct": 61.12,
+      "ah_range_pct": 43.92,
+      "ah_volume": 1054739,
+      "ah_dollar_volume": 6803160.43,
+      "ah_score": 90.44,
+      "compression_score": 60.18,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 7.34,
+        "ah_low": 5.1,
+        "ah_last_close": 6.88
+      }
+    },
+    {
+      "symbol": "AIOS",
+      "session_date": "2026-04-30",
+      "last_price": 13.35,
+      "prev_close": 8.81,
+      "ah_gap_pct": 51.53,
+      "ah_range_pct": 42.45,
+      "ah_volume": 112448,
+      "ah_dollar_volume": 1495958.0,
+      "ah_score": 87.12,
+      "compression_score": 46.93,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 15.0,
+        "ah_low": 10.53,
+        "ah_last_close": 13.35
+      }
+    },
+    {
+      "symbol": "HCAI",
+      "session_date": "2026-04-30",
+      "last_price": 10.61,
+      "prev_close": 5.47,
+      "ah_gap_pct": 93.97,
+      "ah_range_pct": 18.12,
+      "ah_volume": 841159,
+      "ah_dollar_volume": 9051676.93,
+      "ah_score": 84.02,
+      "compression_score": 33.41,
+      "notes": [
+        "AH strong",
+        "AH range",
+        "AH liquidity"
+      ],
+      "runner_type": "overnight",
+      "extra": {
+        "ah_high": 11.8,
+        "ah_low": 9.99,
+        "ah_last_close": 10.61
+      }
+    }
+  ],
+  "meta": {
+    "filters": {
+      "max_symbols": 60,
+      "min_price": 0.5,
+      "max_price": 20.0,
+      "min_volume": 100000,
+      "min_gap_pct": 0.0,
+      "min_dollar_volume": 100000.0,
+      "hours_back": 96
+    },
+    "reject_counts": {
+      "checked": 42,
+      "no_afterhours_bars": 12,
+      "price": 19,
+      "ah_volume": 5,
+      "ah_gap_pct": 1,
+      "ah_dollar_volume": 0,
+      "passed": 5
+    }
+  }
+}
