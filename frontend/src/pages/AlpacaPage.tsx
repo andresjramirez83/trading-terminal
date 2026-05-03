@@ -5,6 +5,7 @@ import ChartPanel, { type OverlayVisibility, type TrendlineControlAction } from 
 import GlobalHotkeys from "../components/GlobalHotkeys";
 import QuickOrderModal, { type OrderTemplate } from "../components/QuickOrderModal";
 import QuickAlertModal from "../components/QuickAlertModal";
+import IfvgHtfScannerPanel from "../components/IfvgHtfScannerPanel";
 import {
   fetchAlpacaAccount,
   fetchAlpacaOrders,
@@ -1973,6 +1974,16 @@ function AlpacaPage() {
                 </button>
               );
             })}
+          </div>
+
+
+
+          <div style={{ marginTop: 18 }}>
+            <IfvgHtfScannerPanel
+              selectedSymbol={symbol}
+              onSelectSymbol={handleScannerSelectSymbol}
+              compact
+            />
           </div>
 
           <div style={{ marginTop: 18 }}>

@@ -51,6 +51,19 @@ export type ScannerDefinition = {
 
 export type ScannerV2Row = {
   symbol: string;
+  timeframe?: string;
+  price?: number | null;
+  volume?: number | null;
+  ifvg_score?: number | null;
+  ifvg_status?: string | null;
+  ifvg_phase?: string | null;
+  ifvg_direction?: string | null;
+  zone_low?: number | null;
+  zone_high?: number | null;
+  distance_to_zone_pct?: number | null;
+  rvol?: number | null;
+  zone_width_pct?: number | null;
+  age_bars?: number | null;
   last_price: number | null;
   prev_close: number | null;
   ah_gap_pct?: number | null;

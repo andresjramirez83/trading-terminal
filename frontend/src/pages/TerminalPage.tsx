@@ -6,6 +6,7 @@ import ChartPanel, {
   type TrendlineSnapMode,
 } from "../components/ChartPanel";
 import ScannerPanel from "../components/ScannerPanel";
+import IfvgHtfScannerPanel from "../components/IfvgHtfScannerPanel";
 import GlobalHotkeys from "../components/GlobalHotkeys";
 import QuickAlertModal from "../components/QuickAlertModal";
 import QuickOrderModal, { type OrderTemplate } from "../components/QuickOrderModal";
@@ -1113,6 +1114,14 @@ export default function TerminalPage() {
               selectedSymbol={scannerSelectedSymbol}
               onSelectSymbol={handleScannerSelectSymbol}
               onWatchlistChange={handleScannerWatchlistChange}
+            />
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <IfvgHtfScannerPanel
+              selectedSymbol={symbolUpper}
+              onSelectSymbol={handleScannerSelectSymbol}
+              compact
             />
           </div>
 

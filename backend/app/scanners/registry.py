@@ -1,10 +1,12 @@
 from app.scanners.overnight_runner import OvernightRunnerScanner
+from app.scanners.ifvg_htf_scanner import IFVGHTFScanner
 
 
 class ScannerRegistry:
     def __init__(self):
         scanners = [
             OvernightRunnerScanner(),
+            IFVGHTFScanner(),
         ]
         self.scanners = {scanner.id: scanner for scanner in scanners}
 

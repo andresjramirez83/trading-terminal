@@ -280,6 +280,18 @@ export async function runScannerV2(params: ScannerRefreshParams & { scanner_id: 
   return parseJson<ScannerV2Response>(res);
 }
 
+export async function runIfvgHtfScanner(params: ScannerRefreshParams = {}): Promise<ScannerV2Response> {
+  return runScannerV2({
+    scanner_id: "ifvg_htf",
+    workflow: "combined",
+    max_symbols: 25,
+    min_price: 0.5,
+    max_price: 20,
+    min_volume: 250000,
+    ...params,
+  });
+}
+
 /* =========================
    BACKEND ALERTS
    ========================= */
