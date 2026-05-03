@@ -257,6 +257,12 @@ class BackendAlertLoopConfig(BaseModel):
     require_vwap_reclaim: bool = False
     breakout_buffer_pct: float = 0.0005
     structure_window: int = 12
+    # Smart alert scaling keeps alerts fast during active sessions and light overnight.
+    smart_scaling_enabled: bool = True
+    use_scanner_symbols_when_empty: bool = True
+    max_dynamic_symbols: int = 12
+    min_poll_seconds: int = 5
+    max_poll_seconds: int = 45
 
 
 class BackendAlertLoopUpdate(BaseModel):
@@ -280,6 +286,11 @@ class BackendAlertLoopUpdate(BaseModel):
     require_vwap_reclaim: Optional[bool] = None
     breakout_buffer_pct: Optional[float] = None
     structure_window: Optional[int] = None
+    smart_scaling_enabled: Optional[bool] = None
+    use_scanner_symbols_when_empty: Optional[bool] = None
+    max_dynamic_symbols: Optional[int] = None
+    min_poll_seconds: Optional[int] = None
+    max_poll_seconds: Optional[int] = None
 
 
 class InstantChartAlertPayload(BaseModel):
@@ -363,6 +374,11 @@ backend_alert_config = BackendAlertLoopConfig(
     require_vwap_reclaim=os.getenv("BACKEND_ALERTS_REQUIRE_VWAP_RECLAIM", "false").strip().lower() in {"1", "true", "yes", "on"},
     breakout_buffer_pct=float(os.getenv("BACKEND_ALERTS_BREAKOUT_BUFFER_PCT", "0.0005") or "0.0005"),
     structure_window=max(8, int(os.getenv("BACKEND_ALERTS_STRUCTURE_WINDOW", "12") or "12")),
+    smart_scaling_enabled=os.getenv("BACKEND_ALERTS_SMART_SCALING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+    use_scanner_symbols_when_empty=os.getenv("BACKEND_ALERTS_USE_SCANNER_SYMBOLS_WHEN_EMPTY", "true").strip().lower() in {"1", "true", "yes", "on"},
+    max_dynamic_symbols=max(1, int(os.getenv("BACKEND_ALERTS_MAX_DYNAMIC_SYMBOLS", "12") or "12")),
+    min_poll_seconds=max(5, int(os.getenv("BACKEND_ALERTS_MIN_POLL_SECONDS", "5") or "5")),
+    max_poll_seconds=max(10, int(os.getenv("BACKEND_ALERTS_MAX_POLL_SECONDS", "45") or "45")),
 )
 
 backend_alert_task: Optional[asyncio.Task] = None
@@ -1153,6 +1169,76 @@ def mark_backend_alert_sent(signal: dict) -> None:
     backend_alert_last_sent[alert_cooldown_key(signal)] = datetime.now(timezone.utc)
 
 
+
+def _current_et_session_label() -> str:
+    now_et = datetime.now(ET)
+    hhmm = now_et.hour * 100 + now_et.minute
+    if 400 <= hhmm < 930:
+        return "premarket"
+    if 930 <= hhmm < 1600:
+        return "regular"
+    if 1600 <= hhmm < 2000:
+        return "afterhours"
+    return "closed"
+
+
+def get_dynamic_alert_symbols() -> List[str]:
+    """Return the alert symbols to scan without falling back to hardcoded defaults.
+
+    Manual backend-alert symbols win. If that list is empty, optionally use the
+    latest scanner cache rows. This lets alerts follow the scanner while staying
+    light enough for the DigitalOcean server.
+    """
+    manual = _normalize_symbol_list(backend_alert_config.symbols)
+    if manual:
+        return manual[: max(1, int(backend_alert_config.max_dynamic_symbols))]
+
+    if not backend_alert_config.use_scanner_symbols_when_empty:
+        return []
+
+    rows = []
+    try:
+        rows = list((scanner_cache or {}).get("rows") or [])
+    except Exception:
+        rows = []
+
+    symbols: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_symbol = row.get("symbol") or row.get("ticker")
+        symbol = "".join(ch for ch in str(raw_symbol or "").upper().strip() if ch.isalpha() or ch == ".")
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+        if len(symbols) >= max(1, int(backend_alert_config.max_dynamic_symbols)):
+            break
+    return symbols
+
+
+def get_effective_alert_poll_seconds(symbol_count: int) -> int:
+    """Smart scaling: fast when it matters, slower when the market is quiet."""
+    base = max(5, int(backend_alert_config.poll_seconds))
+    if not backend_alert_config.smart_scaling_enabled:
+        return base
+
+    session = _current_et_session_label()
+    if session == "regular":
+        target = min(base, 5)
+    elif session in {"premarket", "afterhours"}:
+        target = min(base, 10)
+    else:
+        target = max(base, 30)
+
+    # Keep the backend smooth if the scanner returns a large active list.
+    if symbol_count >= 20:
+        target = max(target, 15)
+    elif symbol_count >= 12:
+        target = max(target, 10)
+
+    low = max(5, int(backend_alert_config.min_poll_seconds))
+    high = max(low, int(backend_alert_config.max_poll_seconds))
+    return max(low, min(high, int(target)))
+
 async def run_backend_alerts_loop() -> None:
     global backend_alert_last_check, backend_alert_last_error, backend_alert_last_results, backend_alert_last_alert
 
@@ -1164,16 +1250,19 @@ async def run_backend_alerts_loop() -> None:
                 await asyncio.sleep(1)
                 continue
 
-            if not backend_alert_config.symbols:
+            active_alert_symbols = get_dynamic_alert_symbols()
+            effective_poll_seconds = get_effective_alert_poll_seconds(len(active_alert_symbols))
+
+            if not active_alert_symbols:
                 backend_alert_last_results = []
                 backend_alert_last_check = datetime.now(timezone.utc)
                 backend_alert_last_error = None
-                await asyncio.sleep(max(5, backend_alert_config.poll_seconds))
+                await asyncio.sleep(effective_poll_seconds)
                 continue
 
             cycle_results: List[Dict[str, Any]] = []
 
-            for raw_symbol in backend_alert_config.symbols:
+            for raw_symbol in active_alert_symbols:
                 symbol = raw_symbol.strip().upper()
                 if not symbol:
                     continue
@@ -1291,7 +1380,7 @@ async def run_backend_alerts_loop() -> None:
             print(f"[backend-alert-loop] error: {exc}", flush=True)
             traceback.print_exc()
 
-        await asyncio.sleep(max(5, backend_alert_config.poll_seconds))
+        await asyncio.sleep(get_effective_alert_poll_seconds(len(get_dynamic_alert_symbols())))
 
 
 def start_backend_alert_task_if_needed() -> None:
@@ -1544,6 +1633,9 @@ def health():
             "enabled": backend_alert_config.enabled,
             "running": bool(backend_alert_task and not backend_alert_task.done()),
             "symbols": backend_alert_config.symbols,
+            "effective_symbols": get_dynamic_alert_symbols(),
+            "smart_scaling_enabled": backend_alert_config.smart_scaling_enabled,
+            "effective_poll_seconds": get_effective_alert_poll_seconds(len(get_dynamic_alert_symbols())),
             "timeframe": backend_alert_config.timeframe,
             "timeframes": normalize_alert_timeframes(backend_alert_config.timeframes, backend_alert_config.timeframe),
             "confluence_mode": backend_alert_config.confluence_mode,
@@ -1599,6 +1691,9 @@ def backend_alerts_status():
         "enabled": backend_alert_config.enabled,
         "running": bool(backend_alert_task and not backend_alert_task.done()),
         "symbols": backend_alert_config.symbols,
+        "effective_symbols": get_dynamic_alert_symbols(),
+        "smart_scaling_enabled": backend_alert_config.smart_scaling_enabled,
+        "effective_poll_seconds": get_effective_alert_poll_seconds(len(get_dynamic_alert_symbols())),
         "timeframe": backend_alert_config.timeframe,
         "timeframes": normalize_alert_timeframes(backend_alert_config.timeframes, backend_alert_config.timeframe),
         "confluence_mode": backend_alert_config.confluence_mode,
@@ -1606,6 +1701,13 @@ def backend_alerts_status():
         "config": {
             "enabled": backend_alert_config.enabled,
             "symbols": backend_alert_config.symbols,
+            "effective_symbols": get_dynamic_alert_symbols(),
+            "smart_scaling_enabled": backend_alert_config.smart_scaling_enabled,
+            "use_scanner_symbols_when_empty": backend_alert_config.use_scanner_symbols_when_empty,
+            "max_dynamic_symbols": backend_alert_config.max_dynamic_symbols,
+            "min_poll_seconds": backend_alert_config.min_poll_seconds,
+            "max_poll_seconds": backend_alert_config.max_poll_seconds,
+            "effective_poll_seconds": get_effective_alert_poll_seconds(len(get_dynamic_alert_symbols())),
             "timeframe": backend_alert_config.timeframe,
             "timeframes": normalize_alert_timeframes(backend_alert_config.timeframes, backend_alert_config.timeframe),
             "confluence_mode": backend_alert_config.confluence_mode,
@@ -1777,6 +1879,16 @@ async def backend_alerts_config(update: BackendAlertLoopUpdate):
         backend_alert_config.breakout_buffer_pct = float(update.breakout_buffer_pct)
     if update.structure_window is not None:
         backend_alert_config.structure_window = max(8, int(update.structure_window))
+    if update.smart_scaling_enabled is not None:
+        backend_alert_config.smart_scaling_enabled = bool(update.smart_scaling_enabled)
+    if update.use_scanner_symbols_when_empty is not None:
+        backend_alert_config.use_scanner_symbols_when_empty = bool(update.use_scanner_symbols_when_empty)
+    if update.max_dynamic_symbols is not None:
+        backend_alert_config.max_dynamic_symbols = max(1, min(50, int(update.max_dynamic_symbols)))
+    if update.min_poll_seconds is not None:
+        backend_alert_config.min_poll_seconds = max(5, int(update.min_poll_seconds))
+    if update.max_poll_seconds is not None:
+        backend_alert_config.max_poll_seconds = max(backend_alert_config.min_poll_seconds, int(update.max_poll_seconds))
 
     start_backend_alert_task_if_needed()
     return backend_alerts_status()
