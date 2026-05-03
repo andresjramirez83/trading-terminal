@@ -357,6 +357,164 @@ def aggressive_buyers_features(bars: List[Dict[str, float]], lookback_bars: int)
 
 
 # -----------------------------
+# IFVG source-of-truth companion logic
+# Mirrors the existing ChartPanel IFVG rules so backend alerts follow the same zone.
+# -----------------------------
+
+def is_strict_bearish_fvg_candidate(bars: List[Dict[str, float]], index: int) -> Optional[Dict[str, float]]:
+    if index < 2 or index >= len(bars):
+        return None
+    first = bars[index - 2]
+    middle = bars[index - 1]
+    third = bars[index]
+
+    gap_top = safe_float(first.get("l"))
+    gap_bottom = safe_float(third.get("h"))
+    if gap_top <= gap_bottom:
+        return None
+
+    middle_range = candle_range(middle)
+    middle_body = candle_body(middle)
+    middle_body_ratio = middle_body / middle_range if middle_range > 0 else 0.0
+    is_bearish_displacement = middle["c"] < middle["o"]
+
+    lookback_start = max(0, index - 16)
+    lookback = bars[lookback_start:max(lookback_start, index - 1)]
+    avg_range = mean([candle_range(b) for b in lookback])
+    avg_volume = mean([b["v"] for b in lookback])
+    mid = (gap_top + gap_bottom) / 2.0
+    gap_pct = ((gap_top - gap_bottom) / mid) * 100.0 if mid > 0 else 0.0
+
+    has_real_gap = gap_pct >= 0.04
+    has_strong_body = middle_body_ratio >= 0.55
+    has_range_expansion = avg_range <= 0 or middle_range >= avg_range * 1.08
+    has_useful_volume = avg_volume <= 0 or middle["v"] >= avg_volume * 0.85
+
+    if not (is_bearish_displacement and has_real_gap and has_strong_body and has_range_expansion and has_useful_volume):
+        return None
+
+    return {"top": gap_top, "bottom": gap_bottom, "gap_pct": gap_pct}
+
+
+def ifvg_features(bars: List[Dict[str, float]]) -> Dict[str, Any]:
+    if len(bars) < 5:
+        return {"valid": False, "score": 0.0, "state": "none"}
+
+    for fvg_index in range(len(bars) - 1, 1, -1):
+        candidate = is_strict_bearish_fvg_candidate(bars, fvg_index)
+        if not candidate:
+            continue
+
+        top = candidate["top"]
+        bottom = candidate["bottom"]
+        break_index = -1
+        has_tested = False
+        status = "bearish"
+
+        for i in range(fvg_index + 1, len(bars)):
+            bar = bars[i]
+            wick_touches = bar["h"] >= bottom and bar["l"] <= top
+            body_touches = max(bar["o"], bar["c"]) >= bottom and min(bar["o"], bar["c"]) <= top
+            if wick_touches or body_touches:
+                has_tested = True
+            if bar["c"] > top:
+                status = "confirmed_bull_ifvg"
+                break_index = i
+                break
+
+        if break_index >= 0:
+            failed_index = None
+            for i in range(break_index + 1, len(bars)):
+                if bars[i]["c"] < bottom:
+                    failed_index = i
+                    break
+            if failed_index is not None:
+                latest_failure = failed_index >= len(bars) - 2
+                return {
+                    "valid": True,
+                    "state": "failed",
+                    "setup": "ifvg_failure",
+                    "triggered": latest_failure,
+                    "score": 90.0 if latest_failure else 0.0,
+                    "top": round(top, 4),
+                    "bottom": round(bottom, 4),
+                    "break_index": break_index,
+                    "failed_index": failed_index,
+                }
+
+        if status != "confirmed_bull_ifvg" and has_tested:
+            status = "testing"
+
+        if status != "confirmed_bull_ifvg":
+            continue
+
+        latest = bars[-1]
+        zone_height = max(top - bottom, top * 0.001, 0.0001)
+        retest_index = None
+        retest_hold = False
+        for i in range(break_index + 1, len(bars)):
+            bar = bars[i]
+            retests_zone = bar["l"] <= top and bar["h"] >= bottom
+            holds_zone = bar["c"] >= bottom
+            if retests_zone and holds_zone:
+                retest_index = i
+                retest_hold = bar["c"] >= top
+                break
+
+        post_retest = bars[(retest_index + 1):] if retest_index is not None else []
+        bounce_confirmed = False
+        if retest_index is not None:
+            bounce_confirmed = any(b["c"] > top and b["h"] > top + zone_height * 0.35 for b in post_retest)
+            bounce_confirmed = bounce_confirmed or latest["c"] > top + zone_height * 0.25
+
+        retest_active = retest_index is not None or (latest["l"] <= top and latest["c"] >= bottom)
+        weakening = latest["c"] < top or any(b["l"] <= top + zone_height * 0.25 for b in bars[break_index + 1:])
+
+        prior = bars[max(0, fvg_index - 20):max(fvg_index, break_index)]
+        prior_vol = mean([b["v"] for b in prior if b["v"] > 0])
+        after = bars[break_index + 1:]
+        volume_score = 15.0 if prior_vol <= 0 or max([b["v"] for b in after] or [0.0]) >= prior_vol * 1.25 else 0.0
+        impulse_score = 20.0 if bars[break_index]["c"] > top + zone_height * 0.35 else 8.0
+        hold_score = 20.0 if latest["c"] > top else 8.0 if latest["c"] >= bottom else 0.0
+        retest_score = 20.0 if retest_hold else 12.0 if retest_active else 0.0
+        bounce_score = 25.0 if bounce_confirmed else 0.0
+        score = clamp(impulse_score + hold_score + retest_score + bounce_score + volume_score, 0.0, 100.0)
+
+        if bounce_confirmed:
+            setup = "ifvg_bounce_confirmed"
+            state = "bounce_confirmed"
+            triggered = True
+        elif retest_active:
+            setup = "ifvg_retest"
+            state = "retest_active" if latest["c"] >= top else "weakening"
+            triggered = True
+        elif weakening:
+            setup = "ifvg_retest"
+            state = "pullback_watch"
+            triggered = False
+        else:
+            setup = "ifvg_retest"
+            state = "pullback_watch"
+            triggered = False
+
+        return {
+            "valid": True,
+            "state": state,
+            "setup": setup,
+            "triggered": triggered,
+            "score": round(score, 2),
+            "top": round(top, 4),
+            "bottom": round(bottom, 4),
+            "break_index": break_index,
+            "retest_index": retest_index,
+            "retest_hold": retest_hold,
+            "bounce_confirmed": bounce_confirmed,
+        }
+
+    return {"valid": False, "score": 0.0, "state": "none"}
+
+
+# -----------------------------
 # Main evaluator
 # -----------------------------
 
@@ -390,6 +548,7 @@ def evaluate_symbol_signal(
     breakout = breakout_features(bars, comp.get("zone_high"), cfg.breakout_buffer_pct)
     fdb = failed_breakdown_features(bars, cfg.lookback_bars)
     buyers = aggressive_buyers_features(bars, cfg.lookback_bars)
+    ifvg = ifvg_features(bars)
 
     setup_scores: Dict[str, float] = {
         "compression_abs_breakout": (
@@ -421,6 +580,9 @@ def evaluate_symbol_signal(
             + vwapf["score"] * 0.15
             + buyers["score"] * 0.10
         ),
+        "ifvg_retest": ifvg["score"] if ifvg.get("setup") == "ifvg_retest" else 0.0,
+        "ifvg_bounce_confirmed": ifvg["score"] if ifvg.get("setup") == "ifvg_bounce_confirmed" else 0.0,
+        "ifvg_failure": ifvg["score"] if ifvg.get("setup") == "ifvg_failure" else 0.0,
     }
 
     if cfg.require_vwap_reclaim:
@@ -436,6 +598,9 @@ def evaluate_symbol_signal(
         "failed_breakdown_reclaim": fdb.get("triggered"),
         "aggressive_buyers_reclaim": buyers.get("triggered") and bool(vwapf.get("close_above")),
         "bullish_structure_shift": structure.get("bullish_shift") and bool(vwapf.get("close_above")),
+        "ifvg_retest": ifvg.get("setup") == "ifvg_retest" and bool(ifvg.get("triggered")),
+        "ifvg_bounce_confirmed": ifvg.get("setup") == "ifvg_bounce_confirmed" and bool(ifvg.get("triggered")),
+        "ifvg_failure": ifvg.get("setup") == "ifvg_failure" and bool(ifvg.get("triggered")),
     }
 
     confirmed = best_score >= cfg.min_score_confirmed and raw_triggers.get(best_setup, False)
@@ -459,6 +624,7 @@ def evaluate_symbol_signal(
         f"abs={absf['score']:.1f}",
         f"rvol={rvol.get('rvol', 0.0):.2f}",
         f"vwap={'yes' if vwapf.get('reclaimed') else 'no'}",
+        f"ifvg={ifvg.get('state', 'none')}",
     ]
 
     signal_time = datetime.now(timezone.utc).isoformat()
@@ -501,6 +667,7 @@ def evaluate_symbol_signal(
             "breakout": breakout,
             "failed_breakdown": fdb,
             "aggressive_buyers": buyers,
+            "ifvg": ifvg,
         },
         "state": state,
         "message": build_alert_message(symbol, timeframe, best_setup if triggered else None, phase, best_score, bars[-1]["c"]),
@@ -523,6 +690,9 @@ def build_alert_message(
         "failed_breakdown_reclaim": "Failed breakdown reclaim",
         "aggressive_buyers_reclaim": "Aggressive buyers reclaim",
         "bullish_structure_shift": "Bullish structure shift",
+        "ifvg_retest": "IFVG retest",
+        "ifvg_bounce_confirmed": "IFVG bounce confirmed",
+        "ifvg_failure": "IFVG failure",
     }
     pretty = title_map.get(setup, setup)
     return (

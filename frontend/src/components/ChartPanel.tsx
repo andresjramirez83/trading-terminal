@@ -10,11 +10,14 @@ import {
   createChart,
   type IChartApi,
   type ISeriesApi,
+  type Logical,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { fetchBars, fetchLastTrade } from "../services/api";
+import { fetchBars, fetchLastTrade, sendInstantChartAlert } from "../services/api";
 import { marketSocket } from "../services/marketSocket";
+import { API_BASE_URL } from "../config";
+import { API_BASE } from "../services/api";
 import type { Candle } from "../types/market";
 
 export type OverlayVisibility = {
@@ -36,6 +39,7 @@ export type OverlayVisibility = {
   atrExpansionCandles?: boolean;
   resistanceBreakoutConfirm?: boolean;
   trendlineCloseAlerts?: boolean;
+  fvgFlip?: boolean;
 };
 
 export type TrendlineControlAction =
@@ -55,11 +59,15 @@ type Stats = {
   barsCount: number;
 };
 
+export type ChartVisibleLogicalRange = { from: number; to: number };
+
 type Props = {
   symbol: string;
   timeframe: string;
   visibility: OverlayVisibility;
   onStatsUpdate: (stats: Stats) => void;
+  initialVisibleLogicalRange?: ChartVisibleLogicalRange | null;
+  onVisibleLogicalRangeChange?: (range: ChartVisibleLogicalRange) => void;
   trendlineAction?: TrendlineControlAction;
   trendlineSnapMode?: TrendlineSnapMode;
   onTrendlineActionHandled?: () => void;
@@ -73,6 +81,8 @@ type Props = {
   lookback?: string;
   loadDelayMs?: number;
   enableLiveStream?: boolean;
+  legendDensity?: "full" | "compact" | "minimal";
+  compactTools?: boolean;
 
   // Optional order-line layer. Parent pages can pass Alpaca/open order objects here.
   // Supports straight buy/sell limit lines, bracket entry lines, take-profit lines, and stop-loss lines.
@@ -127,6 +137,7 @@ type NormalizedOrderLine = {
   lineId: string;
   orderId: string;
   order: ChartOrder;
+  brokerOrder?: ChartOrder;
   kind: ChartOrderLineKind;
   template: ChartOrderTemplate | string;
   side: string;
@@ -185,6 +196,90 @@ type RectOverlay = {
   direction: CompressionDirection;
 };
 
+type FvgFlipStatus = "bearish" | "testing" | "confirmed_bull_ifvg" | "failed_bull_ifvg";
+type FvgTradeState = "forming" | "pullback_watch" | "retest_active" | "bounce_confirmed" | "weakening";
+type FvgQualityLabel = "WEAK" | "MEDIUM" | "STRONG";
+
+type FvgQuality = {
+  label: FvgQualityLabel;
+  score: number;
+  color: string;
+  bg: string;
+  border: string;
+  glow: string;
+  setupLabel?: string;
+  baseLabel?: FvgQualityLabel;
+  baseScore?: number;
+  confirmationScore?: number;
+};
+
+const DEFAULT_FVG_QUALITY: FvgQuality = {
+  label: "WEAK",
+  score: 0,
+  color: "#fecaca",
+  bg: "rgba(127,29,29,0.90)",
+  border: "1px solid rgba(252,165,165,0.70)",
+  glow: "0 0 14px rgba(239,68,68,0.30)",
+};
+
+type FvgFlipZone = {
+  startTime: UTCTimestamp;
+  endTime: UTCTimestamp;
+  startIndex: number;
+  endIndex: number;
+  top: number;
+  bottom: number;
+  status: FvgFlipStatus;
+  label: string;
+  breakTime?: UTCTimestamp;
+  breakIndex?: number;
+  breakHigh?: number;
+  breakLow?: number;
+  quality?: FvgQuality;
+  retestTime?: UTCTimestamp;
+  retestIndex?: number;
+  retestHigh?: number;
+  retestLow?: number;
+  retestClose?: number;
+  retestLabel?: string;
+  tradeState?: FvgTradeState;
+  tradeStateLabel?: string;
+  tradeStateBg?: string;
+  tradeStateBorder?: string;
+  tradeStateColor?: string;
+  target1?: number;
+  target2?: number;
+};
+
+type FvgTargetOverlay = {
+  y: number;
+  label: string;
+  price: number;
+  lineLeft: number;
+  lineWidth: number;
+  labelLeft: number;
+};
+
+type FvgFlipOverlay = {
+  left: number;
+  width: number;
+  top: number;
+  height: number;
+  label: string;
+  status: FvgFlipStatus;
+  topPrice: number;
+  bottomPrice: number;
+  quality?: FvgQuality;
+  breakCandle?: { left: number; width: number; top: number; height: number; label: string; quality?: FvgQuality };
+  retest?: { left: number; top: number; label: string; price: number; quality?: FvgQuality };
+  tradeState?: FvgTradeState;
+  tradeStateLabel?: string;
+  tradeStateBg?: string;
+  tradeStateBorder?: string;
+  tradeStateColor?: string;
+  targets: FvgTargetOverlay[];
+};
+
 type MarkerOverlay = {
   left: number;
   top: number;
@@ -214,12 +309,22 @@ type OrderLineOverlay = {
   lineId: string;
   orderId: string;
   top: number;
+  labelTop: number;
   price: number;
   label: string;
   detail: string;
   color: string;
   order: ChartOrder;
   line: NormalizedOrderLine;
+};
+
+type BracketZoneOverlay = {
+  orderId: string;
+  rewardTop: number;
+  rewardHeight: number;
+  riskTop: number;
+  riskHeight: number;
+  rr: number;
 };
 
 type SessionKind = "premarket" | "regular" | "afterhours" | "overnight";
@@ -396,7 +501,7 @@ type StoredProjectionPriceLine = {
 
 const PROJECTION_STORAGE_VERSION = 1;
 const LOCAL_PROJECTION_STORAGE_KEY = "trading_terminal_saved_projections_v1";
-const PROJECTION_SYNC_API_BASE = "http://127.0.0.1:8000";
+const PROJECTION_SYNC_API_BASE = API_BASE || API_BASE_URL;
 
 type LineVisibilityState = {
   pmh: boolean;
@@ -415,6 +520,7 @@ type LineVisibilityState = {
   closeAbovePrevCloseDots: boolean;
   atrExpansionCandles: boolean;
   resistanceBreakoutConfirm: boolean;
+  fvgFlip: boolean;
 };
 
 type ChartFunctionId =
@@ -450,6 +556,8 @@ type OrderDragState = {
   startY: number;
   latestY: number;
   hasMoved: boolean;
+  overlayEl: HTMLDivElement | null;
+  priceEl: HTMLSpanElement | null;
 };
 
 type TrendlineAlertKind =
@@ -575,6 +683,414 @@ function calcVWAP(bars: Candle[]): number[] {
     cumulativeV += bar.volume;
     return cumulativeV > 0 ? cumulativePV / cumulativeV : 0;
   });
+}
+
+function isSwingHigh(bars: Candle[], index: number): boolean {
+  if (index <= 0 || index >= bars.length - 1) return false;
+  return bars[index].high >= bars[index - 1].high && bars[index].high >= bars[index + 1].high;
+}
+
+function trueRange(current: Candle, previous?: Candle): number {
+  const high = Number(current.high);
+  const low = Number(current.low);
+  const prevClose = previous != null ? Number(previous.close) : NaN;
+  if (!Number.isFinite(high) || !Number.isFinite(low)) return 0;
+  if (!Number.isFinite(prevClose)) return Math.max(0, high - low);
+  return Math.max(
+    Math.max(0, high - low),
+    Math.abs(high - prevClose),
+    Math.abs(low - prevClose),
+  );
+}
+
+function averageTrueRangeBefore(bars: Candle[], index: number, length = 14): number {
+  const start = Math.max(1, index - length);
+  const ranges: number[] = [];
+  for (let i = start; i < index; i += 1) {
+    const tr = trueRange(bars[i], bars[i - 1]);
+    if (Number.isFinite(tr) && tr > 0) ranges.push(tr);
+  }
+  return average(ranges);
+}
+
+function volumeZScoreBefore(bars: Candle[], index: number, length = 20): number {
+  const start = Math.max(0, index - length);
+  const volumes = bars
+    .slice(start, index)
+    .map((bar) => Number(bar.volume) || 0)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const currentVolume = Number(bars[index]?.volume) || 0;
+  if (volumes.length < 5 || currentVolume <= 0) return 0;
+  const mean = average(volumes);
+  const variance = average(volumes.map((value) => Math.pow(value - mean, 2)));
+  const std = Math.sqrt(Math.max(variance, 0));
+  if (std <= 0) return currentVolume > mean ? 1 : 0;
+  return (currentVolume - mean) / std;
+}
+
+function findLastConfirmedSwingHighBefore(bars: Candle[], endIndex: number, lookback = 45, strength = 2): number | null {
+  const start = Math.max(strength, endIndex - lookback);
+  const lastCandidate = Math.min(endIndex - strength - 1, bars.length - strength - 1);
+
+  for (let i = lastCandidate; i >= start; i -= 1) {
+    const currentHigh = Number(bars[i]?.high);
+    if (!Number.isFinite(currentHigh)) continue;
+
+    let confirmed = true;
+    for (let offset = 1; offset <= strength; offset += 1) {
+      const leftHigh = Number(bars[i - offset]?.high);
+      const rightHigh = Number(bars[i + offset]?.high);
+      if (currentHigh < leftHigh || currentHigh < rightHigh) {
+        confirmed = false;
+        break;
+      }
+    }
+
+    if (confirmed) return currentHigh;
+  }
+
+  return null;
+}
+
+
+function isStrictBearishFvgCandidate(bars: Candle[], index: number): { top: number; bottom: number } | null {
+  if (index < 2 || index >= bars.length) return null;
+
+  const first = bars[index - 2];
+  const middle = bars[index - 1];
+  const third = bars[index];
+  if (!first || !middle || !third) return null;
+
+  const gapTop = Number(first.low);
+  const gapBottom = Number(third.high);
+  if (!Number.isFinite(gapTop) || !Number.isFinite(gapBottom) || gapTop <= gapBottom) return null;
+
+  const middleOpen = Number(middle.open);
+  const middleClose = Number(middle.close);
+  const middleHigh = Number(middle.high);
+  const middleLow = Number(middle.low);
+  if (![middleOpen, middleClose, middleHigh, middleLow].every(Number.isFinite)) return null;
+
+  const middleRange = Math.max(0, middleHigh - middleLow);
+  const middleBody = Math.abs(middleOpen - middleClose);
+  const middleBodyRatio = middleRange > 0 ? middleBody / middleRange : 0;
+  const isBearishDisplacement = middleClose < middleOpen;
+
+  const lookbackStart = Math.max(0, index - 16);
+  const lookbackBars = bars.slice(lookbackStart, Math.max(lookbackStart, index - 1));
+  const avgRange = average(lookbackBars.map((bar) => Math.max(0, Number(bar.high) - Number(bar.low))).filter(Number.isFinite));
+  const avgVolume = average(lookbackBars.map((bar) => Number(bar.volume) || 0).filter(Number.isFinite));
+  const middleVolume = Number(middle.volume) || 0;
+
+  const mid = (gapTop + gapBottom) / 2;
+  const gapPct = mid > 0 ? ((gapTop - gapBottom) / mid) * 100 : 0;
+
+  const hasRealGap = gapPct >= 0.04;
+  const hasStrongBody = middleBodyRatio >= 0.55;
+  const hasRangeExpansion = avgRange <= 0 || middleRange >= avgRange * 1.08;
+  const hasUsefulVolume = avgVolume <= 0 || middleVolume >= avgVolume * 0.85;
+
+  if (!isBearishDisplacement || !hasRealGap || !hasStrongBody || !hasRangeExpansion || !hasUsefulVolume) return null;
+
+  return { top: gapTop, bottom: gapBottom };
+}
+
+function fvgQualityStyle(label: FvgQualityLabel, score: number, extra: Partial<FvgQuality> = {}): FvgQuality {
+  if (label === "STRONG") {
+    return {
+      label,
+      score,
+      color: "#bbf7d0",
+      bg: "rgba(22,101,52,0.90)",
+      border: "1px solid rgba(134,239,172,0.65)",
+      glow: "0 0 18px rgba(34,197,94,0.48)",
+      ...extra,
+    };
+  }
+
+  if (label === "MEDIUM") {
+    return {
+      label,
+      score,
+      color: "#fef08a",
+      bg: "rgba(113,63,18,0.92)",
+      border: "1px solid rgba(253,224,71,0.65)",
+      glow: "0 0 16px rgba(250,204,21,0.42)",
+      ...extra,
+    };
+  }
+
+  return {
+    ...DEFAULT_FVG_QUALITY,
+    score,
+    ...extra,
+  };
+}
+
+function fvgQualityLabelFromScore(score: number): FvgQualityLabel {
+  if (score >= 72) return "STRONG";
+  if (score >= 45) return "MEDIUM";
+  return "WEAK";
+}
+
+function computeRawFvgQuality(bars: Candle[], breakIndex: number, fvgIndex: number, fvgTop: number): FvgQuality {
+  const breaker = bars[breakIndex];
+  if (!breaker) return DEFAULT_FVG_QUALITY;
+
+  let score = 0;
+  const open = Number(breaker.open);
+  const close = Number(breaker.close);
+  const high = Number(breaker.high);
+  const low = Number(breaker.low);
+  const body = Math.abs(close - open);
+  const range = Math.max(0, high - low);
+  const bodyRatio = range > 0 ? body / range : 0;
+
+  // 1 point: ATR-based displacement. Strong body + range expansion versus recent ATR.
+  const atr = averageTrueRangeBefore(bars, breakIndex, 14);
+  if (range > 0 && bodyRatio >= 0.58 && (atr <= 0 || range >= atr * 1.15)) score += 1;
+
+  // 1 point: volume participation. Z-score is cleaner than a fixed 1.5x volume multiple.
+  const volumeZ = volumeZScoreBefore(bars, breakIndex, 20);
+  if (volumeZ >= 1.0) score += 1;
+
+  // 1 point: true structure break. Require close above the last confirmed swing high.
+  const lastSwingHigh = findLastConfirmedSwingHighBefore(bars, breakIndex, Math.max(30, breakIndex - fvgIndex + 10), 2);
+  if (lastSwingHigh != null ? close > lastSwingHigh : close > fvgTop + Math.max(range, atr, 0) * 0.15) score += 1;
+
+  return fvgQualityStyle(score >= 3 ? "STRONG" : score === 2 ? "MEDIUM" : "WEAK", score);
+}
+
+function computeFvgQuality(
+  bars: Candle[],
+  breakIndex: number,
+  fvgIndex: number,
+  fvgTop: number,
+  fvgBottom: number
+): FvgQuality {
+  const raw = computeRawFvgQuality(bars, breakIndex, fvgIndex, fvgTop);
+  const breaker = bars[breakIndex];
+  if (!breaker) return raw;
+
+  const atr = averageTrueRangeBefore(bars, breakIndex, 14);
+  const priorVolume = average(
+    bars
+      .slice(Math.max(0, fvgIndex - 20), Math.max(fvgIndex, breakIndex))
+      .map((bar) => Number(bar.volume) || 0)
+      .filter((value) => Number.isFinite(value) && value > 0)
+  );
+  const afterBreak = bars.slice(breakIndex + 1);
+  const latest = bars[bars.length - 1];
+
+  let confirmation = 0;
+
+  // 1) The flip stayed reclaimed instead of immediately failing.
+  if (latest && Number(latest.close) > fvgTop) confirmation += 1;
+
+  // 2) Zone retest held. This catches the exact pattern where the first gap was messy but buyers defended it.
+  if (afterBreak.some((bar) => bar.low <= fvgTop && bar.high >= fvgBottom && bar.close >= fvgBottom)) confirmation += 1;
+
+  // 3) Continuation/momentum after the flip.
+  const maxHighAfterBreak = afterBreak.length ? Math.max(...afterBreak.map((bar) => Number(bar.high) || 0)) : Number(breaker.high) || 0;
+  if (maxHighAfterBreak > Math.max(Number(breaker.high) || 0, fvgTop + Math.max(atr, fvgTop * 0.0025))) confirmation += 1;
+
+  // 4) Volume expansion after the reclaim.
+  const maxVolumeAfterBreak = afterBreak.length ? Math.max(...afterBreak.map((bar) => Number(bar.volume) || 0)) : 0;
+  if (priorVolume <= 0 || maxVolumeAfterBreak >= priorVolume * 1.25 || volumeZScoreBefore(bars, breakIndex, 20) >= 1.25) confirmation += 1;
+
+  // 5) Bullish structure after the reclaim: higher low or price holding above the zone.
+  const recent = bars.slice(Math.max(breakIndex + 1, bars.length - 5));
+  const recentLows = recent.map((bar) => Number(bar.low)).filter(Number.isFinite);
+  const recentHigherLow = recentLows.length >= 2 && recentLows[recentLows.length - 1] >= Math.min(...recentLows.slice(0, -1));
+  if ((latest && Number(latest.low) >= fvgTop) || recentHigherLow) confirmation += 1;
+
+  // Keep FVG quality and trade confirmation separate, then blend them.
+  // A weak gap can become a good runner only after buyers confirm with reclaim/hold/volume/structure.
+  const finalScore = Math.min(100, Math.round((raw.score / 3) * 35 + (confirmation / 5) * 65));
+  const finalLabel = fvgQualityLabelFromScore(finalScore);
+  const setupLabel = raw.label === "WEAK" && confirmation >= 3 ? "MOMENTUM CONFIRMED" : finalLabel;
+
+  return fvgQualityStyle(finalLabel, finalScore, {
+    setupLabel,
+    baseLabel: raw.label,
+    baseScore: raw.score,
+    confirmationScore: confirmation,
+  });
+}
+
+function applyFvgTradeState(zone: FvgFlipZone, bars: Candle[], breakIndex: number): void {
+  if (zone.status !== "confirmed_bull_ifvg" || breakIndex < 0) {
+    zone.tradeState = zone.status === "testing" ? "retest_active" : "forming";
+    zone.tradeStateLabel = zone.status === "testing" ? "FVG TESTING" : "FVG FORMING";
+    zone.tradeStateBg = "rgba(127,29,29,0.88)";
+    zone.tradeStateBorder = "1px solid rgba(252,165,165,0.58)";
+    zone.tradeStateColor = "#fecaca";
+    return;
+  }
+
+  const latest = bars[bars.length - 1];
+  const afterBreak = bars.slice(breakIndex + 1);
+  const zoneHeight = Math.max(zone.top - zone.bottom, zone.top * 0.001, 0.0001);
+  const latestClose = Number(latest?.close) || 0;
+  const latestLow = Number(latest?.low) || 0;
+  const hasRetest = zone.retestIndex != null;
+  const postRetestBars = hasRetest ? bars.slice((zone.retestIndex ?? breakIndex) + 1) : [];
+  const hasBounceAfterRetest = postRetestBars.some((bar) => Number(bar.close) > zone.top && Number(bar.high) > zone.top + zoneHeight * 0.35);
+  const pulledBackTowardZone = afterBreak.some((bar) => Number(bar.low) <= zone.top + zoneHeight * 0.25);
+
+  if (hasRetest && (hasBounceAfterRetest || latestClose > zone.top + zoneHeight * 0.25)) {
+    zone.tradeState = "bounce_confirmed";
+    zone.tradeStateLabel = "IFVG BOUNCE CONFIRMED";
+    zone.tradeStateBg = "rgba(20,83,45,0.94)";
+    zone.tradeStateBorder = "1px solid rgba(134,239,172,0.72)";
+    zone.tradeStateColor = "#bbf7d0";
+    return;
+  }
+
+  if (hasRetest || (latestLow <= zone.top && latestClose >= zone.bottom)) {
+    zone.tradeState = latestClose >= zone.top ? "retest_active" : "weakening";
+    zone.tradeStateLabel = latestClose >= zone.top ? "IFVG RETEST HOLD" : "IFVG RETEST ACTIVE";
+    zone.tradeStateBg = latestClose >= zone.top ? "rgba(22,101,52,0.90)" : "rgba(113,63,18,0.92)";
+    zone.tradeStateBorder = latestClose >= zone.top ? "1px solid rgba(134,239,172,0.62)" : "1px solid rgba(253,224,71,0.55)";
+    zone.tradeStateColor = latestClose >= zone.top ? "#bbf7d0" : "#fef08a";
+    return;
+  }
+
+  if (pulledBackTowardZone || latestClose < zone.top) {
+    zone.tradeState = "weakening";
+    zone.tradeStateLabel = "IFVG WEAKENING";
+    zone.tradeStateBg = "rgba(113,63,18,0.92)";
+    zone.tradeStateBorder = "1px solid rgba(253,224,71,0.55)";
+    zone.tradeStateColor = "#fef08a";
+    return;
+  }
+
+  zone.tradeState = "pullback_watch";
+  zone.tradeStateLabel = "IFVG PULLBACK WATCH";
+  zone.tradeStateBg = zone.quality?.bg ?? "rgba(22,101,52,0.90)";
+  zone.tradeStateBorder = zone.quality?.border ?? "1px solid rgba(134,239,172,0.55)";
+  zone.tradeStateColor = zone.quality?.color ?? "#bbf7d0";
+}
+
+function computeFvgFlipZoneFromIndex(
+  bars: Candle[],
+  fvgIndex: number,
+  candidate: { top: number; bottom: number }
+): FvgFlipZone | null {
+  const top = candidate.top;
+  const bottom = candidate.bottom;
+
+  let status: FvgFlipStatus = "bearish";
+  let breakIndex = -1;
+  let hasTested = false;
+
+  for (let i = fvgIndex + 1; i < bars.length; i += 1) {
+    const bar = bars[i];
+    const wickTouchesZone = bar.high >= bottom && bar.low <= top;
+    const bodyTouchesZone = Math.max(bar.open, bar.close) >= bottom && Math.min(bar.open, bar.close) <= top;
+
+    if (wickTouchesZone || bodyTouchesZone) hasTested = true;
+
+    if (bar.close > top) {
+      status = "confirmed_bull_ifvg";
+      breakIndex = i;
+      break;
+    }
+  }
+
+  if (breakIndex >= 0) {
+    for (let i = breakIndex + 1; i < bars.length; i += 1) {
+      const bar = bars[i];
+      // Once a bullish IFVG closes back below the zone low, it failed.
+      // Failed IFVGs are no longer relevant for the long setup, so do not render them.
+      if (bar.close < bottom) return null;
+    }
+  }
+
+  if (status !== "confirmed_bull_ifvg" && hasTested) status = "testing";
+
+  const quality = breakIndex >= 0 ? computeFvgQuality(bars, breakIndex, fvgIndex, top, bottom) : undefined;
+
+  const label =
+    status === "confirmed_bull_ifvg"
+      ? `Bull IFVG ${quality?.setupLabel ?? quality?.label ?? "WEAK"} ${formatPrice(bottom)}-${formatPrice(top)}`
+      : status === "testing"
+        ? `Bear FVG TEST ${formatPrice(bottom)}-${formatPrice(top)}`
+        : `Bear FVG ${formatPrice(bottom)}-${formatPrice(top)}`;
+
+  const zone: FvgFlipZone = {
+    startTime: toChartTime(bars[fvgIndex].time),
+    endTime: toChartTime(bars[bars.length - 1].time),
+    startIndex: fvgIndex,
+    endIndex: bars.length - 1,
+    top,
+    bottom,
+    status,
+    label,
+    quality,
+  };
+
+  if (breakIndex >= 0) {
+    const breaker = bars[breakIndex];
+    zone.breakTime = toChartTime(breaker.time);
+    zone.breakIndex = breakIndex;
+    zone.breakHigh = breaker.high;
+    zone.breakLow = breaker.low;
+
+    for (let i = breakIndex + 1; i < bars.length; i += 1) {
+      const bar = bars[i];
+      const retestsZone = bar.low <= top && bar.high >= bottom;
+      const holdsZone = bar.close >= bottom;
+      if (retestsZone && holdsZone) {
+        zone.retestTime = toChartTime(bar.time);
+        zone.retestIndex = i;
+        zone.retestHigh = bar.high;
+        zone.retestLow = bar.low;
+        zone.retestClose = bar.close;
+        zone.retestLabel = bar.close >= top ? "IFVG RETEST HOLD" : "IFVG RETEST";
+        break;
+      }
+      if (bar.close < bottom) break;
+    }
+
+    const priorStart = Math.max(0, fvgIndex - 80);
+    const priorBars = bars.slice(priorStart, breakIndex);
+    const swingHighs: number[] = [];
+
+    for (let i = priorStart + 1; i < breakIndex - 1; i += 1) {
+      if (isSwingHigh(bars, i) && bars[i].high > top) swingHighs.push(bars[i].high);
+    }
+
+    const uniqueSwingHighs = Array.from(new Set(swingHighs.map((value) => Number(value.toFixed(4))))).sort((a, b) => a - b);
+    const nearestHigh = uniqueSwingHighs.find((value) => value > breaker.close);
+    const highestHigh = priorBars.length ? Math.max(...priorBars.map((bar) => bar.high)) : undefined;
+
+    if (nearestHigh != null) zone.target1 = nearestHigh;
+    if (highestHigh != null && Number.isFinite(highestHigh) && highestHigh > top) zone.target2 = highestHigh;
+
+    if (zone.target1 != null && zone.target2 != null && Math.abs(zone.target2 - zone.target1) < Math.max(0.0001, top * 0.0002)) {
+      zone.target1 = undefined;
+    }
+  }
+
+  applyFvgTradeState(zone, bars, breakIndex);
+  return zone;
+}
+
+function computeLatestFvgFlipZone(bars: Candle[]): FvgFlipZone | null {
+  if (bars.length < 5) return null;
+
+  // Show only the newest FVG/IFVG that is still relevant.
+  // If the newest candidate has already failed, skip it and look for the next newest active setup.
+  for (let i = bars.length - 1; i >= 2; i -= 1) {
+    const candidate = isStrictBearishFvgCandidate(bars, i);
+    if (!candidate) continue;
+
+    const zone = computeFvgFlipZoneFromIndex(bars, i, candidate);
+    if (zone) return zone;
+  }
+
+  return null;
 }
 
 function computeCompressionZone(
@@ -2309,8 +2825,8 @@ function normalizeRemoteTrendlineArray(rows: unknown, symbol: string, timeframe:
       typeof line.p2 === "number"
     )
     .map((line) => {
-      const t1 = Number(line.t1);
-      const t2 = Number(line.t2);
+      const t1 = Number(line.t1) as UTCTimestamp;
+      const t2 = Number(line.t2) as UTCTimestamp;
       const p1 = Number(line.p1);
       const p2 = Number(line.p2);
       const slope = Number.isFinite(Number(line.slope)) && t1 !== t2 ? Number(line.slope) : (p2 - p1) / (t2 - t1);
@@ -3551,7 +4067,18 @@ function normalizeOrderLines(openOrders: ChartOrder[] | undefined, symbol: strin
         const legPrice = legKind === "stop_loss" ? legStop ?? legLimit : legLimit ?? legStop;
         const legLabel = legKind === "stop_loss" ? "SL" : "TP";
         const legLine = makeOrderLine({ ...leg, id: String(leg.id ?? `${order.id}-leg-${index}`) }, legKind, legPrice, legLabel, index + 10);
-        if (legLine) lines.push({ ...legLine, lineId: `${order.id}:${legKind}:leg-${index}`, order });
+        if (legLine) {
+          // Keep child/leg lines tied to the parent order id for chart actions.
+          // This lets one X click hide/cancel the full bracket visually instead of
+          // requiring multiple clicks for separate TP/SL leg ids.
+          lines.push({
+            ...legLine,
+            lineId: `${order.id}:${legKind}:leg-${index}`,
+            orderId: String(order.id),
+            order,
+            brokerOrder: { ...leg, id: String(leg.id ?? `${order.id}-leg-${index}`), symbol: leg.symbol ?? order.symbol },
+          });
+        }
       });
     }
   }
@@ -3569,8 +4096,15 @@ function formatOrderLineDetail(line: NormalizedOrderLine): string {
 
 function roundOrderDragPrice(price: number): number {
   if (!Number.isFinite(price) || price <= 0) return price;
+
+  // Alpaca rejects prices with hidden floating-point tails like
+  // 0.37010000000000004 as a sub-penny increment violation.
+  // Force the dragged price to the exact allowed decimal precision before
+  // it is displayed locally or sent back to the broker.
+  const decimals = price >= 1 ? 2 : 4;
   const step = price >= 1 ? 0.01 : 0.0001;
-  return Math.max(step, Math.round(price / step) * step);
+  const rounded = Math.max(step, Math.round(price / step) * step);
+  return Number(rounded.toFixed(decimals));
 }
 
 function getSessionInfo(ms: number) {
@@ -3715,6 +4249,8 @@ function ChartPanelComponent({
   timeframe: timeframeProp,
   visibility,
   onStatsUpdate,
+  initialVisibleLogicalRange = null,
+  onVisibleLogicalRangeChange,
   trendlineAction = { type: "none" },
   trendlineSnapMode = "auto",
   onTrendlineActionHandled,
@@ -3724,9 +4260,21 @@ function ChartPanelComponent({
   openOrders = [],
   onCancelOrder,
   onReplaceOrderPrice,
+  legendDensity = "compact",
+  compactTools = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const [legendExpanded, setLegendExpanded] = useState(legendDensity === "full");
+
+  useEffect(() => {
+    setLegendExpanded(legendDensity === "full");
+  }, [legendDensity, symbol, timeframeProp]);
+
+  const toolScale = compactTools ? 0.78 : 1;
+  const chartToolButtonStyle: CSSProperties = compactTools
+    ? { ...toolbarIconButtonStyle, width: 30, height: 30, borderRadius: 8, fontSize: 13 }
+    : toolbarIconButtonStyle;
 
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
@@ -3773,6 +4321,7 @@ function ChartPanelComponent({
     closeAbovePrevCloseDots: visibility.closeAbovePrevCloseDots ?? true,
     atrExpansionCandles: visibility.atrExpansionCandles ?? true,
     resistanceBreakoutConfirm: visibility.resistanceBreakoutConfirm ?? true,
+    fvgFlip: visibility.fvgFlip ?? true,
   });
   const onStatsUpdateRef = useRef(onStatsUpdate);
   const autoFitPendingRef = useRef(true);
@@ -3787,8 +4336,38 @@ function ChartPanelComponent({
   const openOrdersRef = useRef<ChartOrder[]>(openOrders);
   const onCancelOrderRef = useRef(onCancelOrder);
   const onReplaceOrderPriceRef = useRef(onReplaceOrderPrice);
+  const onVisibleLogicalRangeChangeRef = useRef(onVisibleLogicalRangeChange);
+  const initialVisibleLogicalRangeRef = useRef(initialVisibleLogicalRange);
+  const visibleRangeNotifyTimerRef = useRef<number | null>(null);
   const orderDragStateRef = useRef<OrderDragState | null>(null);
   const orderPriceOverridesRef = useRef<Record<string, number>>({});
+  // Optimistic cancel/remove lock: keeps a canceled order line hidden immediately
+  // while the broker refresh catches up. This avoids needing a page reload.
+  const hiddenOrderIdsRef = useRef<Set<string>>(new Set());
+  const hiddenOrderLineIdsRef = useRef<Set<string>>(new Set());
+  const cancelingOrderIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    onVisibleLogicalRangeChangeRef.current = onVisibleLogicalRangeChange;
+  }, [onVisibleLogicalRangeChange]);
+
+  useEffect(() => {
+    initialVisibleLogicalRangeRef.current = initialVisibleLogicalRange;
+
+    const chart = chartRef.current;
+    if (
+      chart &&
+      initialVisibleLogicalRange &&
+      Number.isFinite(initialVisibleLogicalRange.from) &&
+      Number.isFinite(initialVisibleLogicalRange.to) &&
+      initialVisibleLogicalRange.to > initialVisibleLogicalRange.from
+    ) {
+      chart.timeScale().setVisibleLogicalRange({
+        from: initialVisibleLogicalRange.from,
+        to: initialVisibleLogicalRange.to,
+      });
+    }
+  }, [initialVisibleLogicalRange]);
 
   const applyNormalVisibleRange = useCallback((bars: Candle[]) => {
     const chart = chartRef.current;
@@ -3817,6 +4396,24 @@ function ChartPanelComponent({
 
     chart.timeScale().setVisibleLogicalRange({ from, to });
   }, [timeframeProp]);
+
+  const applySavedOrNormalVisibleRange = useCallback((bars: Candle[]) => {
+    const chart = chartRef.current;
+    const savedRange = initialVisibleLogicalRangeRef.current;
+
+    if (
+      chart &&
+      savedRange &&
+      Number.isFinite(savedRange.from) &&
+      Number.isFinite(savedRange.to) &&
+      savedRange.to > savedRange.from
+    ) {
+      chart.timeScale().setVisibleLogicalRange({ from: savedRange.from, to: savedRange.to });
+      return;
+    }
+
+    applyNormalVisibleRange(bars);
+  }, [applyNormalVisibleRange]);
 
   const trendlineSeriesMapRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
   const trendlinesRef = useRef<Trendline[]>([]);
@@ -3855,6 +4452,9 @@ function ChartPanelComponent({
 
   const [error, setError] = useState("");
   const [compressionRect, setCompressionRect] = useState<RectOverlay | null>(null);
+  const [fvgFlipOverlay, setFvgFlipOverlay] = useState<FvgFlipOverlay | null>(null);
+  const lastInstantIfvgAlertKeyRef = useRef<string>("");
+  const lastInstantIfvgAlertAtRef = useRef<number>(0);
   const [breakoutMarker, setBreakoutMarker] = useState<MarkerOverlay | null>(null);
   const [vwapMarkers, setVwapMarkers] = useState<MarkerOverlay[]>([]);
   const [signalMarkers, setSignalMarkers] = useState<MarkerOverlay[]>([]);
@@ -3870,9 +4470,11 @@ function ChartPanelComponent({
   const [trendlineHandleOverlays, setTrendlineHandleOverlays] = useState<TrendlineHandleOverlay[]>([]);
   const [trendlineFocusOverlay, setTrendlineFocusOverlay] = useState<TrendlineFocusOverlay | null>(null);
   const [orderLineOverlays, setOrderLineOverlays] = useState<OrderLineOverlay[]>([]);
+  const [bracketZoneOverlays, setBracketZoneOverlays] = useState<BracketZoneOverlay[]>([]);
   const [orderPriceOverrides, setOrderPriceOverrides] = useState<Record<string, number>>({});
   const [chochMarkers, setChochMarkers] = useState<MarkerOverlay[]>([]);
   const [expandedSignalLabelKey, setExpandedSignalLabelKey] = useState<string | null>(null);
+  const [fvgLabelsExpanded, setFvgLabelsExpanded] = useState(false);
   const [sessionBands, setSessionBands] = useState<SessionBandOverlay[]>([]);
   const [drawMode, setDrawMode] = useState(false);
   const [pendingTrendPoint, setPendingTrendPoint] = useState<PendingTrendPoint | null>(null);
@@ -3905,6 +4507,7 @@ function ChartPanelComponent({
     closeAbovePrevCloseDots: true,
     atrExpansionCandles: true,
     resistanceBreakoutConfirm: true,
+    fvgFlip: true,
   });
   const [activeChartFunctionId, setActiveChartFunctionId] = useState<ChartFunctionId>(DEFAULT_CHART_FUNCTION_ID);
   const [projectionSelection, setProjectionSelection] = useState<ProjectionSelection | null>(null);
@@ -3912,6 +4515,12 @@ function ChartPanelComponent({
   const [trendlineAlerts, setTrendlineAlerts] = useState<TrendlineAlert[]>([]);
   const [symbolInput, setSymbolInput] = useState(symbol.toUpperCase());
   const [addWatchlistFeedback, setAddWatchlistFeedback] = useState("");
+
+  // Pro toolbar: keep settings panels derived from the active tool so they cannot desync after
+  // persistence restores, order-drag patches, or chart refreshes.
+  const trendlineSettingsVisible = drawMode;
+  const projectionSettingsVisible = projectionMode;
+
   const [legend, setLegend] = useState<LegendState>({
     last: null,
     pmh: null,
@@ -3952,6 +4561,7 @@ function ChartPanelComponent({
       closeAbovePrevCloseDots: (visibility.closeAbovePrevCloseDots ?? true) && lineVisibility.closeAbovePrevCloseDots,
       atrExpansionCandles: (visibility.atrExpansionCandles ?? true) && lineVisibility.atrExpansionCandles,
       resistanceBreakoutConfirm: (visibility.resistanceBreakoutConfirm ?? true) && lineVisibility.resistanceBreakoutConfirm,
+      fvgFlip: (visibility.fvgFlip ?? true) && lineVisibility.fvgFlip,
     }),
     [
       visibility.pmh,
@@ -3970,9 +4580,73 @@ function ChartPanelComponent({
       visibility.closeAbovePrevCloseDots,
       visibility.atrExpansionCandles,
       visibility.resistanceBreakoutConfirm,
+      visibility.fvgFlip,
       lineVisibility,
     ]
   );
+
+  useEffect(() => {
+    if (!fvgFlipOverlay || !effectiveLineVisibility.fvgFlip) return;
+    if (fvgFlipOverlay.status !== "confirmed_bull_ifvg") return;
+
+    const tradeState = fvgFlipOverlay.tradeState;
+    if (!tradeState || tradeState === "pullback_watch" || tradeState === "forming") return;
+
+    const setup =
+      tradeState === "bounce_confirmed"
+        ? "ifvg_bounce_confirmed"
+        : tradeState === "weakening"
+          ? "ifvg_failure"
+          : "ifvg_retest";
+
+    const phase = tradeState === "bounce_confirmed" ? "confirmed" : "prealert";
+    const zoneKey = `${symbol.toUpperCase()}|${timeframe}|${Math.round(fvgFlipOverlay.bottomPrice * 10000)}|${Math.round(fvgFlipOverlay.topPrice * 10000)}`;
+    const alertKey = `${zoneKey}|${setup}|${phase}`;
+    const now = Date.now();
+
+    // Frontend instant detection should be fast, but not spam the backend/phone.
+    // One state-change alert per active zone, with a short local debounce.
+    if (lastInstantIfvgAlertKeyRef.current === alertKey) return;
+    if (now - lastInstantIfvgAlertAtRef.current < 4500) return;
+
+    lastInstantIfvgAlertKeyRef.current = alertKey;
+    lastInstantIfvgAlertAtRef.current = now;
+
+    const label = fvgFlipOverlay.tradeStateLabel || "IFVG state changed";
+    const message = `${symbol.toUpperCase()} ${label} on ${timeframe} | zone ${fvgFlipOverlay.bottomPrice.toFixed(4)}-${fvgFlipOverlay.topPrice.toFixed(4)}`;
+
+    void sendInstantChartAlert({
+      symbol: symbol.toUpperCase(),
+      timeframe,
+      setup,
+      phase,
+      score: tradeState === "bounce_confirmed" ? 92 : tradeState === "weakening" ? 78 : 70,
+      message,
+      reason: `Frontend live IFVG state: ${tradeState}`,
+      source: "frontend",
+      debounce_key: alertKey,
+      features: {
+        zone_top: fvgFlipOverlay.topPrice,
+        zone_bottom: fvgFlipOverlay.bottomPrice,
+        trade_state: tradeState,
+        quality: fvgFlipOverlay.quality?.label,
+        quality_score: fvgFlipOverlay.quality?.score,
+      },
+    }).catch((error) => {
+      console.warn("[IFVG instant alert] backend delivery failed", error);
+    });
+  }, [
+    effectiveLineVisibility.fvgFlip,
+    fvgFlipOverlay?.bottomPrice,
+    fvgFlipOverlay?.quality?.label,
+    fvgFlipOverlay?.quality?.score,
+    fvgFlipOverlay?.status,
+    fvgFlipOverlay?.topPrice,
+    fvgFlipOverlay?.tradeState,
+    fvgFlipOverlay?.tradeStateLabel,
+    symbol,
+    timeframe,
+  ]);
 
   useEffect(() => {
     legendRef.current = legend;
@@ -4005,6 +4679,19 @@ function ChartPanelComponent({
   useEffect(() => {
     projectionModeRef.current = projectionMode;
   }, [projectionMode]);
+
+  useEffect(() => {
+    const handleToolbarEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setPendingTrendPoint(null);
+      setDrawMode(false);
+      setProjectionMode(false);
+      setProjectionSettingsOpen(false);
+    };
+
+    window.addEventListener("keydown", handleToolbarEscape);
+    return () => window.removeEventListener("keydown", handleToolbarEscape);
+  }, []);
 
   useEffect(() => {
     saveProjectionLinesRef.current = saveProjectionLines;
@@ -5121,6 +5808,7 @@ function ChartPanelComponent({
 
     if (!chart || !candleSeries) {
       setCompressionRect(null);
+      setFvgFlipOverlay(null);
       setBreakoutMarker(null);
       setVwapMarkers([]);
       setSignalMarkers([]);
@@ -5129,6 +5817,7 @@ function ChartPanelComponent({
       setTrendlineHandleOverlays([]);
       setTrendlineFocusOverlay(null);
       setOrderLineOverlays([]);
+      setBracketZoneOverlays([]);
       setSessionBands([]);
       return;
     }
@@ -5156,6 +5845,128 @@ function ChartPanelComponent({
       });
     }
     setSessionBands(nextSessionBands);
+
+    if (latestLineVisibilityRef.current.fvgFlip) {
+      const fvgZone = computeLatestFvgFlipZone(barsRef.current);
+
+      if (fvgZone) {
+        const chartWidth = containerRef.current?.clientWidth ?? 0;
+        const visibleLogical = timeScale.getVisibleLogicalRange?.();
+        const coordinateForIndex = (index: number): number | null => {
+          const byLogical = timeScale.logicalToCoordinate(index as Logical);
+          if (byLogical != null && Number.isFinite(byLogical)) return byLogical;
+          if (visibleLogical && Number.isFinite(visibleLogical.from) && Number.isFinite(visibleLogical.to) && chartWidth > 0) {
+            if (index <= visibleLogical.from) return 0;
+            if (index >= visibleLogical.to) return chartWidth;
+          }
+          return null;
+        };
+
+        const leftX = timeScale.timeToCoordinate(fvgZone.startTime as Time) ?? coordinateForIndex(fvgZone.startIndex);
+        const rightX = timeScale.timeToCoordinate(fvgZone.endTime as Time) ?? coordinateForIndex(fvgZone.endIndex);
+        const topY = candleSeries.priceToCoordinate(fvgZone.top);
+        const bottomY = candleSeries.priceToCoordinate(fvgZone.bottom);
+
+        if (
+          leftX != null &&
+          rightX != null &&
+          topY != null &&
+          bottomY != null &&
+          Number.isFinite(leftX) &&
+          Number.isFinite(rightX) &&
+          Number.isFinite(topY) &&
+          Number.isFinite(bottomY)
+        ) {
+          const zoneLeft = Math.min(leftX, rightX);
+          const zoneRight = Math.max(leftX, rightX);
+          const zoneWidth = Math.max(Math.abs(rightX - leftX), 24);
+          const safeChartWidth = chartWidth > 0 ? chartWidth : Math.max(zoneRight + 180, 320);
+          const labelRailX = Math.min(
+            Math.max(zoneRight + 72, zoneLeft + zoneWidth + 12),
+            Math.max(safeChartWidth - 118, zoneRight + 12),
+          );
+          const targetLineLeft = Math.min(zoneLeft, labelRailX);
+          const targetLineWidth = Math.max(Math.abs(labelRailX - targetLineLeft), zoneWidth, 48);
+
+          const targetOverlays: FvgTargetOverlay[] = [];
+          if (fvgZone.status === "confirmed_bull_ifvg") {
+            for (const [label, price] of [["TP1", fvgZone.target1], ["TP2", fvgZone.target2]] as const) {
+              if (price == null || !Number.isFinite(price)) continue;
+              const y = candleSeries.priceToCoordinate(price);
+              if (y == null || !Number.isFinite(y)) continue;
+              targetOverlays.push({ y, label, price, lineLeft: targetLineLeft, lineWidth: targetLineWidth, labelLeft: labelRailX });
+            }
+          }
+
+          let breakCandle: FvgFlipOverlay["breakCandle"];
+          if (fvgZone.breakTime != null && fvgZone.breakHigh != null && fvgZone.breakLow != null) {
+            const x =
+              timeScale.timeToCoordinate(fvgZone.breakTime as Time) ??
+              (fvgZone.breakIndex != null ? timeScale.logicalToCoordinate(fvgZone.breakIndex as Logical) : null);
+            const highY = candleSeries.priceToCoordinate(fvgZone.breakHigh);
+            const lowY = candleSeries.priceToCoordinate(fvgZone.breakLow);
+            if (x != null && highY != null && lowY != null && Number.isFinite(x) && Number.isFinite(highY) && Number.isFinite(lowY)) {
+              const estimatedWidth = Math.max(Math.abs(rightX - leftX) / Math.max(1, barsRef.current.length), 8);
+              breakCandle = {
+                left: x - estimatedWidth * 0.55,
+                width: estimatedWidth * 1.1,
+                top: Math.min(highY, lowY),
+                height: Math.max(Math.abs(lowY - highY), 18),
+                label: `IFVG ${fvgZone.quality?.setupLabel ?? fvgZone.quality?.label ?? "WEAK"}`,
+                quality: fvgZone.quality,
+              };
+            }
+          }
+
+          let retest: FvgFlipOverlay["retest"];
+          if (
+            fvgZone.retestTime != null &&
+            fvgZone.retestLow != null &&
+            fvgZone.retestClose != null
+          ) {
+            const x =
+              timeScale.timeToCoordinate(fvgZone.retestTime as Time) ??
+              (fvgZone.retestIndex != null ? timeScale.logicalToCoordinate(fvgZone.retestIndex as Logical) : null);
+            const y = candleSeries.priceToCoordinate(Math.max(fvgZone.retestLow, fvgZone.bottom));
+            if (x != null && y != null && Number.isFinite(x) && Number.isFinite(y)) {
+              retest = {
+                left: x,
+                top: y,
+                label: fvgZone.retestLabel ?? "IFVG RETEST",
+                price: fvgZone.retestClose,
+                quality: fvgZone.quality,
+              };
+            }
+          }
+
+          setFvgFlipOverlay({
+            left: zoneLeft,
+            width: zoneWidth,
+            top: Math.min(topY, bottomY),
+            height: Math.max(Math.abs(bottomY - topY), 4),
+            label: fvgZone.label,
+            status: fvgZone.status,
+            topPrice: fvgZone.top,
+            bottomPrice: fvgZone.bottom,
+            quality: fvgZone.quality,
+            breakCandle,
+            retest,
+            tradeState: fvgZone.tradeState,
+            tradeStateLabel: fvgZone.tradeStateLabel,
+            tradeStateBg: fvgZone.tradeStateBg,
+            tradeStateBorder: fvgZone.tradeStateBorder,
+            tradeStateColor: fvgZone.tradeStateColor,
+            targets: targetOverlays,
+          });
+        } else {
+          setFvgFlipOverlay(null);
+        }
+      } else {
+        setFvgFlipOverlay(null);
+      }
+    } else {
+      setFvgFlipOverlay(null);
+    }
 
     if (latestLineVisibilityRef.current.compression && compression) {
       const leftX = timeScale.timeToCoordinate(compression.startTime as Time);
@@ -5573,20 +6384,25 @@ function ChartPanelComponent({
       }
     }
 
-    const normalizedOrderLines = normalizeOrderLines(openOrdersRef.current, symbol).map((line) => ({
-      ...line,
-      price: orderPriceOverrides[line.lineId] ?? line.price,
-    }));
+    const hiddenOrderIds = hiddenOrderIdsRef.current;
+    const hiddenOrderLineIds = hiddenOrderLineIdsRef.current;
+    const normalizedOrderLines = normalizeOrderLines(openOrdersRef.current, symbol)
+      .filter((line) => !hiddenOrderIds.has(line.orderId) && !hiddenOrderLineIds.has(line.lineId))
+      .map((line) => ({
+        ...line,
+        price: orderPriceOverridesRef.current[line.lineId] ?? line.price,
+      }));
 
-    const nextOrderLineOverlays: OrderLineOverlay[] = [];
+    const nextOrderLineOverlaysRaw: OrderLineOverlay[] = [];
     for (const line of normalizedOrderLines) {
       const y = candleSeries.priceToCoordinate(line.price);
       if (y == null || !Number.isFinite(y)) continue;
 
-      nextOrderLineOverlays.push({
+      nextOrderLineOverlaysRaw.push({
         lineId: line.lineId,
         orderId: line.orderId,
         top: y,
+        labelTop: y - 9,
         price: line.price,
         label: line.label,
         detail: formatOrderLineDetail(line),
@@ -5596,11 +6412,80 @@ function ChartPanelComponent({
       });
     }
 
+    // Pro label layout: keep the actual order lines at their real price,
+    // but stagger only the pill labels so TP/SL/entry never cover each other.
+    const chartHeight = Math.max(320, containerRef.current?.clientHeight ?? 0);
+    const LABEL_HEIGHT = 28;
+    const LABEL_GAP = 6;
+    const MIN_LABEL_TOP = 8;
+    const MAX_LABEL_TOP = Math.max(MIN_LABEL_TOP, chartHeight - LABEL_HEIGHT - 8);
+    const nextOrderLineOverlays = [...nextOrderLineOverlaysRaw]
+      .sort((a, b) => a.top - b.top)
+      .map((item) => ({ ...item, labelTop: Math.max(MIN_LABEL_TOP, Math.min(MAX_LABEL_TOP, item.top - 9)) }));
+
+    for (let i = 1; i < nextOrderLineOverlays.length; i += 1) {
+      const prev = nextOrderLineOverlays[i - 1];
+      const curr = nextOrderLineOverlays[i];
+      const minTop = prev.labelTop + LABEL_HEIGHT + LABEL_GAP;
+      if (curr.labelTop < minTop) curr.labelTop = minTop;
+    }
+
+    const overflow = nextOrderLineOverlays.length
+      ? nextOrderLineOverlays[nextOrderLineOverlays.length - 1].labelTop - MAX_LABEL_TOP
+      : 0;
+    if (overflow > 0) {
+      for (let i = 0; i < nextOrderLineOverlays.length; i += 1) {
+        nextOrderLineOverlays[i].labelTop -= overflow;
+      }
+      for (let i = nextOrderLineOverlays.length - 2; i >= 0; i -= 1) {
+        const next = nextOrderLineOverlays[i + 1];
+        const curr = nextOrderLineOverlays[i];
+        const maxTop = next.labelTop - LABEL_HEIGHT - LABEL_GAP;
+        if (curr.labelTop > maxTop) curr.labelTop = maxTop;
+      }
+      for (let i = 0; i < nextOrderLineOverlays.length; i += 1) {
+        nextOrderLineOverlays[i].labelTop = Math.max(MIN_LABEL_TOP, Math.min(MAX_LABEL_TOP, nextOrderLineOverlays[i].labelTop));
+      }
+    }
+
+    const nextBracketZoneOverlays: BracketZoneOverlay[] = [];
+    const byOrderId = new Map<string, OrderLineOverlay[]>();
+    for (const overlay of nextOrderLineOverlays) {
+      const list = byOrderId.get(overlay.orderId) ?? [];
+      list.push(overlay);
+      byOrderId.set(overlay.orderId, list);
+    }
+
+    for (const [orderId, overlays] of byOrderId) {
+      const entry = overlays.find((item) => item.line.kind !== "take_profit" && item.line.kind !== "stop_loss");
+      const target = overlays.find((item) => item.line.kind === "take_profit");
+      const stop = overlays.find((item) => item.line.kind === "stop_loss");
+      if (!entry || !target || !stop) continue;
+
+      const rewardHeight = Math.abs(target.top - entry.top);
+      const riskHeight = Math.abs(stop.top - entry.top);
+      if (rewardHeight < 2 || riskHeight < 2) continue;
+
+      const rewardAmount = Math.abs(target.price - entry.price);
+      const riskAmount = Math.abs(entry.price - stop.price);
+      const rr = riskAmount > 0 ? rewardAmount / riskAmount : 0;
+
+      nextBracketZoneOverlays.push({
+        orderId,
+        rewardTop: Math.min(target.top, entry.top),
+        rewardHeight,
+        riskTop: Math.min(stop.top, entry.top),
+        riskHeight,
+        rr,
+      });
+    }
+
+    setBracketZoneOverlays(nextBracketZoneOverlays);
     setOrderLineOverlays(nextOrderLineOverlays);
 
     setTrendlineHandleOverlays(nextTrendlineHandles);
     setTrendlineFocusOverlay(nextTrendlineFocus);
-  }, [symbol, orderPriceOverrides]);
+  }, [symbol]);
 
   useEffect(() => {
     const bars = barsRef.current;
@@ -5625,6 +6510,28 @@ function ChartPanelComponent({
 
   useEffect(() => {
     openOrdersRef.current = openOrders;
+
+    // Once Alpaca no longer returns an order, drop its optimistic hide marker.
+    // If an order is still present right after cancel, it stays hidden locally
+    // so the chart responds instantly instead of waiting for the next reload.
+    if (hiddenOrderIdsRef.current.size || hiddenOrderLineIdsRef.current.size) {
+      const liveOrderIds = new Set(
+        (Array.isArray(openOrders) ? openOrders : [])
+          .map((order) => String(order?.id ?? ""))
+          .filter(Boolean)
+      );
+      for (const orderId of Array.from(hiddenOrderIdsRef.current)) {
+        if (!liveOrderIds.has(orderId)) hiddenOrderIdsRef.current.delete(orderId);
+      }
+      // Line ids are only an immediate UI lock. They are cleared when the parent
+      // order disappears, but kept while the same order is still coming back
+      // from a refresh so the first X press stays visually removed.
+      for (const lineId of Array.from(hiddenOrderLineIdsRef.current)) {
+        const parentId = String(lineId).split(":")[0];
+        if (parentId && !liveOrderIds.has(parentId)) hiddenOrderLineIdsRef.current.delete(lineId);
+      }
+    }
+
     window.requestAnimationFrame(updateOverlayPositions);
   }, [openOrders, orderPriceOverrides, updateOverlayPositions]);
 
@@ -5819,7 +6726,7 @@ function ChartPanelComponent({
       evaluateTrendlineAlerts(bars);
 
       if (autoFitPendingRef.current) {
-        applyNormalVisibleRange(bars);
+        applySavedOrNormalVisibleRange(bars);
         autoFitPendingRef.current = false;
       }
 
@@ -5871,7 +6778,7 @@ function ChartPanelComponent({
       });
 
     },
-    [symbol, timeframe, updateOverlayPositions, syncTrendlineSeries, refreshProjectionFromLatestBar, evaluateTrendlineAlerts, applyNormalVisibleRange]
+    [symbol, timeframe, updateOverlayPositions, syncTrendlineSeries, refreshProjectionFromLatestBar, evaluateTrendlineAlerts, applySavedOrNormalVisibleRange]
   );
 
   const setChartInteractionEnabledForOrders = useCallback((enabled: boolean) => {
@@ -5882,6 +6789,8 @@ function ChartPanelComponent({
   }, []);
 
   const beginOrderLineDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>, line: NormalizedOrderLine) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.('[data-order-cancel="true"]')) return;
     if (!line.canMove) return;
     event.preventDefault();
     event.stopPropagation();
@@ -5894,6 +6803,8 @@ function ChartPanelComponent({
       startY: event.clientY,
       latestY: event.clientY,
       hasMoved: false,
+      overlayEl: event.currentTarget,
+      priceEl: event.currentTarget.querySelector<HTMLSpanElement>("[data-order-price-value]"),
     };
     setSelectedTrendlineId(null);
     setChartInteractionEnabledForOrders(false);
@@ -5901,11 +6812,68 @@ function ChartPanelComponent({
     document.body.style.userSelect = "none";
   }, [setChartInteractionEnabledForOrders]);
 
-  const cancelOrderFromLine = useCallback((event: ReactMouseEvent<HTMLButtonElement>, overlay: OrderLineOverlay) => {
+  const cancelOrderFromLine = useCallback((event: ReactMouseEvent<HTMLElement> | ReactPointerEvent<HTMLElement>, overlay: OrderLineOverlay) => {
     event.preventDefault();
     event.stopPropagation();
-    onCancelOrderRef.current?.(overlay.order, overlay.line);
-  }, []);
+    event.nativeEvent?.stopImmediatePropagation?.();
+
+    const orderId = String(overlay.orderId || overlay.order?.id || "");
+    const lineId = String(overlay.lineId || overlay.line?.lineId || "");
+    if (!orderId) return;
+
+    // Hard visual remove on first press. This avoids the common double-click bug
+    // where the chart drag layer or a fast openOrders refresh rebuilds the line
+    // before React state finishes updating.
+    const buttonEl = event.currentTarget as HTMLElement | null;
+    const rowEl = buttonEl?.closest?.('[data-order-line-row="true"]') as HTMLElement | null;
+    if (rowEl) {
+      rowEl.style.display = "none";
+      rowEl.style.pointerEvents = "none";
+    }
+
+    hiddenOrderIdsRef.current.add(orderId);
+    if (lineId) hiddenOrderLineIdsRef.current.add(lineId);
+
+    // Also hide every displayed line tied to the same parent order/bracket.
+    setOrderLineOverlays((prev) => {
+      for (const item of prev) {
+        if (item.orderId === orderId) hiddenOrderLineIdsRef.current.add(item.lineId);
+      }
+      return prev.filter((item) => item.orderId !== orderId);
+    });
+    setBracketZoneOverlays((prev) => prev.filter((item) => item.orderId !== orderId));
+    setOrderPriceOverrides((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (key === orderId || key.startsWith(`${orderId}:`)) delete next[key];
+      }
+      orderPriceOverridesRef.current = next;
+      return next;
+    });
+
+    // Kill any in-progress drag that may have started on the same pointer press.
+    orderDragStateRef.current = null;
+    setChartInteractionEnabledForOrders(true);
+    if (containerRef.current) containerRef.current.style.cursor = "";
+    document.body.style.userSelect = "";
+
+    window.requestAnimationFrame(updateOverlayPositions);
+
+    // Prevent duplicate broker cancel calls from pointerdown + click.
+    if (cancelingOrderIdsRef.current.has(orderId)) return;
+    cancelingOrderIdsRef.current.add(orderId);
+
+    void Promise.resolve(onCancelOrderRef.current?.(overlay.order, overlay.line))
+      .catch(() => {
+        // Broker rejected the cancel: show the line again without requiring reload.
+        hiddenOrderIdsRef.current.delete(orderId);
+        if (lineId) hiddenOrderLineIdsRef.current.delete(lineId);
+      })
+      .finally(() => {
+        cancelingOrderIdsRef.current.delete(orderId);
+        window.requestAnimationFrame(updateOverlayPositions);
+      });
+  }, [setChartInteractionEnabledForOrders, updateOverlayPositions]);
 
   const moveOrderLineDuringDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = orderDragStateRef.current;
@@ -5933,12 +6901,18 @@ function ChartPanelComponent({
       drag.hasMoved = true;
     }
 
-    setOrderPriceOverrides((prev) => {
-      if (prev[drag.lineId] === price) return prev;
-      return { ...prev, [drag.lineId]: price };
-    });
-    window.requestAnimationFrame(updateOverlayPositions);
-  }, [updateOverlayPositions]);
+    orderPriceOverridesRef.current = { ...orderPriceOverridesRef.current, [drag.lineId]: price };
+
+    // Keep drag buttery smooth: update only this order-line DOM preview during pointer move.
+    // Do not set React state or recompute chart overlays on every pixel move.
+    const previewTop = y - 9;
+    if (drag.overlayEl) {
+      drag.overlayEl.style.top = `${previewTop}px`;
+    }
+    if (drag.priceEl) {
+      drag.priceEl.textContent = formatPrice(price);
+    }
+  }, []);
 
   const finishOrderLineDrag = useCallback(async (event: ReactPointerEvent<HTMLDivElement>) => {
     const orderDrag = orderDragStateRef.current;
@@ -5967,14 +6941,21 @@ function ChartPanelComponent({
 
     if (line && orderDrag.hasMoved && priceMoved && Number.isFinite(nextPrice) && nextPrice > 0) {
       const patchedLine = { ...line, price: nextPrice };
+      const nextOverrides = { ...orderPriceOverridesRef.current, [orderDrag.lineId]: nextPrice };
+      orderPriceOverridesRef.current = nextOverrides;
+      setOrderPriceOverrides(nextOverrides);
+      window.requestAnimationFrame(updateOverlayPositions);
+
       try {
-        await onReplaceOrderPriceRef.current?.(patchedLine.order, patchedLine, nextPrice);
-      } finally {
-        // Clear drag-only price after the broker action finishes so chart and
-        // Open Orders both come from the same refreshed order data.
+        await onReplaceOrderPriceRef.current?.(patchedLine.brokerOrder ?? patchedLine.order, patchedLine, nextPrice);
+        const stickyOverrides = { ...orderPriceOverridesRef.current, [orderDrag.lineId]: nextPrice };
+        orderPriceOverridesRef.current = stickyOverrides;
+        setOrderPriceOverrides(stickyOverrides);
+      } catch (error) {
         setOrderPriceOverrides((prev) => {
           const next = { ...prev };
           delete next[orderDrag.lineId];
+          orderPriceOverridesRef.current = next;
           return next;
         });
       }
@@ -5982,6 +6963,7 @@ function ChartPanelComponent({
       setOrderPriceOverrides((prev) => {
         const next = { ...prev };
         delete next[orderDrag.lineId];
+        orderPriceOverridesRef.current = next;
         return next;
       });
     }
@@ -6357,27 +7339,10 @@ function ChartPanelComponent({
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
 
-      if (orderDragStateRef.current) {
-        const drag = orderDragStateRef.current;
-        const movedPixels = Math.abs(event.clientY - drag.startY);
-        const rawPrice = candleSeriesRef.current?.coordinateToPrice(y);
-
-        event.preventDefault();
-        event.stopPropagation();
-
-        if (rawPrice != null && Number.isFinite(rawPrice) && rawPrice > 0) {
-          const price = roundOrderDragPrice(rawPrice);
-          drag.latestY = event.clientY;
-          drag.currentPrice = price;
-          if (movedPixels >= 2) drag.hasMoved = true;
-          setOrderPriceOverrides((prev) => {
-            if (prev[drag.lineId] === price) return prev;
-            return { ...prev, [drag.lineId]: price };
-          });
-          window.requestAnimationFrame(updateOverlayPositions);
-        }
-        return;
-      }
+      // Order lines are handled by the dedicated React overlay with pointer capture.
+      // Do not also process order dragging in the chart container listener; double
+      // updates here make the chart feel jumpy/funky while dragging a broker price.
+      if (orderDragStateRef.current) return;
 
       const point = getPointFromCoordinates(x, y);
 
@@ -6434,14 +7399,21 @@ function ChartPanelComponent({
 
         if (line && orderDrag.hasMoved && priceMoved && Number.isFinite(nextPrice) && nextPrice > 0) {
           const patchedLine = { ...line, price: nextPrice };
+          const nextOverrides = { ...orderPriceOverridesRef.current, [orderDrag.lineId]: nextPrice };
+          orderPriceOverridesRef.current = nextOverrides;
+          setOrderPriceOverrides(nextOverrides);
+          window.requestAnimationFrame(updateOverlayPositions);
+
           try {
-            await onReplaceOrderPriceRef.current?.(patchedLine.order, patchedLine, nextPrice);
-          } finally {
-            // Clear drag-only price after the broker action finishes so chart and
-            // Open Orders both come from the same refreshed order data.
+            await onReplaceOrderPriceRef.current?.(patchedLine.brokerOrder ?? patchedLine.order, patchedLine, nextPrice);
+            const stickyOverrides = { ...orderPriceOverridesRef.current, [orderDrag.lineId]: nextPrice };
+            orderPriceOverridesRef.current = stickyOverrides;
+            setOrderPriceOverrides(stickyOverrides);
+          } catch (error) {
             setOrderPriceOverrides((prev) => {
               const next = { ...prev };
               delete next[orderDrag.lineId];
+              orderPriceOverridesRef.current = next;
               return next;
             });
           }
@@ -6551,6 +7523,22 @@ function ChartPanelComponent({
       window.requestAnimationFrame(() => {
         updateOverlayPositions();
       });
+
+      const chartInstance = chartRef.current;
+      const cb = onVisibleLogicalRangeChangeRef.current;
+      if (!chartInstance || !cb) return;
+
+      if (visibleRangeNotifyTimerRef.current !== null) {
+        window.clearTimeout(visibleRangeNotifyTimerRef.current);
+      }
+
+      visibleRangeNotifyTimerRef.current = window.setTimeout(() => {
+        visibleRangeNotifyTimerRef.current = null;
+        const range = chartInstance.timeScale().getVisibleLogicalRange();
+        if (!range) return;
+        if (!Number.isFinite(range.from) || !Number.isFinite(range.to) || range.to <= range.from) return;
+        onVisibleLogicalRangeChangeRef.current?.({ from: Number(range.from), to: Number(range.to) });
+      }, 350);
     };
 
     chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleRangeChange);
@@ -6564,6 +7552,12 @@ function ChartPanelComponent({
       container.removeEventListener("pointerdown", handlePointerDown);
       container.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
+
+      if (visibleRangeNotifyTimerRef.current !== null) {
+        window.clearTimeout(visibleRangeNotifyTimerRef.current);
+        visibleRangeNotifyTimerRef.current = null;
+      }
+
 
       for (const timeoutId of alertTimeoutsRef.current) {
         window.clearTimeout(timeoutId);
@@ -6978,16 +7972,20 @@ function ChartPanelComponent({
           position: "absolute",
           top: 8,
           left: 72,
+          right: 10,
           zIndex: 10,
-          display: "flex",
-          gap: 8,
+          display: legendDensity === "minimal" && !legendExpanded ? "none" : "flex",
+          gap: 6,
           alignItems: "center",
-          flexWrap: "wrap",
+          flexWrap: legendExpanded ? "wrap" : "nowrap",
+          overflow: "hidden",
+          maxHeight: legendExpanded ? 132 : 38,
+          pointerEvents: "none",
         }}
       >
-        <div style={legendBoxStyle}>
+        <div style={{ ...legendBoxStyle, pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: 8, padding: "5px 8px" }}>
           <strong>{symbol}</strong> · {timeframe} · {legend.tradingDate ?? "--"} · PT
-          <span style={{ display: "inline-flex", gap: 4, marginLeft: 10, verticalAlign: "middle" }}>
+          <span style={{ display: "inline-flex", gap: 4, marginLeft: 4, verticalAlign: "middle" }}>
             {(["1m", "5m", "15m"] as const).map((tf) => (
               <button
                 key={tf}
@@ -6996,9 +7994,9 @@ function ChartPanelComponent({
                   setChartTimeframe(tf);
                 }}
                 style={{
-                  height: 24,
-                  minWidth: 42,
-                  padding: "0 8px",
+                  height: 22,
+                  minWidth: 36,
+                  padding: "0 7px",
                   borderRadius: 8,
                   border: tf === timeframe ? "1px solid rgba(96,165,250,0.75)" : "1px solid rgba(148,163,184,0.22)",
                   background: tf === timeframe ? "rgba(37,99,235,0.88)" : "rgba(15,23,42,0.88)",
@@ -7014,11 +8012,14 @@ function ChartPanelComponent({
             ))}
           </span>
         </div>
-        <div style={legendBoxStyle}>VWAP: {formatPrice(legend.vwap)}</div>
-        <div style={legendBoxStyle}>PMH: {formatPrice(legend.pmh)}</div>
+
+        <div style={{ ...legendBoxStyle, pointerEvents: "auto", padding: "5px 8px" }}>VWAP: {formatPrice(legend.vwap)}</div>
+        <div style={{ ...legendBoxStyle, pointerEvents: "auto", padding: "5px 8px", color: "#86efac" }}>LAST: {formatPrice(legend.last)}</div>
         <div
           style={{
             ...legendBoxStyle,
+            pointerEvents: "auto",
+            padding: "5px 8px",
             color:
               legend.session.currentSession === "regular"
                 ? "#86efac"
@@ -7027,69 +8028,48 @@ function ChartPanelComponent({
                   : "#fcd34d",
           }}
         >
-          SESSION: {legend.session.currentSessionLabel}
+          {legend.session.currentSessionLabel}
         </div>
-        <div style={legendBoxStyle}>RTH H: {formatPrice(legend.session.regularHigh)}</div>
-        <div style={legendBoxStyle}>AH H: {formatPrice(legend.session.afterHoursHigh)}</div>
-        <div style={legendBoxStyle}>EXT H: {formatPrice(legend.session.extendedHigh)}</div>
-        <div style={{ ...legendBoxStyle, color: "#86efac" }}>
-          LAST: {formatPrice(legend.last)}
-        </div>
-        {hoveredCandle ? (
+        <button
+          type="button"
+          onClick={() => setLegendExpanded((prev) => !prev)}
+          style={{
+            ...legendBoxStyle,
+            pointerEvents: "auto",
+            padding: "5px 9px",
+            cursor: "pointer",
+            color: "#bfdbfe",
+          }}
+          title={legendExpanded ? "Collapse chart labels" : "Show full chart labels"}
+        >
+          {legendExpanded ? "Less" : "More"}
+        </button>
+
+        {legendExpanded ? (
           <>
-            <div style={{ ...legendBoxStyle, color: "#e2e8f0" }}>
-              T: {formatPacificTime(hoveredCandle.time, false)}
-            </div>
-            <div style={{ ...legendBoxStyle, color: "#93c5fd" }}>
-              O: {formatPrice(hoveredCandle.open)}
-            </div>
-            <div style={{ ...legendBoxStyle, color: "#86efac" }}>
-              H: {formatPrice(hoveredCandle.high)}
-            </div>
-            <div style={{ ...legendBoxStyle, color: "#fca5a5" }}>
-              L: {formatPrice(hoveredCandle.low)}
-            </div>
-            <div style={{ ...legendBoxStyle, color: hoveredCandle.close >= hoveredCandle.open ? "#22c55e" : "#ef4444" }}>
-              C: {formatPrice(hoveredCandle.close)}
-            </div>
-            <div style={{ ...legendBoxStyle, color: "#fbbf24" }}>
-              R: {formatPrice(hoveredCandle.high - hoveredCandle.low)}
-            </div>
-            <div style={{ ...legendBoxStyle, color: "#c4b5fd" }}>
-              V: {formatVolume(hoveredCandle.volume)}
-            </div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>PMH: {formatPrice(legend.pmh)}</div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>RTH H: {formatPrice(legend.session.regularHigh)}</div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>AH H: {formatPrice(legend.session.afterHoursHigh)}</div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>EXT H: {formatPrice(legend.session.extendedHigh)}</div>
+            {hoveredCandle ? (
+              <>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#e2e8f0" }}>T: {formatPacificTime(hoveredCandle.time, false)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#93c5fd" }}>O: {formatPrice(hoveredCandle.open)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#86efac" }}>H: {formatPrice(hoveredCandle.high)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#fca5a5" }}>L: {formatPrice(hoveredCandle.low)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: hoveredCandle.close >= hoveredCandle.open ? "#22c55e" : "#ef4444" }}>C: {formatPrice(hoveredCandle.close)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#fbbf24" }}>R: {formatPrice(hoveredCandle.high - hoveredCandle.low)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#c4b5fd" }}>V: {formatVolume(hoveredCandle.volume)}</div>
+              </>
+            ) : null}
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: controlState.color }}>CTRL: {controlState.label}</div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: controlState.color }}>{controlState.detail}</div>
+            {legend.compressionLabel ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#c4b5fd" }}>{legend.compressionLabel}</div> : null}
+            {pendingTrendPoint ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#7dd3fc" }}>TL P1: {formatPacificTime(pendingTrendPoint.time, false)} @ {formatPrice(pendingTrendPoint.price)}</div> : null}
+            {trendlines.length > 0 ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#67e8f9" }}>TL: {trendlines.length}</div> : null}
+            {selectedTrendlineId ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#fde68a" }}>Selected TL · Drag anchor or press Delete</div> : null}
+            {drawMode ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#93c5fd" }}>Draw Mode · Click 2 points</div> : null}
           </>
-        ) : null}
-        <div style={{ ...legendBoxStyle, color: controlState.color }}>
-          CTRL: {controlState.label}
-        </div>
-        <div style={{ ...legendBoxStyle, color: controlState.color }}>
-          {controlState.detail}
-        </div>
-        {legend.compressionLabel ? (
-          <div style={{ ...legendBoxStyle, color: "#c4b5fd" }}>
-            {legend.compressionLabel}
-          </div>
-        ) : null}
-        {pendingTrendPoint ? (
-          <div style={{ ...legendBoxStyle, color: "#7dd3fc" }}>
-            TL P1: {formatPacificTime(pendingTrendPoint.time, false)} @ {formatPrice(pendingTrendPoint.price)}
-          </div>
-        ) : null}
-        {trendlines.length > 0 ? (
-          <div style={{ ...legendBoxStyle, color: "#67e8f9" }}>
-            TL: {trendlines.length}
-          </div>
-        ) : null}
-        {selectedTrendlineId ? (
-          <div style={{ ...legendBoxStyle, color: "#fde68a" }}>
-            Selected TL · Drag anchor or press Delete
-          </div>
-        ) : null}
-        {drawMode ? (
-          <div style={{ ...legendBoxStyle, color: "#93c5fd" }}>
-            Draw Mode · Click 2 points
-          </div>
         ) : null}
       </div>
 
@@ -7178,14 +8158,16 @@ function ChartPanelComponent({
       <div
         style={{
           position: "absolute",
-          top: 96,
-          left: 12,
+          top: compactTools ? 76 : 96,
+          left: compactTools ? 8 : 12,
           zIndex: 13,
           display: "flex",
           flexDirection: "column",
-          gap: 8,
-          width: 48,
-          padding: 6,
+          gap: compactTools ? 6 : 8,
+          width: compactTools ? 40 : 48,
+          padding: compactTools ? 5 : 6,
+          transform: compactTools ? `scale(${toolScale})` : undefined,
+          transformOrigin: "top left",
           borderRadius: 12,
           background: "rgba(5, 18, 45, 0.96)",
           border: "1px solid rgba(255,255,255,0.10)",
@@ -7194,13 +8176,13 @@ function ChartPanelComponent({
         }}
       >
         <button
-          onClick={() => setToolbarCollapsed((prev) => !prev)}
+          onClick={() => setLineSettingsOpen((prev) => !prev)}
           style={{
-            ...toolbarIconButtonStyle,
-            border: !toolbarCollapsed ? "1px solid rgba(96,165,250,0.45)" : toolbarIconButtonStyle.border,
-            color: !toolbarCollapsed ? "#dbeafe" : toolbarIconButtonStyle.color,
+            ...chartToolButtonStyle,
+            border: lineSettingsOpen ? "1px solid rgba(96,165,250,0.45)" : toolbarIconButtonStyle.border,
+            color: lineSettingsOpen ? "#dbeafe" : toolbarIconButtonStyle.color,
           }}
-          title={toolbarCollapsed ? "Show trendline settings" : "Hide trendline settings"}
+          title={lineSettingsOpen ? "Hide line visibility" : "Show line visibility"}
         >
           ☰
         </button>
@@ -7209,10 +8191,12 @@ function ChartPanelComponent({
           onClick={() => {
             setPendingTrendPoint(null);
             setProjectionMode(false);
+            setProjectionSettingsOpen(false);
+            setLineSettingsOpen(false);
             setDrawMode((prev) => !prev);
           }}
           style={{
-            ...toolbarIconButtonStyle,
+            ...chartToolButtonStyle,
             border: drawMode
               ? "1px solid rgba(96,165,250,0.6)"
               : toolbarIconButtonStyle.border,
@@ -7228,14 +8212,19 @@ function ChartPanelComponent({
           onClick={() => {
             setDrawMode(false);
             setPendingTrendPoint(null);
+            setLineSettingsOpen(false);
             if (activeChartFunctionIdRef.current === "none") {
               activeChartFunctionIdRef.current = "support_prediction_wick_range";
               setActiveChartFunctionId("support_prediction_wick_range");
             }
-            setProjectionMode((prev) => !prev);
+            setProjectionMode((prev) => {
+              const next = !prev;
+              setProjectionSettingsOpen(next);
+              return next;
+            });
           }}
           style={{
-            ...toolbarIconButtonStyle,
+            ...chartToolButtonStyle,
             border: projectionMode
               ? "1px solid rgba(96,165,250,0.6)"
               : toolbarIconButtonStyle.border,
@@ -7248,16 +8237,29 @@ function ChartPanelComponent({
         </button>
 
         <button
-          onClick={() => setProjectionSettingsOpen((prev) => !prev)}
+          onClick={() => {
+            setDrawMode(false);
+            setPendingTrendPoint(null);
+            setLineSettingsOpen(false);
+            if (activeChartFunctionIdRef.current === "none") {
+              activeChartFunctionIdRef.current = "support_prediction_wick_range";
+              setActiveChartFunctionId("support_prediction_wick_range");
+            }
+            setProjectionMode((prev) => {
+              const next = !prev;
+              setProjectionSettingsOpen(next);
+              return next;
+            });
+          }}
           style={{
-            ...toolbarIconButtonStyle,
-            border: projectionSettingsOpen
+            ...chartToolButtonStyle,
+            border: projectionSettingsVisible
               ? "1px solid rgba(96,165,250,0.6)"
               : toolbarIconButtonStyle.border,
-            background: projectionSettingsOpen ? "rgba(30,64,175,0.95)" : toolbarIconButtonStyle.background,
-            color: projectionSettingsOpen ? "#dbeafe" : toolbarIconButtonStyle.color,
+            background: projectionSettingsVisible ? "rgba(30,64,175,0.95)" : toolbarIconButtonStyle.background,
+            color: projectionSettingsVisible ? "#dbeafe" : toolbarIconButtonStyle.color,
           }}
-          title={projectionSettingsOpen ? "Hide projection settings" : "Show projection settings"}
+          title={projectionSettingsVisible ? "Turn function tool off" : "Open function settings"}
         >
           ⊞
         </button>
@@ -7265,7 +8267,7 @@ function ChartPanelComponent({
         <button
           onClick={() => setLineSettingsOpen((prev) => !prev)}
           style={{
-            ...toolbarIconButtonStyle,
+            ...chartToolButtonStyle,
             border: lineSettingsOpen
               ? "1px solid rgba(96,165,250,0.6)"
               : toolbarIconButtonStyle.border,
@@ -7282,8 +8284,9 @@ function ChartPanelComponent({
             setPendingTrendPoint(null);
             setDrawMode(false);
             setProjectionMode(false);
+            setProjectionSettingsOpen(false);
           }}
-          style={toolbarIconButtonStyle}
+          style={chartToolButtonStyle}
           title="Cancel draw mode"
         >
           ✕
@@ -7291,7 +8294,7 @@ function ChartPanelComponent({
 
         <button
           onClick={clearProjectionSelection}
-          style={toolbarIconButtonStyle}
+          style={chartToolButtonStyle}
           title="Clear temporary projection"
         >
           ⌁
@@ -7299,7 +8302,7 @@ function ChartPanelComponent({
 
         <button
           onClick={clearSavedProjectionLines}
-          style={toolbarIconButtonStyle}
+          style={chartToolButtonStyle}
           title="Clear saved projections"
         >
           S
@@ -7307,7 +8310,7 @@ function ChartPanelComponent({
 
         <button
           onClick={deleteSelectedOrLastTrendline}
-          style={toolbarIconButtonStyle}
+          style={chartToolButtonStyle}
           title={selectedTrendlineId ? "Delete selected trendline" : "Delete last trendline"}
         >
           🗑
@@ -7315,19 +8318,19 @@ function ChartPanelComponent({
 
         <button
           onClick={clearManualTrendlines}
-          style={toolbarIconButtonStyle}
+          style={chartToolButtonStyle}
           title="Clear trendlines"
         >
           ⌫
         </button>
       </div>
 
-      {projectionSettingsOpen ? (
+      {projectionSettingsVisible ? (
         <div
           style={{
             position: "absolute",
-            top: 96,
-            left: toolbarCollapsed ? 68 : 264,
+            top: compactTools ? 76 : 96,
+            left: compactTools ? 54 : 68,
             zIndex: 13,
             display: "flex",
             flexDirection: "column",
@@ -7346,9 +8349,12 @@ function ChartPanelComponent({
               Function Settings
             </div>
             <button
-              onClick={() => setProjectionSettingsOpen(false)}
+              onClick={() => {
+                setProjectionMode(false);
+                setProjectionSettingsOpen(false);
+              }}
               style={{ ...toolbarIconButtonStyle, width: 28, height: 28, fontSize: 12 }}
-              title="Hide projection settings"
+              title="Turn function tool off"
             >
               ←
             </button>
@@ -7360,6 +8366,9 @@ function ChartPanelComponent({
             </span>
             <select
               value={activeChartFunctionId}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
               onChange={(event) => setActiveChartFunctionId(event.target.value as ChartFunctionId)}
               style={{ ...toolbarSelectStyle, width: "100%" }}
               title="Choose which chart function to draw"
@@ -7426,7 +8435,11 @@ function ChartPanelComponent({
                 activeChartFunctionIdRef.current = "support_prediction_wick_range";
                 setActiveChartFunctionId("support_prediction_wick_range");
               }
-              setProjectionMode((prev) => !prev);
+              setProjectionMode((prev) => {
+                const next = !prev;
+                setProjectionSettingsOpen(next);
+                return next;
+              });
             }}
             style={{
               ...toolbarButtonStyle,
@@ -7468,7 +8481,7 @@ function ChartPanelComponent({
           style={{
             position: "absolute",
             top: 96,
-            left: toolbarCollapsed ? 68 : projectionSettingsOpen ? 492 : 264,
+            left: projectionSettingsVisible ? 492 : 68,
             zIndex: 13,
             display: "flex",
             flexDirection: "column",
@@ -7513,6 +8526,7 @@ function ChartPanelComponent({
               ["atrExpansionCandles", "ATR Expansion Candles"],
               ["resistanceBreakoutConfirm", "Resistance Breakout Confirm"],
               ["trendlineCloseAlerts", "Trendline Close Alerts"],
+              ["fvgFlip", "FVG Flip + Quality"],
             ] as const).map(([key, label]) => {
               const isOn = lineVisibility[key];
               const disabled =
@@ -7577,6 +8591,7 @@ function ChartPanelComponent({
                 atrExpansionCandles: false,
                 resistanceBreakoutConfirm: false,
                 trendlineCloseAlerts: false,
+                fvgFlip: false,
               })}
               style={{
                 ...toolbarButtonStyle,
@@ -7607,6 +8622,7 @@ function ChartPanelComponent({
                 atrExpansionCandles: true,
                 resistanceBreakoutConfirm: true,
                 trendlineCloseAlerts: true,
+                fvgFlip: true,
               })}
               style={{
                 ...toolbarButtonStyle,
@@ -7634,12 +8650,12 @@ function ChartPanelComponent({
         </div>
       ) : null}
 
-      {!toolbarCollapsed ? (
+      {trendlineSettingsVisible ? (
         <div
           style={{
             position: "absolute",
-            top: 96,
-            left: 68,
+            top: compactTools ? 76 : 96,
+            left: compactTools ? 54 : 68,
             zIndex: 13,
             display: "flex",
             flexDirection: "column",
@@ -7658,9 +8674,12 @@ function ChartPanelComponent({
               Trendline Settings
             </div>
             <button
-              onClick={() => setToolbarCollapsed(true)}
+              onClick={() => {
+                setDrawMode(false);
+                setPendingTrendPoint(null);
+              }}
               style={{ ...toolbarIconButtonStyle, width: 28, height: 28, fontSize: 12 }}
-              title="Hide trendline settings"
+              title="Turn trendline tool off"
             >
               ←
             </button>
@@ -7723,6 +8742,9 @@ function ChartPanelComponent({
           <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
             <button
               onClick={() => {
+                setProjectionMode(false);
+                setProjectionSettingsOpen(false);
+                setLineSettingsOpen(false);
                 setDrawMode((prev) => {
                   const next = !prev;
                   if (!next) setPendingTrendPoint(null);
@@ -7871,9 +8893,77 @@ function ChartPanelComponent({
           pointerEvents: "none",
         }}
       >
+        {bracketZoneOverlays.map((overlay) => (
+          <div
+            key={`bracket-zone-${overlay.orderId}`}
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 82,
+              top: 0,
+              bottom: 0,
+              pointerEvents: "none",
+              zIndex: 18,
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: overlay.rewardTop,
+                height: Math.max(overlay.rewardHeight, 2),
+                background: "linear-gradient(90deg, rgba(34,197,94,0.30), rgba(34,197,94,0.13))",
+                borderTop: "1px solid rgba(74,222,128,0.75)",
+                borderBottom: "1px solid rgba(74,222,128,0.65)",
+                boxShadow: "inset 0 0 26px rgba(34,197,94,0.16)",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: overlay.riskTop,
+                height: Math.max(overlay.riskHeight, 2),
+                background: "linear-gradient(90deg, rgba(239,68,68,0.31), rgba(239,68,68,0.14))",
+                borderTop: "1px solid rgba(248,113,113,0.75)",
+                borderBottom: "1px solid rgba(248,113,113,0.65)",
+                boxShadow: "inset 0 0 26px rgba(239,68,68,0.16)",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                right: 8,
+                top: Math.max(4, Math.min(overlay.rewardTop + 4, overlay.riskTop + overlay.riskHeight + 4)),
+                padding: "2px 7px",
+                borderRadius: 999,
+                background: "rgba(2,6,23,0.88)",
+                border: "1px solid rgba(148,163,184,0.55)",
+                color: "#e5e7eb",
+                fontSize: 10,
+                fontWeight: 900,
+                whiteSpace: "nowrap",
+                boxShadow: "0 8px 18px rgba(0,0,0,0.28)",
+              }}
+              title={`Risk/Reward ${overlay.rr.toFixed(2)}`}
+            >
+              R:R {overlay.rr.toFixed(2)}
+            </div>
+          </div>
+        ))}
+
         {orderLineOverlays.map((overlay) => (
           <div
             key={overlay.lineId}
+            data-order-line-row="true"
+            onPointerDownCapture={(event) => {
+              const target = event.target as HTMLElement | null;
+              if (target?.closest?.('[data-order-cancel="true"]')) {
+                cancelOrderFromLine(event, overlay);
+              }
+            }}
             onPointerDown={(event) => beginOrderLineDrag(event, overlay.line)}
             onPointerMove={moveOrderLineDuringDrag}
             onPointerUp={finishOrderLineDrag}
@@ -7899,7 +8989,7 @@ function ChartPanelComponent({
               style={{
                 position: "absolute",
                 right: 68,
-                top: -8,
+                top: overlay.labelTop - overlay.top + 1,
                 display: "flex",
                 alignItems: "center",
                 gap: 6,
@@ -7915,35 +9005,42 @@ function ChartPanelComponent({
               }}
             >
               <span style={{ color: overlay.color }}>{overlay.label}</span>
-              <span>{formatPrice(overlay.price)}</span>
+              <span data-order-price-value>{formatPrice(overlay.price)}</span>
               <span style={{ color: "#94a3b8", fontWeight: 800 }}>{overlay.detail}</span>
               <button
-                onPointerDown={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                }}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                }}
-                onClick={(event) => cancelOrderFromLine(event, overlay)}
-                title="Cancel this order"
-                style={{
-                  height: 20,
-                  minWidth: 24,
-                  padding: "0 7px",
-                  borderRadius: 999,
-                  border: "1px solid rgba(248,113,113,0.75)",
-                  background: "rgba(127,29,29,0.95)",
-                  color: "#fee2e2",
-                  fontSize: 10,
-                  fontWeight: 900,
-                  cursor: "pointer",
-                  pointerEvents: "auto",
-                }}
-              >
-                X
-              </button>
+                  type="button"
+                  data-order-cancel="true"
+                  onPointerDownCapture={(event) => cancelOrderFromLine(event, overlay)}
+                  onPointerDown={(event) => cancelOrderFromLine(event, overlay)}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.nativeEvent?.stopImmediatePropagation?.();
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.nativeEvent?.stopImmediatePropagation?.();
+                  }}
+                  title="Cancel this order and clear the bracket"
+                  style={{
+                    height: 20,
+                    minWidth: 24,
+                    padding: "0 7px",
+                    borderRadius: 999,
+                    border: "1px solid rgba(248,113,113,0.75)",
+                    background: "rgba(127,29,29,0.95)",
+                    color: "#fee2e2",
+                    fontSize: 10,
+                    fontWeight: 900,
+                    cursor: "pointer",
+                    pointerEvents: "auto",
+                    position: "relative",
+                    zIndex: 999,
+                  }}
+                >
+                  X
+                </button>
             </div>
           </div>
         ))}
@@ -8046,6 +9143,226 @@ function ChartPanelComponent({
             </div>
           </div>
         )) : null}
+
+
+        {effectiveLineVisibility.fvgFlip && fvgFlipOverlay ? (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                left: fvgFlipOverlay.left,
+                top: fvgFlipOverlay.top,
+                width: fvgFlipOverlay.width,
+                height: fvgFlipOverlay.height,
+                background:
+                  fvgFlipOverlay.status === "confirmed_bull_ifvg"
+                    ? (fvgFlipOverlay.quality?.label === "STRONG" ? "rgba(34,197,94,0.18)" : fvgFlipOverlay.quality?.label === "MEDIUM" ? "rgba(250,204,21,0.15)" : "rgba(239,68,68,0.13)")
+                    : "rgba(239,68,68,0.17)",
+                border:
+                  fvgFlipOverlay.status === "confirmed_bull_ifvg"
+                    ? (fvgFlipOverlay.quality?.border ?? "1px solid rgba(34,197,94,0.62)")
+                    : "1px solid rgba(248,113,113,0.74)",
+                borderRadius: 5,
+                boxShadow:
+                  fvgFlipOverlay.status === "confirmed_bull_ifvg"
+                    ? `${fvgFlipOverlay.quality?.glow ?? "0 0 18px rgba(34,197,94,0.16)"} inset`
+                    : "0 0 16px rgba(239,68,68,0.16) inset",
+                pointerEvents: "none",
+                zIndex: 18,
+              }}
+            />
+            <button
+              type="button"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setFvgLabelsExpanded((prev) => !prev);
+              }}
+              style={{
+                position: "absolute",
+                left: Math.max(fvgFlipOverlay.left + 6, fvgFlipOverlay.left + fvgFlipOverlay.width - (fvgLabelsExpanded ? 150 : 88)),
+                top: Math.max(fvgFlipOverlay.top - 22, 4),
+                padding: "2px 8px",
+                borderRadius: 6,
+                background:
+                  fvgFlipOverlay.status === "confirmed_bull_ifvg"
+                    ? (fvgFlipOverlay.quality?.bg ?? "rgba(22,101,52,0.90)")
+                    : "rgba(127,29,29,0.90)",
+                border:
+                  fvgFlipOverlay.status === "confirmed_bull_ifvg"
+                    ? (fvgFlipOverlay.quality?.border ?? "1px solid rgba(134,239,172,0.55)")
+                    : "1px solid rgba(252,165,165,0.58)",
+                color:
+                  fvgFlipOverlay.status === "confirmed_bull_ifvg"
+                    ? (fvgFlipOverlay.quality?.color ?? "#bbf7d0")
+                    : "#fecaca",
+                fontSize: 11,
+                fontWeight: 900,
+                letterSpacing: 0.2,
+                whiteSpace: "nowrap",
+                zIndex: 22,
+                pointerEvents: "auto",
+                cursor: "pointer",
+                boxShadow: "0 6px 14px rgba(0,0,0,0.28)",
+                maxWidth: fvgLabelsExpanded ? 220 : 96,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+              title={fvgLabelsExpanded ? "Collapse FVG labels" : `Expand ${fvgFlipOverlay.label}`}
+            >
+              <span style={{ marginRight: 5 }}>{fvgLabelsExpanded ? "▾" : "▸"}</span>
+              {fvgLabelsExpanded
+                ? fvgFlipOverlay.label
+                : fvgFlipOverlay.status === "confirmed_bull_ifvg"
+                  ? (fvgFlipOverlay.tradeState === "bounce_confirmed" ? "IFVG ✅" : fvgFlipOverlay.tradeState === "weakening" ? "IFVG ⚠" : "IFVG")
+                  : "FVG"}
+            </button>
+
+            {fvgLabelsExpanded && fvgFlipOverlay.tradeStateLabel ? (
+              <div
+                style={{
+                  position: "absolute",
+                  left: Math.max(fvgFlipOverlay.left + 6, fvgFlipOverlay.left + fvgFlipOverlay.width - 170),
+                  top: Math.max(fvgFlipOverlay.top + fvgFlipOverlay.height + 4, 4),
+                  padding: "2px 7px",
+                  borderRadius: 7,
+                  background: fvgFlipOverlay.tradeStateBg ?? fvgFlipOverlay.quality?.bg ?? "rgba(22,101,52,0.90)",
+                  border: fvgFlipOverlay.tradeStateBorder ?? fvgFlipOverlay.quality?.border ?? "1px solid rgba(134,239,172,0.55)",
+                  color: fvgFlipOverlay.tradeStateColor ?? fvgFlipOverlay.quality?.color ?? "#bbf7d0",
+                  fontSize: 10,
+                  fontWeight: 900,
+                  whiteSpace: "nowrap",
+                  pointerEvents: "none",
+                  zIndex: 14,
+                  boxShadow: "0 6px 14px rgba(0,0,0,0.28)",
+                }}
+              >
+                {fvgFlipOverlay.tradeStateLabel}
+              </div>
+            ) : null}
+
+
+            {fvgLabelsExpanded && fvgFlipOverlay.breakCandle ? (
+              <>
+                <div
+                  style={{
+                    position: "absolute",
+                    left: fvgFlipOverlay.breakCandle.left,
+                    top: fvgFlipOverlay.breakCandle.top,
+                    width: fvgFlipOverlay.breakCandle.width,
+                    height: fvgFlipOverlay.breakCandle.height,
+                    border: fvgFlipOverlay.breakCandle.quality?.border?.replace("1px", "2px") ?? "2px solid rgba(34,197,94,0.95)",
+                    background:
+                      fvgFlipOverlay.breakCandle.quality?.label === "STRONG"
+                        ? "rgba(34,197,94,0.10)"
+                        : fvgFlipOverlay.breakCandle.quality?.label === "MEDIUM"
+                          ? "rgba(250,204,21,0.10)"
+                          : "rgba(239,68,68,0.08)",
+                    borderRadius: 4,
+                    boxShadow: fvgFlipOverlay.breakCandle.quality?.glow ?? "0 0 16px rgba(34,197,94,0.45)",
+                    pointerEvents: "none",
+                    zIndex: 7,
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    left: fvgFlipOverlay.breakCandle.left,
+                    top: Math.max(fvgFlipOverlay.breakCandle.top - 20, 4),
+                    padding: "2px 6px",
+                    borderRadius: 6,
+                    background: fvgFlipOverlay.breakCandle.quality?.bg ?? "rgba(22,101,52,0.88)",
+                    border: fvgFlipOverlay.breakCandle.quality?.border ?? "1px solid rgba(134,239,172,0.50)",
+                    color: fvgFlipOverlay.breakCandle.quality?.color ?? "#bbf7d0",
+                    fontSize: 10,
+                    fontWeight: 900,
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                    zIndex: 11,
+                  }}
+                >
+                  {fvgFlipOverlay.breakCandle.label}
+                </div>
+              </>
+            ) : null}
+
+            {fvgLabelsExpanded && fvgFlipOverlay.retest ? (
+              <>
+                <div
+                  style={{
+                    position: "absolute",
+                    left: fvgFlipOverlay.retest.left - 8,
+                    top: fvgFlipOverlay.retest.top - 8,
+                    width: 0,
+                    height: 0,
+                    borderLeft: "8px solid transparent",
+                    borderRight: "8px solid transparent",
+                    borderBottom: `14px solid ${fvgFlipOverlay.retest.quality?.label === "STRONG" ? "#22c55e" : fvgFlipOverlay.retest.quality?.label === "MEDIUM" ? "#facc15" : "#ef4444"}`,
+                    filter: "drop-shadow(0 0 8px rgba(255,255,255,0.45))",
+                    pointerEvents: "none",
+                    zIndex: 13,
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    left: fvgFlipOverlay.retest.left + 18,
+                    top: Math.max(fvgFlipOverlay.retest.top - 28, 4),
+                    padding: "2px 7px",
+                    borderRadius: 7,
+                    background: fvgFlipOverlay.retest.quality?.bg ?? "rgba(22,101,52,0.90)",
+                    border: fvgFlipOverlay.retest.quality?.border ?? "1px solid rgba(134,239,172,0.55)",
+                    color: fvgFlipOverlay.retest.quality?.color ?? "#bbf7d0",
+                    fontSize: 10,
+                    fontWeight: 900,
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                    zIndex: 14,
+                  }}
+                >
+                  {fvgFlipOverlay.retest.label}
+                </div>
+              </>
+            ) : null}
+
+            {fvgLabelsExpanded && fvgFlipOverlay.status === "confirmed_bull_ifvg"
+              ? fvgFlipOverlay.targets.map((target) => (
+                  <div key={`${target.label}-${target.price}`}>
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: target.lineLeft,
+                        top: target.y,
+                        width: target.lineWidth,
+                        borderTop: target.label === "TP1" ? "1px dashed rgba(250,204,21,0.90)" : "1px solid rgba(96,165,250,0.90)",
+                        pointerEvents: "none",
+                        zIndex: 4,
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: target.labelLeft,
+                        top: target.y - 11,
+                        padding: "2px 6px",
+                        borderRadius: 6,
+                        background: target.label === "TP1" ? "rgba(113,63,18,0.90)" : "rgba(30,64,175,0.90)",
+                        border: target.label === "TP1" ? "1px solid rgba(253,224,71,0.50)" : "1px solid rgba(147,197,253,0.50)",
+                        color: target.label === "TP1" ? "#fef08a" : "#bfdbfe",
+                        fontSize: 10,
+                        fontWeight: 900,
+                        whiteSpace: "nowrap",
+                        pointerEvents: "none",
+                        zIndex: 11,
+                      }}
+                    >
+                      {target.label} {formatPrice(target.price)}
+                    </div>
+                  </div>
+                ))
+              : null}
+          </>
+        ) : null}
 
         {effectiveLineVisibility.compression && compressionRect ? (
           <>
@@ -8731,9 +10048,9 @@ const legendBoxStyle: CSSProperties = {
   background: "rgba(5, 18, 45, 0.88)",
   border: "1px solid rgba(255,255,255,0.09)",
   color: "#dbeafe",
-  padding: "8px 12px",
+  padding: "6px 10px",
   borderRadius: 10,
-  fontSize: 12,
+  fontSize: 11,
   fontWeight: 700,
   backdropFilter: "blur(4px)",
 };

@@ -8,6 +8,7 @@ import {
   type BackendAlertsConfig,
   type BackendAlertsStatus,
   type BackendAlertResult,
+  type BackendAlertSetup,
 } from "../services/api";
 
 type Props = {
@@ -29,9 +30,44 @@ function normalizeSymbols(input: string): string[] {
   );
 }
 
+const TF_OPTIONS = ["1m", "5m", "15m"];
+const SETUP_OPTIONS: Array<{ key: BackendAlertSetup; label: string }> = [
+  { key: "compression_abs_breakout", label: "Compression + ABS breakout" },
+  { key: "failed_breakdown_reclaim", label: "Failed breakdown reclaim" },
+  { key: "aggressive_buyers_reclaim", label: "Aggressive buyers reclaim" },
+  { key: "bullish_structure_shift", label: "Bullish structure shift" },
+  { key: "ifvg_retest", label: "IFVG retest" },
+  { key: "ifvg_bounce_confirmed", label: "IFVG bounce confirmed" },
+  { key: "ifvg_failure", label: "IFVG failure" },
+  { key: "trendline_close_cross", label: "Trendline close/cross" },
+  { key: "trendline_near", label: "Near trendline" },
+  { key: "projection_touch_cross", label: "Saved projection touch/cross" },
+  { key: "vwap_reclaim", label: "VWAP reclaim / near VWAP" },
+  { key: "pmh_break", label: "Premarket high break" },
+  { key: "rth_high_break", label: "RTH high break" },
+  { key: "ah_high_break", label: "After-hours high break" },
+];
+
+function normalizeTimeframes(value: unknown, fallback = ["1m"]): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  const out = raw.map(String).map((x) => x.toLowerCase().trim()).filter((x) => TF_OPTIONS.includes(x));
+  return Array.from(new Set(out.length ? out : fallback));
+}
+
+function normalizeSetups(value: unknown): BackendAlertSetup[] {
+  const all = SETUP_OPTIONS.map((x) => x.key);
+  const raw = Array.isArray(value) ? value : [];
+  const out = raw.filter((x): x is BackendAlertSetup => all.includes(x as BackendAlertSetup));
+  return Array.from(new Set(out.length ? out : all));
+}
+
 const DEFAULT_CONFIG: BackendAlertsConfig = {
   symbols: [],
   timeframe: "1m",
+  timeframes: ["1m"],
+  confluence_mode: "any",
+  alert_setups: SETUP_OPTIONS.map((x) => x.key),
+  alert_on_prealert: false,
   poll_seconds: 20,
   cooldown_seconds: 300,
   lookback_bars: 6,
@@ -48,7 +84,10 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
   const [error, setError] = useState("");
 
   const [symbolsInput, setSymbolsInput] = useState("");
-  const [timeframe, setTimeframe] = useState("1m");
+  const [timeframes, setTimeframes] = useState<string[]>(["1m"]);
+  const [confluenceMode, setConfluenceMode] = useState<"any" | "all">("any");
+  const [alertSetups, setAlertSetups] = useState<BackendAlertSetup[]>(DEFAULT_CONFIG.alert_setups ?? []);
+  const [alertOnPrealert, setAlertOnPrealert] = useState(false);
   const [pollSeconds, setPollSeconds] = useState("20");
   const [cooldownSeconds, setCooldownSeconds] = useState("300");
   const [lookbackBars, setLookbackBars] = useState("6");
@@ -69,6 +108,10 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
       const cfg: BackendAlertsConfig = {
         symbols: next.config?.symbols ?? next.symbols ?? DEFAULT_CONFIG.symbols,
         timeframe: next.config?.timeframe ?? next.timeframe ?? DEFAULT_CONFIG.timeframe,
+        timeframes: next.config?.timeframes ?? next.timeframes ?? DEFAULT_CONFIG.timeframes,
+        confluence_mode: next.config?.confluence_mode ?? next.confluence_mode ?? DEFAULT_CONFIG.confluence_mode,
+        alert_setups: next.config?.alert_setups ?? next.alert_setups ?? DEFAULT_CONFIG.alert_setups,
+        alert_on_prealert: next.config?.alert_on_prealert ?? next.alert_on_prealert ?? DEFAULT_CONFIG.alert_on_prealert,
         poll_seconds:
           next.config?.poll_seconds ?? next.poll_seconds ?? DEFAULT_CONFIG.poll_seconds,
         cooldown_seconds:
@@ -88,7 +131,10 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
       };
 
       setSymbolsInput((cfg.symbols ?? []).join(", "));
-      setTimeframe(cfg.timeframe ?? "1m");
+      setTimeframes(normalizeTimeframes(cfg.timeframes ?? cfg.timeframe));
+      setConfluenceMode(cfg.confluence_mode === "all" ? "all" : "any");
+      setAlertSetups(normalizeSetups(cfg.alert_setups));
+      setAlertOnPrealert(Boolean(cfg.alert_on_prealert));
       setPollSeconds(String(cfg.poll_seconds ?? 20));
       setCooldownSeconds(String(cfg.cooldown_seconds ?? 300));
       setLookbackBars(String(cfg.lookback_bars ?? 6));
@@ -104,16 +150,39 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
     void loadStatus();
   }, []);
 
-  const buildPayload = (): BackendAlertsConfig => ({
+  const buildPayload = (): BackendAlertsConfig => {
+    const tfs = normalizeTimeframes(timeframes);
+    return {
     symbols: normalizeSymbols(symbolsInput),
-    timeframe,
+    timeframe: tfs[0],
+    timeframes: tfs,
+    confluence_mode: confluenceMode,
+    alert_setups: normalizeSetups(alertSetups),
+    alert_on_prealert: alertOnPrealert,
     poll_seconds: Math.max(5, Number(pollSeconds) || 20),
     cooldown_seconds: Math.max(30, Number(cooldownSeconds) || 300),
     lookback_bars: Math.max(5, Number(lookbackBars) || 6),
     notify_phone: notifyPhone,
     notify_webhook: false,
     webhook_url: null,
-  });
+  };
+  };
+
+  const toggleTimeframe = (tf: string) => {
+    setTimeframes((prev) => {
+      const has = prev.includes(tf);
+      const next = has ? prev.filter((item) => item !== tf) : [...prev, tf];
+      return next.length ? next : prev;
+    });
+  };
+
+  const toggleSetup = (setup: BackendAlertSetup) => {
+    setAlertSetups((prev) => {
+      const has = prev.includes(setup);
+      const next = has ? prev.filter((item) => item !== setup) : [...prev, setup];
+      return next.length ? next : prev;
+    });
+  };
 
   const handleSave = async () => {
     setWorking(true);
@@ -392,15 +461,21 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
         }}
       >
         <div style={{ display: "grid", gap: 6 }}>
-          <label style={labelStyle}>Timeframe</label>
-          <select
-            value={timeframe}
-            onChange={(e) => setTimeframe(e.target.value)}
-            style={fieldStyle}
-          >
-            <option value="1m">1m</option>
-            <option value="5m">5m</option>
-            <option value="15m">15m</option>
+          <label style={labelStyle}>Timeframes</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {TF_OPTIONS.map((tf) => (
+              <label key={tf} style={chipStyle(timeframes.includes(tf))}>
+                <input type="checkbox" checked={timeframes.includes(tf)} onChange={() => toggleTimeframe(tf)} /> {tf}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gap: 6 }}>
+          <label style={labelStyle}>Alert Mode</label>
+          <select value={confluenceMode} onChange={(e) => setConfluenceMode(e.target.value === "all" ? "all" : "any")} style={fieldStyle}>
+            <option value="any">Any timeframe</option>
+            <option value="all">All timeframes</option>
           </select>
         </div>
 
@@ -440,6 +515,36 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
           />
         </div>
       </div>
+
+
+      <div style={{ display: "grid", gap: 8 }}>
+        <label style={labelStyle}>Alert Types</label>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+          {SETUP_OPTIONS.map((setup) => (
+            <label key={setup.key} style={setupRowStyle}>
+              <input type="checkbox" checked={alertSetups.includes(setup.key)} onChange={() => toggleSetup(setup.key)} />
+              {setup.label}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          fontSize: 13,
+          fontWeight: 600,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={alertOnPrealert}
+          onChange={(e) => setAlertOnPrealert(e.target.checked)}
+        />
+        Include pre-alerts
+      </label>
 
       <label
         style={{
@@ -575,6 +680,33 @@ function phaseColor(phase?: string | null): string {
   if (phase === "prealert") return "#f59e0b";
   return "#94a3b8";
 }
+
+function chipStyle(active: boolean): React.CSSProperties {
+  return {
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    padding: "8px 10px",
+    borderRadius: 999,
+    background: active ? "#1d4ed8" : "#071731",
+    border: active ? "1px solid rgba(96,165,250,0.8)" : "1px solid rgba(255,255,255,0.12)",
+    fontSize: 13,
+    fontWeight: 800,
+    cursor: "pointer",
+  };
+}
+
+const setupRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "8px 10px",
+  borderRadius: 10,
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.08)",
+  fontSize: 13,
+  fontWeight: 700,
+};
 
 const labelStyle: React.CSSProperties = {
   fontSize: 13,

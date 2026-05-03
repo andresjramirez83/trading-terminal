@@ -1,3 +1,4 @@
+import { API_BASE_URL } from "../config";
 import type {
   BarsResponse,
   LastTradeResponse,
@@ -8,7 +9,47 @@ import type {
   ScannerV2Response,
 } from "../types/market";
 
-const API_BASE = "http://127.0.0.1:8000";
+export function resolveApiBaseUrl(): string {
+  const envBase = String(import.meta.env.VITE_API_BASE_URL || "").trim();
+  const configBase = String(API_BASE_URL || "").trim();
+  const rawBase = envBase || configBase;
+
+  const normalize = (value: string): string => {
+    const trimmed = value.trim().replace(/\/$/, "");
+    if (!trimmed || trimmed === "/") {
+      throw new Error("empty api base");
+    }
+
+    try {
+      const url = new URL(trimmed);
+      const hasExplicitPort = Boolean(url.port);
+      const isBareOrigin = url.pathname === "/" || url.pathname === "";
+
+      // If env/config is only http://165.22.145.148, that hits frontend/nginx.
+      // FastAPI is on :8000, so force :8000 for bare origins with no explicit port.
+      if (!hasExplicitPort && isBareOrigin) {
+        url.port = "8000";
+      }
+
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      return trimmed;
+    }
+  };
+
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    const protocol = window.location.protocol;
+
+    if (!rawBase || rawBase === "/" || rawBase === window.location.origin) {
+      return `${protocol}//${host}:8000`;
+    }
+  }
+
+  return normalize(rawBase);
+}
+
+export const API_BASE = resolveApiBaseUrl();
 
 /* =========================
    CORE FETCH HELPER
@@ -243,15 +284,35 @@ export async function runScannerV2(params: ScannerRefreshParams & { scanner_id: 
    BACKEND ALERTS
    ========================= */
 
+export type BackendAlertSetup =
+  | "compression_abs_breakout"
+  | "failed_breakdown_reclaim"
+  | "aggressive_buyers_reclaim"
+  | "bullish_structure_shift"
+  | "ifvg_retest"
+  | "ifvg_bounce_confirmed"
+  | "ifvg_failure"
+  | "trendline_close_cross"
+  | "trendline_near"
+  | "projection_touch_cross"
+  | "vwap_reclaim"
+  | "pmh_break"
+  | "rth_high_break"
+  | "ah_high_break";
+
 export type BackendAlertsConfig = {
   symbols: string[];
-  timeframe: string;
+  timeframe?: string; // legacy single-timeframe field; backend still accepts it
+  timeframes?: string[];
+  confluence_mode?: "any" | "all";
+  alert_setups?: BackendAlertSetup[];
   poll_seconds: number;
   cooldown_seconds: number;
   lookback_bars: number;
   notify_phone: boolean;
   notify_webhook?: boolean;
   webhook_url?: string | null;
+  alert_on_prealert?: boolean;
 };
 
 export type BackendAlertFeatures = {
@@ -287,12 +348,16 @@ export type BackendAlertsStatus = {
 
   symbols?: string[];
   timeframe?: string;
+  timeframes?: string[];
+  confluence_mode?: "any" | "all";
+  alert_setups?: BackendAlertSetup[];
   poll_seconds?: number;
   cooldown_seconds?: number;
   lookback_bars?: number;
   notify_phone?: boolean;
   notify_webhook?: boolean;
   webhook_url?: string | null;
+  alert_on_prealert?: boolean;
 
   config?: Partial<BackendAlertsConfig>;
 
@@ -344,6 +409,33 @@ export async function updateBackendAlertsConfig(
   });
 
   return parseJson<BackendAlertsStatus>(res);
+}
+
+
+export type InstantChartAlertPayload = {
+  symbol: string;
+  timeframe: string;
+  setup: BackendAlertSetup | string;
+  phase: "confirmed" | "prealert" | "none" | string;
+  score?: number;
+  message: string;
+  reason?: string;
+  features?: Record<string, any>;
+  source?: "frontend" | "backend" | string;
+  debounce_key?: string;
+};
+
+export async function sendInstantChartAlert(payload: InstantChartAlertPayload): Promise<any> {
+  const res = await fetch(`${API_BASE}/backend-alerts/instant-chart`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    keepalive: true,
+    body: JSON.stringify(payload),
+  });
+
+  return parseJson(res);
 }
 
 export async function sendBackendTestAlert(
@@ -419,6 +511,33 @@ export async function placeAlpacaOrder(payload: PlaceAlpacaOrderRequest) {
   return parseJson(res);
 }
 
+export type UpdateAlpacaOrderRequest = {
+  qty?: number;
+  limit_price?: number;
+  stop_price?: number;
+  time_in_force?: string;
+  mode?: AlpacaMode;
+};
+
+export async function updateAlpacaOrder(
+  orderId: string,
+  payload: UpdateAlpacaOrderRequest,
+  mode: AlpacaMode = "paper"
+) {
+  const res = await fetch(`${API_BASE}/alpaca/order/${orderId}?mode=${mode}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...payload,
+      mode: payload.mode ?? mode,
+    }),
+  });
+
+  return parseJson(res);
+}
+
 export async function cancelAlpacaOrder(
   orderId: string,
   mode: AlpacaMode = "paper"
@@ -434,11 +553,17 @@ export async function cancelAlpacaOrder(
    SHARED APP STATE SYNC
    ========================= */
 
+export type SharedChartRange = { from: number; to: number };
+
 export type SharedAlpacaStatePayload = {
-  selectedSymbol: string;
-  watchlist: string[];
-  manualWatchlist: string[];
-  updatedAt?: number;
+  selectedSymbol?: string | null;
+  timeframe?: string | null;
+  activeChart?: string | null;
+  watchlist?: string[];
+  manualWatchlist?: string[];
+  studyVisibility?: Record<string, boolean>;
+  chartRanges?: Record<string, SharedChartRange>;
+  updatedAt?: number | null;
 };
 
 export async function fetchSharedAlpacaState(): Promise<SharedAlpacaStatePayload | null> {

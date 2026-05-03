@@ -92,7 +92,10 @@ class PolygonService:
                 if tickers:
                     return tickers[:limit]
             except Exception as exc:
-                print(f"POLYGON ACTIVE SNAPSHOT FAILED {path}: {exc}", flush=True)
+                # Some Polygon plans do not support the active endpoint. A 404 here
+                # is expected and should not spam logs every scanner cycle.
+                if "HTTP 404" not in str(exc):
+                    print(f"POLYGON ACTIVE SNAPSHOT FAILED {path}: {exc}", flush=True)
                 continue
 
         return []
@@ -124,7 +127,10 @@ class PolygonService:
             data = await self._get(f"/v3/reference/tickers/{symbol.upper()}")
             return data.get("results") or {}
         except Exception as exc:
-            print(f"POLYGON TICKER DETAILS FAILED {symbol}: {exc}", flush=True)
+            # Scanner candidates can include tickers that no longer have details.
+            # Treat Polygon 404s as normal misses instead of noisy errors.
+            if "HTTP 404" not in str(exc):
+                print(f"POLYGON TICKER DETAILS FAILED {symbol}: {exc}", flush=True)
             return {}
 
     def _ms_to_dates(self, start_ms: int, end_ms: int) -> Tuple[str, str]:

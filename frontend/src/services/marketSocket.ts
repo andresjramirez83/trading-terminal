@@ -1,3 +1,5 @@
+import { WS_BASE_URL } from "../config";
+import { API_BASE } from "./api";
 type MarketSocketListener = (payload: unknown) => void;
 
 type SocketEntry = {
@@ -19,21 +21,59 @@ const MIN_CONNECT_SPACING_MS = 350;
 const BASE_RECONNECT_DELAY_MS = 1_200;
 const MAX_RECONNECT_DELAY_MS = 12_000;
 
-function getMarketWsUrl(symbol: string): string {
-  const isHttps = window.location.protocol === "https:";
-  const protocol = isHttps ? "wss" : "ws";
+function resolveWsBaseUrl(): string {
+  const envWs = String(import.meta.env.VITE_WS_URL || "").trim();
+  const configWs = String(WS_BASE_URL || "").trim();
+  const rawWs = envWs || configWs;
 
-  // Keep your local FastAPI backend as the default, but allow Vite env override later
-  // without changing this file again.
-  const envBase = (import.meta as any)?.env?.VITE_WS_BASE_URL as string | undefined;
-  if (envBase && envBase.trim()) {
-    const clean = envBase.trim().replace(/\/$/, "");
-    return `${clean}/ws/market?symbol=${encodeURIComponent(symbol)}`;
+  const normalizeWs = (value: string): string => {
+    const trimmed = value.trim().replace(/\/$/, "");
+    if (!trimmed || trimmed === "/") {
+      throw new Error("empty ws base");
+    }
+
+    const withProtocol = trimmed.startsWith("ws://") || trimmed.startsWith("wss://")
+      ? trimmed
+      : trimmed.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+
+    try {
+      const url = new URL(withProtocol);
+      const hasExplicitPort = Boolean(url.port);
+      const isBareOrigin = url.pathname === "/" || url.pathname === "";
+      if (!hasExplicitPort && isBareOrigin) {
+        url.port = "8000";
+      }
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      return withProtocol;
+    }
+  };
+
+  try {
+    if (rawWs && rawWs !== "/") {
+      return normalizeWs(rawWs);
+    }
+
+    const apiUrl = new URL(API_BASE);
+    apiUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+    if (!apiUrl.port && (apiUrl.pathname === "/" || apiUrl.pathname === "")) {
+      apiUrl.port = "8000";
+    }
+    return apiUrl.toString().replace(/\/$/, "");
+  } catch {
+    if (typeof window !== "undefined") {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${protocol}//${window.location.hostname}:8000`;
+    }
+    return "ws://127.0.0.1:8000";
   }
-
-  return `${protocol}://127.0.0.1:8000/ws/market?symbol=${encodeURIComponent(symbol)}`;
 }
 
+const MARKET_WS_BASE = resolveWsBaseUrl();
+
+function getMarketWsUrl(symbol: string): string {
+  return `${MARKET_WS_BASE}/ws/market?symbol=${encodeURIComponent(symbol)}`;
+}
 function isSocketAlive(socket: WebSocket | null): boolean {
   return !!socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN);
 }

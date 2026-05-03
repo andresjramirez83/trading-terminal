@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import traceback
+import sys
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,12 @@ from pydantic import BaseModel
 
 print("RUNNING MAIN FROM:", __file__, flush=True)
 load_dotenv(override=True)
+
+try:
+    import fcntl  # Linux server background-lock guard
+except Exception:  # Windows/local dev fallback
+    fcntl = None  # type: ignore
+
 
 try:
     from zoneinfo import ZoneInfo
@@ -103,14 +110,71 @@ class AlertPayload(BaseModel):
 
 class SharedAlpacaStatePayload(BaseModel):
     selectedSymbol: Optional[str] = None
+    timeframe: Optional[str] = None
+    activeChart: Optional[str] = None
     watchlist: List[str] = []
     manualWatchlist: List[str] = []
+    studyVisibility: Optional[Dict[str, Any]] = None
+    chartRanges: Dict[str, Dict[str, float]] = {}
     updatedAt: Optional[float] = None
 
 
 APP_STATE_DIR = Path(__file__).resolve().parent / "data" / "app_state"
 APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
 ALPACA_APP_STATE_FILE = APP_STATE_DIR / "alpaca_state.json"
+
+# Gunicorn can run multiple workers. Without a process lock, each worker starts
+# its own scanner + backend-alert loop. This lock lets only one worker run
+# background loops while every worker can still serve API/chart/websocket traffic.
+BACKGROUND_LOCK_FILE = APP_STATE_DIR / "background_worker.lock"
+BACKGROUND_LOCK_HANDLE: Optional[Any] = None
+BACKGROUND_LOCK_HELD = False
+
+
+def acquire_background_worker_lock() -> bool:
+    global BACKGROUND_LOCK_HANDLE, BACKGROUND_LOCK_HELD
+
+    if BACKGROUND_LOCK_HELD:
+        return True
+
+    if fcntl is None:
+        # Local Windows/dev fallback: do not block startup. On production Linux,
+        # fcntl is available and prevents duplicate scanner/alert loops.
+        BACKGROUND_LOCK_HELD = True
+        return True
+
+    try:
+        BACKGROUND_LOCK_HANDLE = BACKGROUND_LOCK_FILE.open("w")
+        fcntl.flock(BACKGROUND_LOCK_HANDLE.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        BACKGROUND_LOCK_HANDLE.write(f"pid={os.getpid()} started={datetime.now(timezone.utc).isoformat()}\n")
+        BACKGROUND_LOCK_HANDLE.flush()
+        BACKGROUND_LOCK_HELD = True
+        print(f"[background-lock] acquired by pid={os.getpid()}", flush=True)
+        return True
+    except BlockingIOError:
+        BACKGROUND_LOCK_HELD = False
+        print(f"[background-lock] another worker owns scanner/alerts; pid={os.getpid()} serving API only", flush=True)
+        return False
+    except Exception as exc:
+        BACKGROUND_LOCK_HELD = False
+        print(f"[background-lock] failed to acquire: {exc}", flush=True)
+        return False
+
+
+def release_background_worker_lock() -> None:
+    global BACKGROUND_LOCK_HANDLE, BACKGROUND_LOCK_HELD
+    if BACKGROUND_LOCK_HANDLE is None:
+        BACKGROUND_LOCK_HELD = False
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(BACKGROUND_LOCK_HANDLE.fileno(), fcntl.LOCK_UN)
+        BACKGROUND_LOCK_HANDLE.close()
+    except Exception:
+        pass
+    finally:
+        BACKGROUND_LOCK_HANDLE = None
+        BACKGROUND_LOCK_HELD = False
 
 
 def _normalize_symbol_list(items: List[str]) -> List[str]:
@@ -129,10 +193,40 @@ def _clean_alpaca_state(payload: SharedAlpacaStatePayload) -> Dict[str, Any]:
     watchlist = _normalize_symbol_list(payload.watchlist)
     manual = _normalize_symbol_list(payload.manualWatchlist)
     selected = "".join(ch for ch in str(payload.selectedSymbol or "").upper().strip() if ch.isalpha() or ch == ".")
+    timeframe = str(payload.timeframe or "1m").lower().strip()
+    if timeframe not in {"1m", "5m", "15m", "30m", "1h", "1d", "day"}:
+        timeframe = "1m"
+
+    active_chart = str(payload.activeChart or "").lower().strip()
+    if active_chart not in {"1m", "5m", "15m"}:
+        active_chart = timeframe if timeframe in {"1m", "5m", "15m"} else ""
+
+    chart_ranges: Dict[str, Dict[str, float]] = {}
+    if isinstance(payload.chartRanges, dict):
+        for raw_key, raw_range in payload.chartRanges.items():
+            if not isinstance(raw_range, dict):
+                continue
+            try:
+                from_value = float(raw_range.get("from"))
+                to_value = float(raw_range.get("to"))
+            except Exception:
+                continue
+            if to_value <= from_value:
+                continue
+            clean_key = str(raw_key).upper().strip()[:80]
+            if clean_key:
+                chart_ranges[clean_key] = {"from": from_value, "to": to_value}
+
+    study_visibility = payload.studyVisibility if isinstance(payload.studyVisibility, dict) else {}
+
     return {
         "selectedSymbol": selected or None,
+        "timeframe": timeframe,
+        "activeChart": active_chart or None,
         "watchlist": watchlist,
         "manualWatchlist": manual,
+        "studyVisibility": study_visibility,
+        "chartRanges": chart_ranges,
         "updatedAt": payload.updatedAt or datetime.now(timezone.utc).timestamp() * 1000,
     }
 
@@ -140,8 +234,17 @@ def _clean_alpaca_state(payload: SharedAlpacaStatePayload) -> Dict[str, Any]:
 class BackendAlertLoopConfig(BaseModel):
     enabled: bool = False
     symbols: List[str] = []
+    # Multi-timeframe alert engine. Keep timeframe for backward compatibility.
     timeframe: str = "1m"
-    poll_seconds: int = 20
+    timeframes: List[str] = ["1m"]
+    confluence_mode: str = "any"  # "any" or "all"
+    alert_setups: List[str] = [
+        "compression_abs_breakout",
+        "failed_breakdown_reclaim",
+        "aggressive_buyers_reclaim",
+        "bullish_structure_shift",
+    ]
+    poll_seconds: int = 5
     cooldown_seconds: int = 300
     lookback_bars: int = 8
     webhook_url: Optional[str] = None
@@ -159,7 +262,11 @@ class BackendAlertLoopConfig(BaseModel):
 class BackendAlertLoopUpdate(BaseModel):
     enabled: Optional[bool] = None
     symbols: Optional[List[str]] = None
+    # Accept both old single-timeframe payloads and new multi-timeframe payloads.
     timeframe: Optional[str] = None
+    timeframes: Optional[List[str]] = None
+    confluence_mode: Optional[str] = None
+    alert_setups: Optional[List[str]] = None
     poll_seconds: Optional[int] = None
     cooldown_seconds: Optional[int] = None
     lookback_bars: Optional[int] = None
@@ -175,17 +282,75 @@ class BackendAlertLoopUpdate(BaseModel):
     structure_window: Optional[int] = None
 
 
-DEFAULT_ALERT_SYMBOLS = [
-    item.strip().upper()
-    for item in os.getenv("BACKEND_ALERT_SYMBOLS", "AAPL,NVDA,TSLA,AMD").split(",")
-    if item.strip()
-]
+class InstantChartAlertPayload(BaseModel):
+    symbol: str
+    timeframe: str = "1m"
+    setup: str
+    phase: str = "confirmed"
+    score: float = 80.0
+    message: str
+    reason: Optional[str] = None
+    features: Dict[str, Any] = {}
+    source: str = "frontend"
+    debounce_key: Optional[str] = None
+
+
+
+SUPPORTED_ALERT_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h"}
+SUPPORTED_ALERT_SETUPS = {
+    "compression_abs_breakout",
+    "failed_breakdown_reclaim",
+    "aggressive_buyers_reclaim",
+    "bullish_structure_shift",
+    "ifvg_retest",
+    "ifvg_bounce_confirmed",
+    "ifvg_failure",
+    # Chart/drawing alert setups
+    "trendline_close_cross",
+    "trendline_near",
+    "projection_touch_cross",
+    "vwap_reclaim",
+    "pmh_break",
+    "rth_high_break",
+    "ah_high_break",
+}
+
+
+def normalize_alert_timeframes(values: Optional[List[str]], fallback: str = "1m") -> List[str]:
+    out: List[str] = []
+    for raw in values or []:
+        tf = str(raw or "").lower().strip()
+        if tf in SUPPORTED_ALERT_TIMEFRAMES and tf not in out:
+            out.append(tf)
+    if not out:
+        fb = str(fallback or "1m").lower().strip()
+        out = [fb if fb in SUPPORTED_ALERT_TIMEFRAMES else "1m"]
+    return out
+
+
+def normalize_alert_setups(values: Optional[List[str]]) -> List[str]:
+    out: List[str] = []
+    for raw in values or []:
+        setup = str(raw or "").strip()
+        if setup in SUPPORTED_ALERT_SETUPS and setup not in out:
+            out.append(setup)
+    return out or sorted(SUPPORTED_ALERT_SETUPS)
+
+
+# No default symbols. The alert list should be controlled only from the UI.
+# This prevents AAPL/NVDA/TSLA/AMD or env defaults from reappearing on fresh starts.
+DEFAULT_ALERT_SYMBOLS: List[str] = []
 
 backend_alert_config = BackendAlertLoopConfig(
     enabled=os.getenv("BACKEND_ALERTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
     symbols=DEFAULT_ALERT_SYMBOLS,
     timeframe=os.getenv("BACKEND_ALERTS_TIMEFRAME", "1m").strip().lower() or "1m",
-    poll_seconds=max(5, int(os.getenv("BACKEND_ALERTS_POLL_SECONDS", "20") or "20")),
+    timeframes=normalize_alert_timeframes(
+        os.getenv("BACKEND_ALERTS_TIMEFRAMES", os.getenv("BACKEND_ALERTS_TIMEFRAME", "1m")).split(",")
+    ),
+    confluence_mode=(os.getenv("BACKEND_ALERTS_CONFLUENCE_MODE", "any").strip().lower() if os.getenv("BACKEND_ALERTS_CONFLUENCE_MODE", "any").strip().lower() in {"any", "all"} else "any"),
+    alert_setups=normalize_alert_setups(os.getenv("BACKEND_ALERTS_ALERT_SETUPS", "").split(",")),
+    poll_seconds=max(5, int(os.getenv("BACKEND_ALERTS_POLL_SECONDS", "5") or "5")),
     cooldown_seconds=max(30, int(os.getenv("BACKEND_ALERTS_COOLDOWN_SECONDS", "300") or "300")),
     lookback_bars=max(5, int(os.getenv("BACKEND_ALERTS_LOOKBACK_BARS", "8") or "8")),
     webhook_url=os.getenv("BACKEND_ALERTS_WEBHOOK_URL", "").strip() or None,
@@ -660,6 +825,316 @@ def evaluate_backend_signal(symbol: str, timeframe: str) -> Dict[str, Any]:
     return signal
 
 
+
+
+def setup_allowed(signal: Dict[str, Any]) -> bool:
+    setup = signal.get("setup")
+    if not setup:
+        return True
+    allowed = normalize_alert_setups(backend_alert_config.alert_setups)
+    return str(setup) in set(allowed)
+
+
+def signal_is_deliverable(signal: Dict[str, Any]) -> bool:
+    if not signal.get("triggered"):
+        return False
+    if not setup_allowed(signal):
+        return False
+    phase = str(signal.get("phase") or "none")
+    return phase == "confirmed" or (phase == "prealert" and backend_alert_config.alert_on_prealert)
+
+
+def pick_best_signal(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not signals:
+        return {}
+    return max(signals, key=lambda s: float(s.get("score") or 0.0))
+
+
+# -----------------------------
+# Chart/drawing alert helpers
+# -----------------------------
+
+def _bar_time_seconds(bar: Dict[str, Any]) -> int:
+    raw = bar.get("time", bar.get("t", 0))
+    try:
+        value = int(float(raw))
+    except Exception:
+        return 0
+    return value // 1000 if value > 10_000_000_000 else value
+
+
+def _safe_price(value: Any, default: float = 0.0) -> float:
+    try:
+        price = float(value)
+        return price if price > 0 and price < 1_000_000 else default
+    except Exception:
+        return default
+
+
+def _build_chart_alert_signal(
+    *,
+    symbol: str,
+    timeframe: str,
+    setup: str,
+    phase: str,
+    score: float,
+    message: str,
+    reason: str,
+    features: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "symbol": symbol.upper(),
+        "timeframe": timeframe,
+        "triggered": phase in {"confirmed", "prealert"},
+        "phase": phase,
+        "setup": setup,
+        "score": round(float(score), 2),
+        "became_new": True,
+        "reason": reason,
+        "features": features or {},
+        "message": message,
+    }
+
+
+def _line_price_at_time(line: Dict[str, Any], chart_time: int) -> Optional[float]:
+    try:
+        slope = float(line.get("slope"))
+    except Exception:
+        slope = float("nan")
+    try:
+        intercept = float(line.get("intercept"))
+    except Exception:
+        intercept = float("nan")
+
+    if slope == slope and intercept == intercept:  # not NaN
+        price = slope * chart_time + intercept
+        if price > 0 and price < 1_000_000:
+            return price
+
+    t1 = _safe_price(line.get("t1"))
+    t2 = _safe_price(line.get("t2"))
+    p1 = _safe_price(line.get("p1"))
+    p2 = _safe_price(line.get("p2"))
+    if not t1 or not t2 or not p1 or not p2:
+        return None
+    if t1 == t2:
+        return p2
+    return p1 + (p2 - p1) * ((chart_time - t1) / (t2 - t1))
+
+
+def _get_saved_trendlines_for_alerts(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+    shared = _read_chart_items(symbol, "shared", "trendlines")
+    local = _read_chart_items(symbol, timeframe, "trendlines")
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for item in [*shared, *local]:
+        if not isinstance(item, dict):
+            continue
+        line_id = str(item.get("id") or "")
+        if not line_id:
+            continue
+        by_id[line_id] = item
+    return list(by_id.values())
+
+
+def _get_saved_projections_for_alerts(symbol: str) -> List[Dict[str, Any]]:
+    rows = _read_chart_items(symbol, "shared", "projections")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _near_pct(price: float, level: float) -> float:
+    if level <= 0:
+        return 999.0
+    return abs(price - level) / level
+
+
+def _crossed_level(prev_close: float, close: float, level: float) -> Optional[str]:
+    if prev_close <= level < close:
+        return "above"
+    if prev_close >= level > close:
+        return "below"
+    return None
+
+
+def _session_kind_for_bar_ms(ms: int) -> str:
+    try:
+        dt = datetime.fromtimestamp(ms / 1000, ET)
+    except Exception:
+        return "unknown"
+    hhmm = dt.hour * 100 + dt.minute
+    if 400 <= hhmm < 930:
+        return "premarket"
+    if 930 <= hhmm < 1600:
+        return "regular"
+    if 1600 <= hhmm < 2000:
+        return "afterhours"
+    return "overnight"
+
+
+def _same_et_date_ms(a_ms: int, b_ms: int) -> bool:
+    try:
+        return datetime.fromtimestamp(a_ms / 1000, ET).date() == datetime.fromtimestamp(b_ms / 1000, ET).date()
+    except Exception:
+        return False
+
+
+def _rolling_vwap_from_bars(bars: List[Dict[str, Any]], window: int = 40) -> float:
+    recent = bars[-window:] if len(bars) > window else bars
+    pv = 0.0
+    vol = 0.0
+    for bar in recent:
+        h = _safe_price(bar.get("high"))
+        l = _safe_price(bar.get("low"))
+        c = _safe_price(bar.get("close"))
+        v = _safe_price(bar.get("volume"), default=0.0)
+        if h > 0 and l > 0 and c > 0 and v > 0:
+            pv += ((h + l + c) / 3.0) * v
+            vol += v
+    return pv / vol if vol > 0 else 0.0
+
+
+def evaluate_chart_study_alerts(symbol: str, timeframe: str, raw_bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(raw_bars) < 2:
+        return []
+
+    bars = raw_bars
+    prev = bars[-2]
+    last = bars[-1]
+    prev_close = _safe_price(prev.get("close"))
+    close = _safe_price(last.get("close"))
+    high = _safe_price(last.get("high"))
+    low = _safe_price(last.get("low"))
+    last_time_s = _bar_time_seconds(last)
+    prev_time_s = _bar_time_seconds(prev)
+    symbol_u = symbol.upper()
+    out: List[Dict[str, Any]] = []
+    near_threshold = 0.0025  # 0.25% near-line/level warning
+
+    # Manual/saved trendlines
+    for line in _get_saved_trendlines_for_alerts(symbol_u, timeframe):
+        curr_line = _line_price_at_time(line, last_time_s)
+        prev_line = _line_price_at_time(line, prev_time_s)
+        if curr_line is None or prev_line is None or close <= 0 or prev_close <= 0:
+            continue
+        line_label = str(line.get("label") or line.get("id") or "trendline")[:40]
+        direction = None
+        if prev_close <= prev_line < close:
+            direction = "above"
+        elif prev_close >= prev_line > close:
+            direction = "below"
+        if direction:
+            out.append(_build_chart_alert_signal(
+                symbol=symbol_u,
+                timeframe=timeframe,
+                setup="trendline_close_cross",
+                phase="confirmed",
+                score=92.0,
+                message=f"{symbol_u} closed {direction} trendline on {timeframe} | close {close:.4f} | line {curr_line:.4f}",
+                reason=f"Trendline close cross | line={line_label} | close={close:.4f} | line_price={curr_line:.4f}",
+                features={"trendline_id": line.get("id"), "line_price": curr_line, "direction": direction},
+            ))
+            continue
+        dist = _near_pct(close, curr_line)
+        if dist <= near_threshold:
+            out.append(_build_chart_alert_signal(
+                symbol=symbol_u,
+                timeframe=timeframe,
+                setup="trendline_near",
+                phase="prealert",
+                score=max(55.0, 78.0 - dist * 6000.0),
+                message=f"{symbol_u} is near trendline on {timeframe} | close {close:.4f} | line {curr_line:.4f}",
+                reason=f"Near trendline | distance={dist * 100:.2f}% | line={line_label}",
+                features={"trendline_id": line.get("id"), "line_price": curr_line, "distance_pct": dist * 100.0},
+            ))
+
+    # Saved projection/support/resistance levels
+    for proj in _get_saved_projections_for_alerts(symbol_u):
+        level = _safe_price(proj.get("price"))
+        if level <= 0:
+            continue
+        title = str(proj.get("title") or "saved projection")[:60]
+        cross = _crossed_level(prev_close, close, level)
+        touched = low <= level <= high if high > 0 and low > 0 else False
+        if cross or touched:
+            phase = "confirmed" if cross else "prealert"
+            action = f"crossed {cross}" if cross else "touched"
+            out.append(_build_chart_alert_signal(
+                symbol=symbol_u,
+                timeframe=timeframe,
+                setup="projection_touch_cross",
+                phase=phase,
+                score=88.0 if cross else 68.0,
+                message=f"{symbol_u} {action} saved projection on {timeframe} | level {level:.4f} | close {close:.4f}",
+                reason=f"Saved projection {action} | {title} | level={level:.4f}",
+                features={"projection_id": proj.get("id"), "level": level, "action": action},
+            ))
+            continue
+        dist = _near_pct(close, level)
+        if dist <= near_threshold:
+            out.append(_build_chart_alert_signal(
+                symbol=symbol_u,
+                timeframe=timeframe,
+                setup="projection_touch_cross",
+                phase="prealert",
+                score=max(54.0, 72.0 - dist * 5000.0),
+                message=f"{symbol_u} is near saved projection on {timeframe} | level {level:.4f} | close {close:.4f}",
+                reason=f"Near saved projection | distance={dist * 100:.2f}% | {title}",
+                features={"projection_id": proj.get("id"), "level": level, "distance_pct": dist * 100.0},
+            ))
+
+    # VWAP reclaim from recent bars
+    vwap = _rolling_vwap_from_bars(bars, window=max(backend_alert_config.lookback_bars * 3, 20))
+    if vwap > 0 and prev_close > 0 and close > 0:
+        if prev_close <= vwap < close:
+            out.append(_build_chart_alert_signal(
+                symbol=symbol_u,
+                timeframe=timeframe,
+                setup="vwap_reclaim",
+                phase="confirmed",
+                score=86.0,
+                message=f"{symbol_u} reclaimed VWAP on {timeframe} | close {close:.4f} | VWAP {vwap:.4f}",
+                reason=f"VWAP reclaim | prev_close={prev_close:.4f} | close={close:.4f} | vwap={vwap:.4f}",
+                features={"vwap": vwap},
+            ))
+        elif _near_pct(close, vwap) <= near_threshold:
+            out.append(_build_chart_alert_signal(
+                symbol=symbol_u,
+                timeframe=timeframe,
+                setup="vwap_reclaim",
+                phase="prealert",
+                score=62.0,
+                message=f"{symbol_u} is near VWAP on {timeframe} | close {close:.4f} | VWAP {vwap:.4f}",
+                reason=f"Near VWAP | distance={_near_pct(close, vwap) * 100:.2f}%",
+                features={"vwap": vwap},
+            ))
+
+    # Session reference levels from the latest ET date in loaded bars
+    latest_ms = int(float(last.get("time", last.get("t", 0)) or 0))
+    same_day_bars = [b for b in bars if _same_et_date_ms(int(float(b.get("time", b.get("t", 0)) or 0)), latest_ms)]
+    levels: Dict[str, float] = {}
+    for session, setup in [("premarket", "pmh_break"), ("regular", "rth_high_break"), ("afterhours", "ah_high_break")]:
+        session_bars = [b for b in same_day_bars[:-1] if _session_kind_for_bar_ms(int(float(b.get("time", b.get("t", 0)) or 0))) == session]
+        highs = [_safe_price(b.get("high")) for b in session_bars]
+        highs = [x for x in highs if x > 0]
+        if highs:
+            levels[setup] = max(highs)
+
+    for setup, level in levels.items():
+        cross = _crossed_level(prev_close, close, level)
+        if cross == "above":
+            pretty = {"pmh_break": "PMH", "rth_high_break": "RTH high", "ah_high_break": "AH high"}.get(setup, setup)
+            out.append(_build_chart_alert_signal(
+                symbol=symbol_u,
+                timeframe=timeframe,
+                setup=setup,
+                phase="confirmed",
+                score=84.0,
+                message=f"{symbol_u} broke {pretty} on {timeframe} | close {close:.4f} | level {level:.4f}",
+                reason=f"{pretty} break | close={close:.4f} | level={level:.4f}",
+                features={"level": level, "reference": pretty},
+            ))
+
+    return out
+
 def alert_cooldown_key(signal: dict) -> str:
     setup = str(signal.get("setup") or "generic")
     phase = str(signal.get("phase") or "none")
@@ -704,45 +1179,76 @@ async def run_backend_alerts_loop() -> None:
                     continue
 
                 try:
-                    signal = await asyncio.to_thread(
-                        evaluate_backend_signal,
-                        symbol,
-                        backend_alert_config.timeframe,
+                    timeframes = normalize_alert_timeframes(
+                        backend_alert_config.timeframes,
+                        fallback=backend_alert_config.timeframe,
                     )
+                    tf_results: List[Dict[str, Any]] = []
 
-                    entry: Dict[str, Any] = {
-                        "symbol": symbol,
-                        "triggered": bool(signal.get("triggered")),
-                        "phase": signal.get("phase"),
-                        "setup": signal.get("setup"),
-                        "score": signal.get("score"),
-                        "message": signal.get("message"),
-                        "reason": signal.get("reason"),
-                        "became_new": bool(signal.get("became_new")),
-                        "features": signal.get("features"),
-                    }
-                    cycle_results.append(entry)
+                    for tf in timeframes:
+                        bars_for_tf = await asyncio.to_thread(fetch_signal_bars, symbol, tf)
+                        signal = await asyncio.to_thread(
+                            evaluate_symbol_signal,
+                            symbol,
+                            tf,
+                            bars_for_tf,
+                            signal_state_from_dict(backend_alert_signal_state.get(signal_state_key(symbol, tf))),
+                            build_signal_engine_config(),
+                        )
+                        state = signal.get("state")
+                        if state is not None:
+                            backend_alert_signal_state[signal_state_key(symbol, tf)] = signal_state_to_dict(state)
 
-                    if not signal.get("triggered"):
+                        tf_signals = [signal]
+                        tf_signals.extend(evaluate_chart_study_alerts(symbol, tf, bars_for_tf))
+
+                        for candidate in tf_signals:
+                            tf_results.append(candidate)
+                            cycle_results.append({
+                                "symbol": symbol,
+                                "timeframe": tf,
+                                "triggered": bool(candidate.get("triggered")) and setup_allowed(candidate),
+                                "phase": candidate.get("phase"),
+                                "setup": candidate.get("setup"),
+                                "score": candidate.get("score"),
+                                "message": candidate.get("message"),
+                                "reason": candidate.get("reason"),
+                                "became_new": bool(candidate.get("became_new")),
+                                "features": candidate.get("features"),
+                            })
+
+                    deliverable = [sig for sig in tf_results if signal_is_deliverable(sig)]
+
+                    if backend_alert_config.confluence_mode == "all":
+                        deliverable_timeframes = {str(sig.get("timeframe")) for sig in deliverable if sig.get("timeframe")}
+                        if not set(timeframes).issubset(deliverable_timeframes):
+                            continue
+                        signal = pick_best_signal(deliverable)
+                    else:
+                        if not deliverable:
+                            continue
+                        signal = pick_best_signal(deliverable)
+
+                    if not signal:
                         continue
-
-                    phase = str(signal.get("phase") or "none")
-                    should_deliver = phase == "confirmed" or (
-                        phase == "prealert" and backend_alert_config.alert_on_prealert
-                    )
-                    if not should_deliver:
-                        continue
-
                     if not can_send_backend_alert(signal, backend_alert_config.cooldown_seconds):
                         continue
 
-                    title = f"{phase.title()} Signal · {signal['symbol']}"
+                    phase = str(signal.get("phase") or "none")
+                    triggered_timeframes = [str(sig.get("timeframe")) for sig in deliverable if sig.get("timeframe")]
+                    title = f"{phase.title()} · {signal['symbol']} ({signal.get('timeframe')})"
+                    if backend_alert_config.confluence_mode == "all" and len(triggered_timeframes) > 1:
+                        title = f"Confluence {phase.title()} · {signal['symbol']} ({'/'.join(triggered_timeframes)})"
+
+                    message = str(signal.get("message") or "")
+                    if triggered_timeframes:
+                        message = f"{message} | TFs: {', '.join(triggered_timeframes)}"
 
                     if backend_alert_config.notify_phone:
                         await asyncio.to_thread(
                             send_pushover_alert,
                             title,
-                            signal["message"],
+                            message,
                             1 if phase == "confirmed" else 0,
                         )
 
@@ -752,8 +1258,10 @@ async def run_backend_alerts_loop() -> None:
                             backend_alert_config.webhook_url,
                             {
                                 "title": title,
-                                "message": signal["message"],
+                                "message": message,
                                 "signal": signal,
+                                "timeframes": triggered_timeframes,
+                                "confluence_mode": backend_alert_config.confluence_mode,
                             },
                         )
 
@@ -761,10 +1269,12 @@ async def run_backend_alerts_loop() -> None:
                     backend_alert_last_alert = {
                         "symbol": signal.get("symbol"),
                         "timeframe": signal.get("timeframe"),
+                        "timeframes": triggered_timeframes,
+                        "confluence_mode": backend_alert_config.confluence_mode,
                         "setup": signal.get("setup"),
                         "phase": signal.get("phase"),
                         "score": signal.get("score"),
-                        "message": signal.get("message"),
+                        "message": message,
                         "sent_at": datetime.now(timezone.utc).isoformat(),
                     }
                 except Exception as symbol_exc:
@@ -962,15 +1472,19 @@ def scanner_cache_status() -> Dict[str, Any]:
 @app.on_event("startup")
 async def on_startup() -> None:
     get_polygon_http_client()
-    start_backend_alert_task_if_needed()
-    start_scanner_task_if_needed()
+
+    if acquire_background_worker_lock():
+        start_backend_alert_task_if_needed()
+        start_scanner_task_if_needed()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     global POLYGON_HTTP_CLIENT
-    await stop_backend_alert_task()
-    await stop_scanner_task()
+    if BACKGROUND_LOCK_HELD:
+        await stop_backend_alert_task()
+        await stop_scanner_task()
+        release_background_worker_lock()
     if POLYGON_HTTP_CLIENT is not None and not POLYGON_HTTP_CLIENT.is_closed:
         await POLYGON_HTTP_CLIENT.aclose()
 
@@ -979,8 +1493,12 @@ async def on_shutdown() -> None:
 def get_shared_alpaca_state():
     empty_state = {
         "selectedSymbol": None,
+        "timeframe": None,
+        "activeChart": None,
         "watchlist": [],
         "manualWatchlist": [],
+        "studyVisibility": {},
+        "chartRanges": {},
         "updatedAt": None,
     }
     if not ALPACA_APP_STATE_FILE.exists():
@@ -989,8 +1507,12 @@ def get_shared_alpaca_state():
         data = json.loads(ALPACA_APP_STATE_FILE.read_text(encoding="utf-8"))
         return {
             "selectedSymbol": data.get("selectedSymbol"),
+            "timeframe": data.get("timeframe"),
+            "activeChart": data.get("activeChart"),
             "watchlist": data.get("watchlist") if isinstance(data.get("watchlist"), list) else [],
             "manualWatchlist": data.get("manualWatchlist") if isinstance(data.get("manualWatchlist"), list) else [],
+            "studyVisibility": data.get("studyVisibility") if isinstance(data.get("studyVisibility"), dict) else {},
+            "chartRanges": data.get("chartRanges") if isinstance(data.get("chartRanges"), dict) else {},
             "updatedAt": data.get("updatedAt"),
         }
     except Exception as exc:
@@ -1018,10 +1540,14 @@ def health():
             and os.getenv("PUSHOVER_APP_TOKEN", "").strip()
         ),
         "backend_alert_loop": {
+            "background_worker_lock_held": BACKGROUND_LOCK_HELD,
             "enabled": backend_alert_config.enabled,
             "running": bool(backend_alert_task and not backend_alert_task.done()),
             "symbols": backend_alert_config.symbols,
             "timeframe": backend_alert_config.timeframe,
+            "timeframes": normalize_alert_timeframes(backend_alert_config.timeframes, backend_alert_config.timeframe),
+            "confluence_mode": backend_alert_config.confluence_mode,
+            "alert_setups": normalize_alert_setups(backend_alert_config.alert_setups),
             "poll_seconds": backend_alert_config.poll_seconds,
             "cooldown_seconds": backend_alert_config.cooldown_seconds,
             "lookback_bars": backend_alert_config.lookback_bars,
@@ -1036,6 +1562,7 @@ def health():
             "last_alert": backend_alert_last_alert,
         },
         "background_scanner": {
+            "background_worker_lock_held": BACKGROUND_LOCK_HELD,
             "enabled": SCANNER_BACKGROUND_ENABLED,
             "running": bool(scanner_task and not scanner_task.done()),
             "status": scanner_last_status,
@@ -1073,6 +1600,24 @@ def backend_alerts_status():
         "running": bool(backend_alert_task and not backend_alert_task.done()),
         "symbols": backend_alert_config.symbols,
         "timeframe": backend_alert_config.timeframe,
+        "timeframes": normalize_alert_timeframes(backend_alert_config.timeframes, backend_alert_config.timeframe),
+        "confluence_mode": backend_alert_config.confluence_mode,
+        "alert_setups": normalize_alert_setups(backend_alert_config.alert_setups),
+        "config": {
+            "enabled": backend_alert_config.enabled,
+            "symbols": backend_alert_config.symbols,
+            "timeframe": backend_alert_config.timeframe,
+            "timeframes": normalize_alert_timeframes(backend_alert_config.timeframes, backend_alert_config.timeframe),
+            "confluence_mode": backend_alert_config.confluence_mode,
+            "alert_setups": normalize_alert_setups(backend_alert_config.alert_setups),
+            "poll_seconds": backend_alert_config.poll_seconds,
+            "cooldown_seconds": backend_alert_config.cooldown_seconds,
+            "lookback_bars": backend_alert_config.lookback_bars,
+            "notify_phone": backend_alert_config.notify_phone,
+            "notify_webhook": backend_alert_config.notify_webhook,
+            "webhook_url": backend_alert_config.webhook_url,
+            "alert_on_prealert": backend_alert_config.alert_on_prealert,
+        },
         "poll_seconds": backend_alert_config.poll_seconds,
         "cooldown_seconds": backend_alert_config.cooldown_seconds,
         "lookback_bars": backend_alert_config.lookback_bars,
@@ -1096,6 +1641,99 @@ def backend_alerts_status():
     }
 
 
+@app.post("/backend-alerts/instant-chart")
+async def backend_alerts_instant_chart(payload: InstantChartAlertPayload):
+    """Receive lightweight real-time chart events from the frontend.
+
+    This is the hybrid TradingView-style path: the chart detects active IFVG
+    state changes instantly from the live stream, while the backend handles
+    cooldown, phone/webhook delivery, and recent-alert logging. The normal
+    backend polling loop remains as a backup.
+    """
+    global backend_alert_last_alert, backend_alert_last_results
+
+    symbol = "".join(ch for ch in str(payload.symbol or "").upper().strip() if ch.isalpha() or ch == ".")
+    timeframe = str(payload.timeframe or "1m").lower().strip()
+    setup = str(payload.setup or "").strip()
+    phase = str(payload.phase or "confirmed").strip().lower()
+
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if timeframe not in SUPPORTED_ALERT_TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
+    if setup not in SUPPORTED_ALERT_SETUPS:
+        raise HTTPException(status_code=400, detail=f"Unsupported setup: {setup}")
+    if not str(payload.message or "").strip():
+        raise HTTPException(status_code=400, detail="message is required")
+
+    signal = _build_chart_alert_signal(
+        symbol=symbol,
+        timeframe=timeframe,
+        setup=setup,
+        phase="confirmed" if phase == "confirmed" else "prealert" if phase == "prealert" else "none",
+        score=float(payload.score or 80.0),
+        message=str(payload.message).strip(),
+        reason=str(payload.reason or payload.message).strip(),
+        features={**(payload.features or {}), "source": payload.source or "frontend"},
+    )
+
+    result_row = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "triggered": bool(signal.get("triggered")) and setup_allowed(signal),
+        "phase": signal.get("phase"),
+        "setup": signal.get("setup"),
+        "score": signal.get("score"),
+        "message": signal.get("message"),
+        "reason": signal.get("reason"),
+        "became_new": True,
+        "features": signal.get("features"),
+    }
+
+    backend_alert_last_results = (backend_alert_last_results + [result_row])[-100:]
+
+    if not backend_alert_config.enabled:
+        return {"ok": True, "delivered": False, "reason": "backend alerts disabled", "signal": result_row}
+    if not setup_allowed(signal):
+        return {"ok": True, "delivered": False, "reason": "setup not enabled", "signal": result_row}
+    if not signal_is_deliverable(signal):
+        return {"ok": True, "delivered": False, "reason": "phase not deliverable", "signal": result_row}
+    if not can_send_backend_alert(signal, backend_alert_config.cooldown_seconds):
+        return {"ok": True, "delivered": False, "reason": "cooldown", "signal": result_row}
+
+    title = f"{str(signal.get('phase') or 'Alert').title()} · {symbol} ({timeframe})"
+    message = str(signal.get("message") or "")
+
+    if backend_alert_config.notify_phone:
+        await asyncio.to_thread(
+            send_pushover_alert,
+            title,
+            message,
+            1 if signal.get("phase") == "confirmed" else 0,
+        )
+
+    if backend_alert_config.notify_webhook and backend_alert_config.webhook_url:
+        await asyncio.to_thread(
+            post_json_webhook,
+            backend_alert_config.webhook_url,
+            {"title": title, "message": message, "signal": signal},
+        )
+
+    mark_backend_alert_sent(signal)
+    backend_alert_last_alert = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "setup": setup,
+        "phase": signal.get("phase"),
+        "score": signal.get("score"),
+        "message": message,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "source": payload.source or "frontend",
+    }
+
+    return {"ok": True, "delivered": True, "signal": result_row}
+
+
 @app.post("/backend-alerts/config")
 async def backend_alerts_config(update: BackendAlertLoopUpdate):
     if update.enabled is not None:
@@ -1104,6 +1742,15 @@ async def backend_alerts_config(update: BackendAlertLoopUpdate):
         backend_alert_config.symbols = [item.strip().upper() for item in update.symbols if item.strip()]
     if update.timeframe is not None:
         backend_alert_config.timeframe = update.timeframe.strip().lower()
+        backend_alert_config.timeframes = normalize_alert_timeframes([backend_alert_config.timeframe], backend_alert_config.timeframe)
+    if update.timeframes is not None:
+        backend_alert_config.timeframes = normalize_alert_timeframes(update.timeframes, backend_alert_config.timeframe)
+        backend_alert_config.timeframe = backend_alert_config.timeframes[0]
+    if update.confluence_mode is not None:
+        mode = update.confluence_mode.strip().lower()
+        backend_alert_config.confluence_mode = mode if mode in {"any", "all"} else "any"
+    if update.alert_setups is not None:
+        backend_alert_config.alert_setups = normalize_alert_setups(update.alert_setups)
     if update.poll_seconds is not None:
         backend_alert_config.poll_seconds = max(5, int(update.poll_seconds))
     if update.cooldown_seconds is not None:
@@ -1499,6 +2146,93 @@ async def scanner_v2_run(
         print("[scanner-v2/run] error:", exc, flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# === CLOUD CHART DRAWING STORAGE ===
+# Persistent JSON-backed storage for trendlines and projections.
+# This removes 404s from /chart/trendlines/* and /chart/projections/*
+# and lets drawings persist through page reloads, timeframe changes, and devices
+# hitting the same cloud backend.
+CHART_STORAGE_DIR = Path(__file__).resolve().parent / "data" / "chart_storage"
+CHART_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _clean_chart_part(value: str) -> str:
+    cleaned = "".join(ch for ch in str(value).upper().strip() if ch.isalnum() or ch in {".", "-", "_"})
+    return cleaned or "UNKNOWN"
+
+
+def _chart_storage_file(symbol: str, scope: str, kind: str) -> Path:
+    safe_symbol = _clean_chart_part(symbol)
+    safe_scope = _clean_chart_part(scope)
+    safe_kind = _clean_chart_part(kind).lower()
+    return CHART_STORAGE_DIR / f"{safe_symbol}__{safe_scope}__{safe_kind}.json"
+
+
+def _extract_chart_items(data: Any, kind: str) -> List[Dict[str, Any]]:
+    """Accept both legacy list payloads and object payloads like {trendlines: [...]} / {projections: [...]}."""
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        if isinstance(data.get("items"), list):
+            return [item for item in data["items"] if isinstance(item, dict)]
+        if kind == "trendlines" and isinstance(data.get("trendlines"), list):
+            return [item for item in data["trendlines"] if isinstance(item, dict)]
+        if kind == "projections" and isinstance(data.get("projections"), list):
+            return [item for item in data["projections"] if isinstance(item, dict)]
+    return []
+
+
+def _read_chart_items(symbol: str, scope: str, kind: str) -> List[Dict[str, Any]]:
+    path = _chart_storage_file(symbol, scope, kind)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return _extract_chart_items(data, kind)
+    except Exception as exc:
+        print(f"[chart-storage] read error {path}: {exc}", flush=True)
+        return []
+
+
+def _write_chart_items(symbol: str, scope: str, kind: str, items: Any) -> Dict[str, Any]:
+    path = _chart_storage_file(symbol, scope, kind)
+    payload = _extract_chart_items(items, kind)
+    tmp_file = path.with_suffix(".tmp")
+    # Store as an object so both backend alerts and frontend readers have a stable shape.
+    key = "trendlines" if kind == "trendlines" else "projections"
+    tmp_file.write_text(json.dumps({key: payload}, indent=2), encoding="utf-8")
+    tmp_file.replace(path)
+    return {
+        "ok": True,
+        "symbol": _clean_chart_part(symbol),
+        "scope": _clean_chart_part(scope),
+        "kind": kind,
+        "count": len(payload),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/chart/trendlines/{symbol}/{scope}")
+def get_chart_trendlines(symbol: str, scope: str):
+    rows = _read_chart_items(symbol, scope, "trendlines")
+    return {"trendlines": rows, "items": rows}
+
+
+@app.put("/chart/trendlines/{symbol}/{scope}")
+def put_chart_trendlines(symbol: str, scope: str, items: Any = Body(default=[])):
+    return _write_chart_items(symbol, scope, "trendlines", items)
+
+
+@app.get("/chart/projections/{symbol}/{scope}")
+def get_chart_projections(symbol: str, scope: str):
+    rows = _read_chart_items(symbol, scope, "projections")
+    return {"projections": rows, "items": rows}
+
+
+@app.put("/chart/projections/{symbol}/{scope}")
+def put_chart_projections(symbol: str, scope: str, items: Any = Body(default=[])):
+    return _write_chart_items(symbol, scope, "projections", items)
 
 
 @app.get("/alpaca/account")

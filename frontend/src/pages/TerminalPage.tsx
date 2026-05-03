@@ -13,8 +13,11 @@ import {
   fetchAlpacaOrders,
   placeAlpacaOrder,
   cancelAlpacaOrder,
+  updateAlpacaOrder,
+  fetchSharedAlpacaState,
+  saveSharedAlpacaState,
+  type SharedChartRange,
 } from "../services/api";
-import type { PlaceAlpacaOrderRequest } from "../types/market";
 
 type Stats = {
   last: number | null;
@@ -134,6 +137,39 @@ const EMERGENCY_FALLBACK_SYMBOL = "";
 const MANUAL_WATCHLIST_STORAGE_KEY = "terminalManualWatchlist";
 const SHARED_SCANNER_WATCHLIST_STORAGE_KEY = "watchlist";
 const SHARED_ACTIVE_SYMBOL_STORAGE_KEY = "activeSymbol";
+const ACTIVE_TERMINAL_TIMEFRAME_STORAGE_KEY = "terminalActiveTimeframe";
+
+type TerminalTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "1d";
+
+function normalizeTerminalTimeframe(value: string | null | undefined): TerminalTimeframe {
+  return value === "5m" || value === "15m" || value === "30m" || value === "1h" || value === "1d" ? value : "1m";
+}
+
+function loadTerminalTimeframe(): TerminalTimeframe {
+  if (typeof window === "undefined") return "1m";
+  return normalizeTerminalTimeframe(window.localStorage.getItem(ACTIVE_TERMINAL_TIMEFRAME_STORAGE_KEY));
+}
+
+function saveTerminalTimeframe(nextTimeframe: string) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ACTIVE_TERMINAL_TIMEFRAME_STORAGE_KEY, normalizeTerminalTimeframe(nextTimeframe));
+}
+
+function chartRangeKey(symbol: string, timeframe: string): string {
+  return `${normalizeSingleSymbol(symbol)}::${String(timeframe).toLowerCase()}`;
+}
+
+function normalizeChartRanges(value: unknown): Record<string, SharedChartRange> {
+  if (!value || typeof value !== "object") return {};
+  const out: Record<string, SharedChartRange> = {};
+  for (const [key, range] of Object.entries(value as Record<string, any>)) {
+    const from = Number(range?.from);
+    const to = Number(range?.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) continue;
+    out[String(key).toUpperCase()] = { from, to };
+  }
+  return out;
+}
 
 function loadSharedScannerWatchlist(): string[] {
   // Scanner watchlist must come from live ScannerPanel results only.
@@ -223,17 +259,33 @@ function formatNumber(value: string | number | null | undefined, digits = 2): st
   return num.toFixed(digits);
 }
 
+function normalizeAlpacaOrderPrice(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return value;
+
+  // Alpaca minimum pricing rule:
+  // - $1.00 and above: max 2 decimal places
+  // - below $1.00: max 4 decimal places
+  // This also strips JS floating-point tails such as 0.37010000000000004.
+  const decimals = value >= 1 ? 2 : 4;
+  return Number(value.toFixed(decimals));
+}
+
+const TERMINAL_ORDER_POLL_MS = 12000;
+
 export default function TerminalPage() {
   const navigate = useNavigate();
 
   const initialScannerWatchlist = useMemo(() => loadSharedScannerWatchlist(), []);
-  const initialSymbol = EMERGENCY_FALLBACK_SYMBOL;
+  const initialSymbol = useMemo(() => loadSharedActiveSymbol(EMERGENCY_FALLBACK_SYMBOL), []);
 
   const [symbol, setSymbol] = useState(initialSymbol);
   const [scannerSelectedSymbol, setScannerSelectedSymbol] = useState(initialSymbol);
-  const [timeframe, setTimeframe] = useState("1m");
+  const [timeframe, setTimeframe] = useState<TerminalTimeframe>(() => loadTerminalTimeframe());
   const [watchlist, setWatchlist] = useState<string[]>(initialScannerWatchlist);
   const [manualWatchlist, setManualWatchlist] = useState<string[]>(() => loadManualWatchlist());
+  const [chartRanges, setChartRanges] = useState<Record<string, SharedChartRange>>({});
+  const sharedStateHydratedRef = useRef(false);
+  const sharedStateSaveTimerRef = useRef<number | null>(null);
   const [stats, setStats] = useState<Stats>({
     last: null,
     pmh: null,
@@ -267,7 +319,93 @@ export default function TerminalPage() {
   const [orderMessage, setOrderMessage] = useState("");
   const [orderError, setOrderError] = useState("");
   const brokerOrdersInFlightRef = useRef(false);
+  const orderPriceLocksRef = useRef<Record<string, { price: number; kind: string; expiresAt: number }>>({});
+  // Same optimistic cancel quarantine used by Alpaca page: when X is clicked,
+  // remove the order immediately and keep polling from flashing it back in.
+  const cancelOrderLocksRef = useRef<Record<string, number>>({});
+  const [, forceOrderLockRender] = useState(0);
+  const symbolUpper = useMemo(() => normalizeSingleSymbol(symbol), [symbol]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateSharedState = async () => {
+      try {
+        const remote = await fetchSharedAlpacaState();
+        if (cancelled || !remote) return;
+
+        const nextSymbol = normalizeSingleSymbol(String(remote.selectedSymbol || ""));
+        if (nextSymbol) {
+          setSymbol(nextSymbol);
+          setScannerSelectedSymbol(nextSymbol);
+          saveSharedActiveSymbol(nextSymbol);
+        }
+
+        const nextTimeframe = normalizeTerminalTimeframe(remote.timeframe || remote.activeChart || null);
+        setTimeframe(nextTimeframe);
+        saveTerminalTimeframe(nextTimeframe);
+
+        if (Array.isArray(remote.manualWatchlist)) {
+          setManualWatchlist(Array.from(new Set(remote.manualWatchlist.map((item) => normalizeSingleSymbol(String(item))).filter(Boolean))));
+        }
+
+        if (remote.studyVisibility && typeof remote.studyVisibility === "object") {
+          const nextVisibility = normalizeOverlayVisibility(remote.studyVisibility as Partial<OverlayVisibility>);
+          setVisibility(nextVisibility);
+          saveSharedStudyVisibility(nextVisibility);
+        }
+
+        setChartRanges(normalizeChartRanges(remote.chartRanges));
+      } catch (err) {
+        console.warn("Shared terminal state load failed", err);
+      } finally {
+        if (!cancelled) sharedStateHydratedRef.current = true;
+      }
+    };
+
+    void hydrateSharedState();
+
+    return () => {
+      cancelled = true;
+      if (sharedStateSaveTimerRef.current !== null) {
+        window.clearTimeout(sharedStateSaveTimerRef.current);
+        sharedStateSaveTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sharedStateHydratedRef.current) return;
+
+    if (sharedStateSaveTimerRef.current !== null) {
+      window.clearTimeout(sharedStateSaveTimerRef.current);
+    }
+
+    sharedStateSaveTimerRef.current = window.setTimeout(() => {
+      sharedStateSaveTimerRef.current = null;
+      void saveSharedAlpacaState({
+        selectedSymbol: symbolUpper,
+        timeframe,
+        activeChart: timeframe,
+        watchlist,
+        manualWatchlist,
+        studyVisibility: visibility as unknown as Record<string, boolean>,
+        chartRanges,
+        updatedAt: Date.now(),
+      }).catch((err) => console.warn("Shared terminal state save failed", err));
+    }, 650);
+  }, [symbolUpper, timeframe, watchlist, manualWatchlist, visibility, chartRanges]);
+
+  const handleVisibleRangeChange = useCallback((range: SharedChartRange) => {
+    const key = chartRangeKey(symbolUpper, timeframe);
+    setChartRanges((prev) => {
+      const previous = prev[key];
+      if (previous && Math.abs(previous.from - range.from) < 0.01 && Math.abs(previous.to - range.to) < 0.01) {
+        return prev;
+      }
+      return { ...prev, [key]: range };
+    });
+  }, [symbolUpper, timeframe]);
 
   useEffect(() => {
     const handleSharedStudyVisibilityChange = (event: Event) => {
@@ -294,8 +432,6 @@ export default function TerminalPage() {
       window.removeEventListener("storage", handleStorage);
     };
   }, []);
-
-  const symbolUpper = useMemo(() => normalizeSingleSymbol(symbol), [symbol]);
 
   useEffect(() => {
     window.localStorage.setItem(MANUAL_WATCHLIST_STORAGE_KEY, JSON.stringify(manualWatchlist));
@@ -468,6 +604,134 @@ export default function TerminalPage() {
     setQuickAlertOpen(true);
   }, [symbolUpper]);
 
+  const patchOrderWithPriceLock = useCallback((order: any) => {
+    const orderId = String(order?.id ?? "");
+    const lock = orderId ? orderPriceLocksRef.current[orderId] : undefined;
+    if (!lock) return order;
+    if (Date.now() > lock.expiresAt) {
+      delete orderPriceLocksRef.current[orderId];
+      return order;
+    }
+
+    const kind = String(lock.kind || "limit").toLowerCase();
+    const patched: any = { ...order };
+
+    if (kind === "take_profit") {
+      patched.take_profit = { ...(patched.take_profit ?? {}), limit_price: lock.price };
+      patched.take_profit_price = lock.price;
+      patched.takeProfitPrice = lock.price;
+    } else if (kind === "stop_loss" || kind === "stop") {
+      patched.stop_loss = { ...(patched.stop_loss ?? {}), stop_price: lock.price };
+      patched.stop_loss_price = lock.price;
+      patched.stopLossPrice = lock.price;
+      patched.stop_price = lock.price;
+      patched.stopPrice = lock.price;
+    } else {
+      patched.limit_price = lock.price;
+      patched.limitPrice = lock.price;
+      patched.price = lock.price;
+    }
+
+    return patched;
+  }, []);
+
+  const applyOrderPriceLocks = useCallback((incomingOrders: any[]) => {
+    const now = Date.now();
+    for (const [orderId, lock] of Object.entries(orderPriceLocksRef.current) as Array<[string, { price: number; kind: string; expiresAt: number }]>) {
+      if (!lock || now > lock.expiresAt) delete orderPriceLocksRef.current[orderId];
+    }
+    return (Array.isArray(incomingOrders) ? incomingOrders : []).map(patchOrderWithPriceLock);
+  }, [patchOrderWithPriceLock]);
+
+  const collectOrderRelationIds = useCallback((order: any): string[] => {
+    const ids = new Set<string>();
+    const add = (value: unknown) => {
+      const id = String(value ?? "").trim();
+      if (id) ids.add(id);
+    };
+
+    add(order?.id);
+    add(order?.parent_order_id);
+    add(order?.parentOrderId);
+    add(order?.replaced_by);
+    add(order?.replaces);
+
+    if (Array.isArray(order?.legs)) {
+      for (const leg of order.legs) {
+        add(leg?.id);
+        add(leg?.parent_order_id);
+        add(leg?.parentOrderId);
+      }
+    }
+
+    return Array.from(ids);
+  }, []);
+
+  const applyCancelOrderLocks = useCallback((incomingOrders: any[]) => {
+    const now = Date.now();
+    for (const [orderId, expiresAt] of Object.entries(cancelOrderLocksRef.current)) {
+      if (!expiresAt || now > expiresAt) delete cancelOrderLocksRef.current[orderId];
+    }
+
+    const lockedIds = new Set(Object.keys(cancelOrderLocksRef.current));
+    if (!lockedIds.size) return Array.isArray(incomingOrders) ? incomingOrders : [];
+
+    return (Array.isArray(incomingOrders) ? incomingOrders : []).filter((order) => {
+      const relationIds = collectOrderRelationIds(order);
+      return !relationIds.some((id) => lockedIds.has(id));
+    });
+  }, [collectOrderRelationIds]);
+
+  const lockCanceledOrder = useCallback((orderId: string, ttlMs = 20000) => {
+    const id = String(orderId || "").trim();
+    if (!id) return;
+
+    const expiresAt = Date.now() + ttlMs;
+    cancelOrderLocksRef.current[id] = expiresAt;
+
+    // Quarantine known related ids too, so bracket legs/parents do not reappear
+    // during the next poll while Alpaca is still settling the cancellation.
+    for (const order of Array.isArray(orders) ? orders : []) {
+      const relationIds = collectOrderRelationIds(order);
+      if (relationIds.includes(id)) {
+        for (const relatedId of relationIds) cancelOrderLocksRef.current[relatedId] = expiresAt;
+      }
+    }
+
+    forceOrderLockRender((value) => value + 1);
+  }, [collectOrderRelationIds, orders]);
+
+  const lockChartOrderPrice = useCallback((orderId: string, kind: string, price: number, ttlMs = 12000) => {
+    if (!orderId || !Number.isFinite(price) || price <= 0) return;
+    orderPriceLocksRef.current[orderId] = {
+      price,
+      kind: String(kind || "limit").toLowerCase(),
+      expiresAt: Date.now() + ttlMs,
+    };
+    forceOrderLockRender((value) => value + 1);
+  }, []);
+
+  const patchOrderPrice = useCallback((order: any, kind: string, price: number) => {
+    const lineKind = String(kind || "limit").toLowerCase();
+    const patched: any = { ...order };
+    if (lineKind === "take_profit") {
+      patched.take_profit = { ...(patched.take_profit ?? {}), limit_price: price };
+      patched.take_profit_price = price;
+      patched.takeProfitPrice = price;
+    } else if (lineKind === "stop_loss" || lineKind === "stop") {
+      patched.stop_loss = { ...(patched.stop_loss ?? {}), stop_price: price };
+      patched.stop_loss_price = price;
+      patched.stopLossPrice = price;
+      patched.stop_price = price;
+      patched.stopPrice = price;
+    } else {
+      patched.limit_price = price;
+      patched.limitPrice = price;
+      patched.price = price;
+    }
+    return patched;
+  }, []);
+
   const loadBrokerOrders = useCallback(async (silent = false) => {
     if (brokerOrdersInFlightRef.current) return;
     brokerOrdersInFlightRef.current = true;
@@ -475,13 +739,13 @@ export default function TerminalPage() {
     try {
       if (!silent) setOrderError("");
       const openOrders = await fetchAlpacaOrders(mode, "open");
-      setOrders(Array.isArray(openOrders) ? openOrders : []);
+      setOrders(applyCancelOrderLocks(applyOrderPriceLocks(Array.isArray(openOrders) ? openOrders : [])));
     } catch (err) {
       setOrderError(err instanceof Error ? err.message : "Failed to load open orders");
     } finally {
       brokerOrdersInFlightRef.current = false;
     }
-  }, [mode]);
+  }, [mode, applyOrderPriceLocks, applyCancelOrderLocks]);
 
   useEffect(() => {
     void loadBrokerOrders();
@@ -489,8 +753,9 @@ export default function TerminalPage() {
 
   useEffect(() => {
     const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       void loadBrokerOrders(true);
-    }, 8000);
+    }, TERMINAL_ORDER_POLL_MS);
     return () => window.clearInterval(id);
   }, [loadBrokerOrders]);
 
@@ -501,14 +766,37 @@ export default function TerminalPage() {
     }, 350);
   }, [loadBrokerOrders]);
 
+  const ordersForChart = useMemo(() => {
+    const activeSymbol = normalizeSingleSymbol(symbolUpper);
+    const normalizedOrders = applyCancelOrderLocks(applyOrderPriceLocks(Array.isArray(orders) ? orders : []));
+
+    return normalizedOrders.filter((order: any) => {
+      const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? activeSymbol));
+      const status = String(order?.status ?? "open").toLowerCase();
+      return (
+        activeSymbol &&
+        orderSymbol === activeSymbol &&
+        !["filled", "canceled", "cancelled", "expired", "rejected"].includes(status)
+      );
+    });
+  }, [orders, symbolUpper, applyOrderPriceLocks, applyCancelOrderLocks]);
+
   const cancelChartOrderLine = useCallback(
     async (order: any) => {
-      const orderId = String(order?.id ?? "");
+      const orderId = String(order?.id ?? "").trim();
       const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? symbolUpper));
       if (!orderId) {
         setOrderError("Order id is missing");
         return;
       }
+
+      const previousOrders = orders;
+
+      // Match Alpaca page behavior: hide instantly on first click, then keep it
+      // hidden from the chart while the broker/polling endpoint catches up.
+      lockCanceledOrder(orderId, 20000);
+      setOrders((prev) => applyCancelOrderLocks(prev));
+
       try {
         setOrderError("");
         setOrderMessage("");
@@ -516,82 +804,86 @@ export default function TerminalPage() {
         setOrderMessage(`Canceled order for ${orderSymbol || symbolUpper}`);
         await loadBrokerOrders(true);
       } catch (err) {
+        delete cancelOrderLocksRef.current[orderId];
+        setOrders(previousOrders);
         setOrderError(err instanceof Error ? err.message : "Failed to cancel order");
+        throw err;
       }
     },
-    [mode, symbolUpper, loadBrokerOrders]
+    [mode, symbolUpper, loadBrokerOrders, orders, lockCanceledOrder, applyCancelOrderLocks]
   );
 
   const replaceChartOrderLinePrice = useCallback(
     async (order: any, line: any, nextPrice: number) => {
       setOrderMessage("");
       setOrderError("");
+
+      const orderId = String(order?.id ?? "");
+      const lineKind = String(line?.kind ?? "limit").toLowerCase();
+      const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? symbolUpper));
+
       try {
-        const orderId = String(order?.id ?? "");
-        const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? symbolUpper));
-        const side: "buy" | "sell" = String(order?.side ?? "buy").toLowerCase() === "sell" ? "sell" : "buy";
-        const qty = parsePositiveNumber(order?.qty ?? order?.quantity ?? line?.qty);
-        const timeInForce = String(order?.time_in_force ?? order?.timeInForce ?? "day");
-        const currentType = String(order?.type ?? order?.order_type ?? "limit").toLowerCase();
-        const currentLimit = parsePositiveNumber(order?.limit_price ?? order?.limitPrice ?? order?.price);
-        const currentTakeProfit = parsePositiveNumber(order?.take_profit?.limit_price ?? order?.take_profit?.price ?? order?.take_profit_price ?? order?.takeProfitPrice);
-        const currentStopLoss = parsePositiveNumber(order?.stop_loss?.stop_price ?? order?.stop_loss?.price ?? order?.stop_loss_price ?? order?.stopLossPrice ?? order?.stop_price ?? order?.stopPrice);
         if (!orderId) throw new Error("Order id is missing");
         if (!orderSymbol) throw new Error("Order symbol is missing");
-        if (qty <= 0) throw new Error("Order quantity is not valid");
         if (!Number.isFinite(nextPrice) || nextPrice <= 0) throw new Error("Replacement price is not valid");
-        const ok = window.confirm(`Move ${orderSymbol} ${String(line?.label ?? "order")} to ${formatNumber(nextPrice, nextPrice >= 10 ? 2 : 4)}?\n\nA replacement order will be submitted first. The old order will only be canceled after the replacement is accepted.`);
-        if (!ok) {
-          await loadBrokerOrders(true);
-          return;
-        }
-        const nextPayload: PlaceAlpacaOrderRequest = {
-          mode,
-          symbol: orderSymbol,
-          side,
-          qty,
-          type: currentType.includes("stop") ? "stop" : "limit",
-          time_in_force: timeInForce,
-          extended_hours: Boolean(order?.extended_hours ?? order?.extendedHours ?? false),
-        } as PlaceAlpacaOrderRequest;
-        const orderClass = String(order?.order_class ?? order?.orderClass ?? "").toLowerCase();
-        const hasBracketPrices = currentTakeProfit > 0 || currentStopLoss > 0 || Array.isArray(order?.legs);
-        const isBracket = orderClass === "bracket" || hasBracketPrices;
-        if (line?.kind === "take_profit") {
-          (nextPayload as any).limit_price = currentLimit > 0 ? currentLimit : undefined;
-          (nextPayload as any).order_class = "bracket";
-          (nextPayload as any).take_profit = { limit_price: nextPrice };
-          if (currentStopLoss > 0) (nextPayload as any).stop_loss = { stop_price: currentStopLoss };
-        } else if (line?.kind === "stop_loss" || line?.kind === "stop") {
-          if (currentType.includes("stop") && !isBracket) {
-            (nextPayload as any).type = "stop";
-            (nextPayload as any).stop_price = nextPrice;
-          } else {
-            (nextPayload as any).limit_price = currentLimit > 0 ? currentLimit : undefined;
-            (nextPayload as any).order_class = "bracket";
-            if (currentTakeProfit > 0) (nextPayload as any).take_profit = { limit_price: currentTakeProfit };
-            (nextPayload as any).stop_loss = { stop_price: nextPrice };
-          }
+
+        const brokerPrice = normalizeAlpacaOrderPrice(nextPrice);
+
+        // Lock the price first so chart polling cannot snap back to stale Alpaca data.
+        lockChartOrderPrice(orderId, lineKind, brokerPrice, 15000);
+        setOrders((prev) =>
+          applyOrderPriceLocks(
+            prev.map((existingOrder) =>
+              String(existingOrder?.id ?? "") === orderId
+                ? patchOrderPrice(existingOrder, lineKind, brokerPrice)
+                : existingOrder
+            )
+          )
+        );
+
+        const orderType = String(order?.type ?? order?.order_type ?? "limit").toLowerCase();
+        const patchPayload: any = {};
+        if (lineKind === "stop_loss" || lineKind === "stop" || orderType.includes("stop")) {
+          patchPayload.stop_price = brokerPrice;
         } else {
-          if ((nextPayload as any).type === "stop") (nextPayload as any).stop_price = nextPrice;
-          else (nextPayload as any).limit_price = nextPrice;
-          if (isBracket) {
-            (nextPayload as any).order_class = "bracket";
-            if (currentTakeProfit > 0) (nextPayload as any).take_profit = { limit_price: currentTakeProfit };
-            if (currentStopLoss > 0) (nextPayload as any).stop_loss = { stop_price: currentStopLoss };
-          }
+          patchPayload.limit_price = brokerPrice;
         }
-        await placeAlpacaOrder(nextPayload);
-        await cancelAlpacaOrder(orderId, mode);
-        setOrderMessage(`Moved ${orderSymbol} order to ${formatMoney(nextPrice)}`);
-        await new Promise((resolve) => window.setTimeout(resolve, 350));
-        await loadBrokerOrders(true);
+
+        try {
+          await updateAlpacaOrder(orderId, patchPayload, mode);
+          setOrderMessage(`Moved ${orderSymbol || symbolUpper} order to ${formatMoney(brokerPrice)}`);
+        } catch (patchErr) {
+          // Last resort for plain entry/limit orders only: cancel first, then recreate.
+          // This avoids duplicate bracket/order behavior from submit-new-first replacement.
+          const isSimpleEntryLine = !(lineKind === "take_profit" || lineKind === "stop_loss" || lineKind === "stop");
+          const qty = parsePositiveNumber(order?.qty ?? order?.quantity ?? line?.qty);
+          const side: "buy" | "sell" = String(order?.side ?? "buy").toLowerCase() === "sell" ? "sell" : "buy";
+          if (!isSimpleEntryLine || qty <= 0) throw patchErr;
+
+          await cancelAlpacaOrder(orderId, mode);
+          await placeAlpacaOrder({
+            mode,
+            symbol: orderSymbol,
+            side,
+            qty,
+            type: "limit",
+            time_in_force: String(order?.time_in_force ?? order?.timeInForce ?? "day"),
+            limit_price: brokerPrice,
+            extended_hours: Boolean(order?.extended_hours ?? order?.extendedHours ?? false),
+          });
+          setOrderMessage(`Moved ${orderSymbol} order to ${formatMoney(brokerPrice)}`);
+        }
+
+        window.setTimeout(() => {
+          void loadBrokerOrders(true);
+        }, 900);
       } catch (err) {
-        setOrderError(err instanceof Error ? err.message : "Failed to replace order price");
+        setOrderError(err instanceof Error ? err.message : "Failed to move order price");
         await loadBrokerOrders(true);
+        throw err;
       }
     },
-    [mode, symbolUpper, loadBrokerOrders]
+    [mode, symbolUpper, loadBrokerOrders, lockChartOrderPrice, applyOrderPriceLocks, patchOrderPrice]
   );
 
   return (
@@ -851,7 +1143,11 @@ export default function TerminalPage() {
             </div>
             <select
               value={timeframe}
-              onChange={(e) => setTimeframe(e.target.value)}
+              onChange={(e) => {
+                const nextTimeframe = normalizeTerminalTimeframe(e.target.value);
+                setTimeframe(nextTimeframe);
+                saveTerminalTimeframe(nextTimeframe);
+              }}
               style={{
                 width: "100%",
                 padding: "10px 12px",
@@ -1278,26 +1574,28 @@ export default function TerminalPage() {
             </div>
           </div>
 
-          {(orderMessage || orderError) ? (
-            <div
-              style={{
-                margin: "0 8px 8px 8px",
-                padding: "8px 10px",
-                borderRadius: 8,
-                border: orderError ? "1px solid rgba(248,113,113,0.35)" : "1px solid rgba(34,197,94,0.3)",
-                background: orderError ? "rgba(127,29,29,0.18)" : "rgba(21,128,61,0.16)",
-                color: orderError ? "#fecaca" : "#bbf7d0",
-                fontSize: 13,
-                fontWeight: 700,
-              }}
-            >
-              {orderError || orderMessage}
-            </div>
-          ) : null}
+          <div
+            style={{
+              margin: "0 8px 8px 8px",
+              padding: "8px 10px",
+              minHeight: 34,
+              boxSizing: "border-box",
+              borderRadius: 8,
+              border: orderError ? "1px solid rgba(248,113,113,0.35)" : "1px solid rgba(34,197,94,0.3)",
+              background: orderError ? "rgba(127,29,29,0.18)" : "rgba(21,128,61,0.16)",
+              color: orderError ? "#fecaca" : "#bbf7d0",
+              fontSize: 13,
+              fontWeight: 700,
+              opacity: orderMessage || orderError ? 1 : 0,
+              pointerEvents: "none",
+            }}
+          >
+            {orderError || orderMessage || "Order status"}
+          </div>
 
           <div
             style={{
-              height: orderMessage || orderError ? "calc(100% - 102px)" : "calc(100% - 60px)",
+              height: "calc(100% - 102px)",
               minWidth: 0,
               width: "100%",
               overflow: "hidden",
@@ -1310,6 +1608,8 @@ export default function TerminalPage() {
             <ChartPanel
               symbol={symbolUpper}
               timeframe={timeframe}
+              initialVisibleLogicalRange={chartRanges[chartRangeKey(symbolUpper, timeframe)] ?? null}
+              onVisibleLogicalRangeChange={handleVisibleRangeChange}
               visibility={deferredVisibility}
               onStatsUpdate={(next) => setStats(next)}
               trendlineAction={trendlineAction}
@@ -1320,7 +1620,7 @@ export default function TerminalPage() {
               onTrendlineStateChange={setTrendlineUiState}
               onRequestAddSymbolToWatchlist={handleAddSymbolToWatchlist}
               showInChartWatchlistAdder={false}
-              openOrders={orders}
+              openOrders={ordersForChart}
               onCancelOrder={cancelChartOrderLine}
               onReplaceOrderPrice={replaceChartOrderLinePrice}
             />

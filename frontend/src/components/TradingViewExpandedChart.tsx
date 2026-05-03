@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 
 declare global {
   interface Window {
     TradingView?: any;
+    __tradingViewWidgetScriptPromise?: Promise<void>;
   }
 }
 
@@ -25,28 +26,57 @@ const containerStyle: React.CSSProperties = {
   height: "100%",
 };
 
+function loadTradingViewScript(): Promise<void> {
+  if (window.TradingView) return Promise.resolve();
+
+  if (window.__tradingViewWidgetScriptPromise) {
+    return window.__tradingViewWidgetScriptPromise;
+  }
+
+  window.__tradingViewWidgetScriptPromise = new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[src="https://s3.tradingview.com/tv.js"]');
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("TradingView script failed to load")), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("TradingView script failed to load"));
+    document.body.appendChild(script);
+  });
+
+  return window.__tradingViewWidgetScriptPromise;
+}
+
 function TradingViewExpandedChart({ symbol, timeframe }: Props) {
+  const safeSymbol = symbol.trim().toUpperCase() || "AAPL";
+  const interval = intervalMap[timeframe] || "1";
+  const widgetRef = useRef<any>(null);
+
   const containerId = useMemo(
-    () => `tv-expanded-chart-${symbol}-${timeframe}`.replace(/[^a-zA-Z0-9-_]/g, ""),
-    [symbol, timeframe]
+    () => `tv-expanded-chart-${safeSymbol}-${timeframe}`.replace(/[^a-zA-Z0-9-_]/g, ""),
+    [safeSymbol, timeframe]
   );
 
-  const scriptLoadedRef = useRef(false);
-
   useEffect(() => {
-    const createWidget = () => {
-      if (!window.TradingView) return;
+    let cancelled = false;
 
-      const interval = intervalMap[timeframe] || "1";
+    async function createWidget() {
+      await loadTradingViewScript();
+      if (cancelled || !window.TradingView) return;
 
       const container = document.getElementById(containerId);
       if (!container) return;
 
       container.innerHTML = "";
 
-      new window.TradingView.widget({
+      widgetRef.current = new window.TradingView.widget({
         autosize: true,
-        symbol: `NASDAQ:${symbol}`,
+        symbol: `NASDAQ:${safeSymbol}`,
         interval,
         timezone: "America/New_York",
         theme: "dark",
@@ -62,34 +92,19 @@ function TradingViewExpandedChart({ symbol, timeframe }: Props) {
         studies: ["Volume@tv-basicstudies"],
         container_id: containerId,
       });
+    }
+
+    void createWidget().catch((err) => console.error("TradingView widget error:", err));
+
+    return () => {
+      cancelled = true;
+      widgetRef.current = null;
+      const container = document.getElementById(containerId);
+      if (container) container.innerHTML = "";
     };
-
-    if (window.TradingView) {
-      createWidget();
-      return;
-    }
-
-    if (!scriptLoadedRef.current) {
-      scriptLoadedRef.current = true;
-
-      const script = document.createElement("script");
-      script.src = "https://s3.tradingview.com/tv.js";
-      script.async = true;
-      script.onload = createWidget;
-      document.body.appendChild(script);
-    } else {
-      const waitForTv = window.setInterval(() => {
-        if (window.TradingView) {
-          window.clearInterval(waitForTv);
-          createWidget();
-        }
-      }, 150);
-
-      return () => window.clearInterval(waitForTv);
-    }
-  }, [containerId, symbol, timeframe]);
+  }, [containerId, safeSymbol, interval]);
 
   return <div id={containerId} style={containerStyle} />;
 }
 
-export default TradingViewExpandedChart;
+export default memo(TradingViewExpandedChart);
