@@ -80,7 +80,7 @@ type BarsCacheEntry = {
   data: BarsResponse;
 };
 
-const BARS_CACHE_TTL_MS = 15_000;
+const BARS_CACHE_TTL_MS = 45_000;
 const barsCache = new Map<string, BarsCacheEntry>();
 const barsInflight = new Map<string, Promise<BarsResponse>>();
 
@@ -88,9 +88,9 @@ function normalizeLookback(timeframe: string, requested?: string): string {
   if (requested) return requested;
   switch (timeframe.toLowerCase()) {
     case "1m":
-      return "1d";
-    case "5m":
       return "2d";
+    case "5m":
+      return "3d";
     case "15m":
       return "5d";
     case "30m":
@@ -101,7 +101,27 @@ function normalizeLookback(timeframe: string, requested?: string): string {
     case "day":
       return "6m";
     default:
-      return "2d";
+      return "3d";
+  }
+}
+
+function defaultBarsLimit(timeframe: string): number {
+  switch (timeframe.toLowerCase()) {
+    case "1m":
+      return 650;
+    case "5m":
+      return 550;
+    case "15m":
+      return 450;
+    case "30m":
+      return 400;
+    case "1h":
+      return 350;
+    case "1d":
+    case "day":
+      return 500;
+    default:
+      return 500;
   }
 }
 
@@ -128,6 +148,7 @@ export async function fetchBars(
     date?: string;
     lookback?: string;
     forceRefresh?: boolean;
+    limit?: number;
   }
 ): Promise<BarsResponse> {
   const normalizedSymbol = symbol.trim().toUpperCase();
@@ -141,8 +162,10 @@ export async function fetchBars(
 
   if (options?.date) params.set("date", options.date);
   if (normalizedLookback) params.set("lookback", normalizedLookback);
+  const limit = Math.max(50, Math.min(5000, Math.floor(options?.limit ?? defaultBarsLimit(normalizedTimeframe))));
+  params.set("limit", String(limit));
 
-  const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${options?.date ?? ""}|${normalizedLookback}`;
+  const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${options?.date ?? ""}|${normalizedLookback}|${limit}`;
   const now = Date.now();
 
   if (!options?.forceRefresh) {

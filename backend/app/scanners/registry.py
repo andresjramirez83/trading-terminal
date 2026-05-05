@@ -1,5 +1,6 @@
 from app.scanners.overnight_runner import OvernightRunnerScanner
 from app.scanners.ifvg_htf_scanner import IFVGHTFScanner
+from app.scanners.gap_atr_runner import GapAtrRunnerScanner
 
 
 class ScannerRegistry:
@@ -7,6 +8,7 @@ class ScannerRegistry:
         scanners = [
             OvernightRunnerScanner(),
             IFVGHTFScanner(),
+            GapAtrRunnerScanner(),
         ]
         self.scanners = {scanner.id: scanner for scanner in scanners}
 

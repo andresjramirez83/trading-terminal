@@ -53,8 +53,8 @@ snapshot_store = ScannerSnapshotStore()
 
 # Small in-memory cache so multiple chart panels do not hammer Polygon on every mount.
 BARS_CACHE: Dict[str, Dict[str, Any]] = {}
-BARS_CACHE_TTL_SECONDS = 60
-MAX_BARS_DEFAULT = 700
+BARS_CACHE_TTL_SECONDS = 45
+MAX_BARS_DEFAULT = 650
 IN_FLIGHT_BARS_REQUESTS: Dict[str, asyncio.Task] = {}
 POLYGON_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 
@@ -260,8 +260,8 @@ class BackendAlertLoopConfig(BaseModel):
     # Smart alert scaling keeps alerts fast during active sessions and light overnight.
     smart_scaling_enabled: bool = True
     use_scanner_symbols_when_empty: bool = True
-    max_dynamic_symbols: int = 12
-    min_poll_seconds: int = 5
+    max_dynamic_symbols: int = 8
+    min_poll_seconds: int = 10
     max_poll_seconds: int = 45
 
 
@@ -376,8 +376,8 @@ backend_alert_config = BackendAlertLoopConfig(
     structure_window=max(8, int(os.getenv("BACKEND_ALERTS_STRUCTURE_WINDOW", "12") or "12")),
     smart_scaling_enabled=os.getenv("BACKEND_ALERTS_SMART_SCALING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
     use_scanner_symbols_when_empty=os.getenv("BACKEND_ALERTS_USE_SCANNER_SYMBOLS_WHEN_EMPTY", "true").strip().lower() in {"1", "true", "yes", "on"},
-    max_dynamic_symbols=max(1, int(os.getenv("BACKEND_ALERTS_MAX_DYNAMIC_SYMBOLS", "12") or "12")),
-    min_poll_seconds=max(5, int(os.getenv("BACKEND_ALERTS_MIN_POLL_SECONDS", "5") or "5")),
+    max_dynamic_symbols=max(1, int(os.getenv("BACKEND_ALERTS_MAX_DYNAMIC_SYMBOLS", "8") or "8")),
+    min_poll_seconds=max(10, int(os.getenv("BACKEND_ALERTS_MIN_POLL_SECONDS", "10") or "10")),
     max_poll_seconds=max(10, int(os.getenv("BACKEND_ALERTS_MAX_POLL_SECONDS", "45") or "45")),
 )
 
@@ -503,6 +503,149 @@ def resolve_lookback_days(lookback: Optional[str], timeframe: str) -> int:
     )
 
 
+def is_intraday_timeframe(timeframe: str) -> bool:
+    return timeframe.lower().strip() in {"1m", "5m", "15m", "30m", "1h"}
+
+
+def extended_session_window_ms(
+    *,
+    timeframe: str,
+    lookback: Optional[str] = None,
+    end_day: Optional[date] = None,
+) -> tuple[int, int, date]:
+    """Return an exact Polygon aggregate window.
+
+    Intraday charts are anchored to the full extended-hours equity session in ET:
+    04:00 through 20:00. This prevents charts from being cut at the regular
+    close / partial date boundary and lets prior days show AH candles through 20:00
+    when Polygon has trades for those bars. Daily charts keep the old full-day
+    behavior.
+    """
+    now_et = datetime.now(ET)
+    requested_today = end_day is None
+    final_day = previous_trading_day(end_day or now_et.date())
+    lookback_days = resolve_lookback_days(lookback, timeframe)
+    start_day = final_day - timedelta(days=lookback_days)
+
+    if is_intraday_timeframe(timeframe):
+        start_dt = datetime(start_day.year, start_day.month, start_day.day, 4, 0, tzinfo=ET)
+        full_ah_end = datetime(final_day.year, final_day.month, final_day.day, 20, 0, tzinfo=ET)
+
+        # For live/current-day charts, do not ask Polygon for a future end time.
+        # For historical date requests, always ask through 20:00 ET so AH is complete.
+        if requested_today and now_et.date() == final_day and now_et < full_ah_end:
+            end_dt = now_et
+        else:
+            end_dt = full_ah_end
+    else:
+        start_dt = datetime(start_day.year, start_day.month, start_day.day, 0, 0, tzinfo=ET)
+        end_dt = datetime(final_day.year, final_day.month, final_day.day, 23, 59, 59, 999000, tzinfo=ET)
+
+    return int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000), final_day
+
+
+def _intraday_step_ms(timeframe: str) -> int:
+    tf = timeframe.lower().strip()
+    if tf in {"1m", "1min", "1"}:
+        return 60_000
+    if tf in {"5m", "5min", "5"}:
+        return 5 * 60_000
+    if tf in {"15m", "15min", "15"}:
+        return 15 * 60_000
+    if tf in {"30m", "30min", "30"}:
+        return 30 * 60_000
+    if tf in {"1h", "60m", "60min", "hour"}:
+        return 60 * 60_000
+    return 60_000
+
+
+def _session_tail_end_ms(final_day: date, timeframe: str, end_ms: int) -> int:
+    """End of the visible extended-hours chart tail.
+
+    For live/current-day data before 20:00 ET, end_ms is already capped at now.
+    For completed days, this is 20:00 ET. The returned value is snapped down to
+    the chart interval so the final flat bar lands cleanly on the time scale.
+    """
+    if not is_intraday_timeframe(timeframe):
+        return end_ms
+
+    step_ms = _intraday_step_ms(timeframe)
+    ah_end = datetime(final_day.year, final_day.month, final_day.day, 20, 0, tzinfo=ET)
+    target_ms = min(int(ah_end.timestamp() * 1000), int(end_ms))
+    return (target_ms // step_ms) * step_ms
+
+
+def fill_intraday_tail_to_extended_close(
+    bars: List[Candle],
+    *,
+    timeframe: str,
+    final_day: date,
+    end_ms: int,
+) -> List[Candle]:
+    """Add zero-volume flat bars from the last real trade to the visible AH end.
+
+    Polygon only returns aggregate bars when trades occur. If the last after-hours
+    trade is at 16:45, Lightweight Charts thinks the time scale ends at 16:45.
+    TOS keeps the extended-hours axis open until 20:00. These synthetic tail bars
+    only extend the visual timeline; they preserve price by using the last close
+    and volume=0.
+    """
+    if not bars or not is_intraday_timeframe(timeframe):
+        return bars
+
+    bars = sorted(bars, key=lambda bar: bar.time)
+    last = bars[-1]
+
+    try:
+        last_dt = datetime.fromtimestamp(last.time / 1000, ET)
+    except Exception:
+        return bars
+
+    # Only extend the final loaded trading day. Do not fill old days inside a
+    # multi-day lookback because that would add too many artificial candles.
+    if last_dt.date() != final_day:
+        return bars
+
+    step_ms = _intraday_step_ms(timeframe)
+    target_ms = _session_tail_end_ms(final_day, timeframe, end_ms)
+    next_ms = ((int(last.time) // step_ms) + 1) * step_ms
+
+    if next_ms > target_ms:
+        return bars
+
+    existing = {int(bar.time) for bar in bars}
+    close = float(last.close)
+    tail: List[Candle] = []
+
+    current_ms = next_ms
+    # Hard cap prevents runaway if a bad timeframe/end leaks in.
+    max_fill = 1_200
+    while current_ms <= target_ms and len(tail) < max_fill:
+        if current_ms not in existing:
+            tail.append(
+                Candle(
+                    time=current_ms,
+                    open=close,
+                    high=close,
+                    low=close,
+                    close=close,
+                    volume=0.0,
+                )
+            )
+        current_ms += step_ms
+
+    if tail:
+        print(
+            f"[bars] filled AH tail timeframe={timeframe} "
+            f"from={datetime.fromtimestamp(next_ms / 1000, ET).strftime('%H:%M')} "
+            f"to={datetime.fromtimestamp(target_ms / 1000, ET).strftime('%H:%M')} "
+            f"count={len(tail)}",
+            flush=True,
+        )
+
+    return bars + tail
+
+
 def get_polygon_http_client() -> httpx.AsyncClient:
     global POLYGON_HTTP_CLIENT
     if POLYGON_HTTP_CLIENT is None or POLYGON_HTTP_CLIENT.is_closed:
@@ -530,17 +673,15 @@ async def fetch_bars_range_async(
         raise HTTPException(status_code=500, detail="Missing POLYGON_API_KEY in backend environment")
 
     multiplier, timespan = polygon_multiplier_and_timespan(timeframe)
-
-    final_day = previous_trading_day(end_day or datetime.now(ET).date())
-    lookback_days = resolve_lookback_days(lookback, timeframe)
-    start_day = final_day - timedelta(days=lookback_days)
-
-    start_str = start_day.strftime("%Y-%m-%d")
-    end_str = final_day.strftime("%Y-%m-%d")
+    start_ms, end_ms, final_day = extended_session_window_ms(
+        timeframe=timeframe,
+        lookback=lookback,
+        end_day=end_day,
+    )
 
     url = (
         f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/"
-        f"{multiplier}/{timespan}/{start_str}/{end_str}"
+        f"{multiplier}/{timespan}/{start_ms}/{end_ms}"
     )
 
     params = {
@@ -603,6 +744,13 @@ async def fetch_bars_range_async(
         except KeyError:
             continue
 
+    bars = fill_intraday_tail_to_extended_close(
+        bars,
+        timeframe=timeframe,
+        final_day=final_day,
+        end_ms=end_ms,
+    )
+
     if limit_bars is not None and limit_bars > 0 and len(bars) > limit_bars:
         bars = bars[-limit_bars:]
 
@@ -632,17 +780,15 @@ def fetch_bars_range(
         raise HTTPException(status_code=500, detail="Missing POLYGON_API_KEY in backend environment")
 
     multiplier, timespan = polygon_multiplier_and_timespan(timeframe)
-
-    final_day = previous_trading_day(end_day or datetime.now(ET).date())
-    lookback_days = resolve_lookback_days(lookback, timeframe)
-    start_day = final_day - timedelta(days=lookback_days)
-
-    start_str = start_day.strftime("%Y-%m-%d")
-    end_str = final_day.strftime("%Y-%m-%d")
+    start_ms, end_ms, final_day = extended_session_window_ms(
+        timeframe=timeframe,
+        lookback=lookback,
+        end_day=end_day,
+    )
 
     url = (
         f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/"
-        f"{multiplier}/{timespan}/{start_str}/{end_str}"
+        f"{multiplier}/{timespan}/{start_ms}/{end_ms}"
     )
 
     params = {
@@ -716,6 +862,13 @@ def fetch_bars_range(
             )
         except KeyError:
             continue
+
+    bars = fill_intraday_tail_to_extended_close(
+        bars,
+        timeframe=timeframe,
+        final_day=final_day,
+        end_ms=end_ms,
+    )
 
     if limit_bars is not None and limit_bars > 0 and len(bars) > limit_bars:
         bars = bars[-limit_bars:]
@@ -811,7 +964,51 @@ def signal_state_key(symbol: str, timeframe: str) -> str:
 
 
 def fetch_signal_bars(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
-    bars, _ = fetch_bars_range(symbol, timeframe, lookback="2d")
+    """Fetch alert bars through the same bounded in-memory cache used by charts.
+
+    The old alert loop could refetch Polygon bars for every symbol/timeframe on
+    every cycle. This keeps alerts responsive while preventing the alert engine
+    from competing with the chart UI for network and CPU.
+    """
+    normalized_symbol = symbol.upper().strip()
+    normalized_timeframe = timeframe.lower().strip()
+    lookback = "2d"
+    limit = min(MAX_BARS_DEFAULT, 650)
+    cache_key = f"SIGNAL::{normalized_symbol}::{normalized_timeframe}::{lookback}::{limit}"
+    now = datetime.now(timezone.utc)
+
+    cached = BARS_CACHE.get(cache_key)
+    if cached is not None:
+        age = (now - cached["stored_at"]).total_seconds()
+        if age <= min(BARS_CACHE_TTL_SECONDS, 30):
+            response = cached.get("response")
+            cached_bars = getattr(response, "bars", None)
+            if cached_bars is not None:
+                return [
+                    {
+                        "time": bar.time,
+                        "open": bar.open,
+                        "high": bar.high,
+                        "low": bar.low,
+                        "close": bar.close,
+                        "volume": bar.volume,
+                    }
+                    for bar in cached_bars
+                ]
+
+    bars, used_day = fetch_bars_range(normalized_symbol, normalized_timeframe, lookback=lookback, limit_bars=limit)
+    response = BarsResponse(
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        bars=bars,
+        trading_date=used_day.strftime("%Y-%m-%d"),
+    )
+    BARS_CACHE[cache_key] = {"stored_at": datetime.now(timezone.utc), "response": response}
+
+    if len(BARS_CACHE) > 250:
+        oldest_key = min(BARS_CACHE, key=lambda key: BARS_CACHE[key]["stored_at"])
+        BARS_CACHE.pop(oldest_key, None)
+
     return [
         {
             "time": bar.time,
@@ -1223,17 +1420,17 @@ def get_effective_alert_poll_seconds(symbol_count: int) -> int:
 
     session = _current_et_session_label()
     if session == "regular":
-        target = min(base, 5)
+        target = max(10, min(base, 15))
     elif session in {"premarket", "afterhours"}:
-        target = min(base, 10)
+        target = max(12, min(base, 20))
     else:
         target = max(base, 30)
 
     # Keep the backend smooth if the scanner returns a large active list.
-    if symbol_count >= 20:
+    if symbol_count >= 12:
+        target = max(target, 20)
+    elif symbol_count >= 8:
         target = max(target, 15)
-    elif symbol_count >= 12:
-        target = max(target, 10)
 
     low = max(5, int(backend_alert_config.min_poll_seconds))
     high = max(low, int(backend_alert_config.max_poll_seconds))
@@ -1974,7 +2171,7 @@ async def get_bars(
         trading_date=used_day.strftime("%Y-%m-%d"),
     )
 
-    BARS_CACHE[cache_key] = {"stored_at": now, "response": response}
+    BARS_CACHE[cache_key] = {"stored_at": datetime.now(timezone.utc), "response": response}
 
     # Keep cache bounded during long sessions.
     if len(BARS_CACHE) > 200:

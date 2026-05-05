@@ -228,20 +228,20 @@ class PolygonService:
         # Wider windows fix midnight/weekend/holiday blanks. A 24-hour 1m window can be
         # empty on Sunday or after midnight when the last regular session is outside that window.
         if tf in {"1m", "1min", "1", "minute"}:
-            return 1, "minute", timedelta(days=10), "1m"
+            return 1, "minute", timedelta(days=3), "1m"
         if tf in {"5m", "5min", "5"}:
-            return 5, "minute", timedelta(days=20), "5m"
+            return 5, "minute", timedelta(days=7), "5m"
         if tf in {"15m", "15min", "15"}:
-            return 15, "minute", timedelta(days=45), "15m"
+            return 15, "minute", timedelta(days=14), "15m"
         if tf in {"30m", "30min", "30"}:
-            return 30, "minute", timedelta(days=60), "30m"
+            return 30, "minute", timedelta(days=21), "30m"
         if tf in {"1h", "60m", "60min", "hour"}:
-            return 1, "hour", timedelta(days=120), "1h"
+            return 1, "hour", timedelta(days=60), "1h"
         if tf in {"1d", "day", "daily", "d"}:
-            return 1, "day", timedelta(days=730), "1d"
+            return 1, "day", timedelta(days=365), "1d"
 
         print(f"POLYGON GET_BARS UNKNOWN TIMEFRAME {timeframe!r}; defaulting to 1m", flush=True)
-        return 1, "minute", timedelta(days=10), "1m"
+        return 1, "minute", timedelta(days=3), "1m"
 
     async def get_bars(self, symbol: str, timeframe: str = "1m") -> List[Dict[str, Any]]:
         symbol = symbol.upper().strip()

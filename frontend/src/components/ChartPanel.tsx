@@ -34,6 +34,8 @@ export type OverlayVisibility = {
   significantCandles?: boolean;
   liquiditySweeps?: boolean;
   volumeSignals?: boolean;
+  volumeProfile?: boolean;
+  previousRthHighLow?: boolean;
   bodyBreakDots?: boolean;
   closeAbovePrevCloseDots?: boolean;
   atrExpansionCandles?: boolean;
@@ -289,6 +291,35 @@ type MarkerOverlay = {
   dotSize?: number;
 };
 
+type VolumeProfileOverlay = {
+  price: number;
+  top: number;
+  height: number;
+  width: number;
+  volume: number;
+  isPoc: boolean;
+  label: string;
+};
+
+type KeyLevelLabelOverlay = {
+  id: string;
+  shortLabel: string;
+  fullLabel: string;
+  price: number;
+  top: number;
+  color: string;
+  background: string;
+  border: string;
+};
+
+type PreviousRthRangeOverlay = {
+  top: number;
+  height: number;
+  high: number;
+  low: number;
+  labelTop: number;
+};
+
 type TrendlineHandleOverlay = {
   id: string;
   trendlineId: string;
@@ -346,6 +377,9 @@ type SessionStats = {
   currentSessionLabel: string;
   premarketHigh: number | null;
   regularHigh: number | null;
+  regularLow: number | null;
+  previousRegularHigh: number | null;
+  previousRegularLow: number | null;
   afterHoursHigh: number | null;
   extendedHigh: number | null;
 };
@@ -515,6 +549,8 @@ type LineVisibilityState = {
   significantCandles: boolean;
   liquiditySweeps: boolean;
   volumeSignals: boolean;
+  volumeProfile: boolean;
+  previousRthHighLow: boolean;
   trendlineCloseAlerts: boolean;
   bodyBreakDots: boolean;
   closeAbovePrevCloseDots: boolean;
@@ -522,6 +558,44 @@ type LineVisibilityState = {
   resistanceBreakoutConfirm: boolean;
   fvgFlip: boolean;
 };
+
+const CHART_LINE_VISIBILITY_STORAGE_KEY = "trading-terminal.chart.lineVisibility.v2";
+
+const DEFAULT_LINE_VISIBILITY: LineVisibilityState = {
+  pmh: true,
+  vwap: true,
+  compression: true,
+  choch: true,
+  sessionBands: true,
+  projections: true,
+  trendlines: true,
+  fakeEngulfing: true,
+  significantCandles: true,
+  liquiditySweeps: true,
+  volumeSignals: true,
+  volumeProfile: false,
+  previousRthHighLow: true,
+  trendlineCloseAlerts: true,
+  bodyBreakDots: true,
+  closeAbovePrevCloseDots: true,
+  atrExpansionCandles: true,
+  resistanceBreakoutConfirm: true,
+  fvgFlip: true,
+};
+
+function readStoredLineVisibility(): LineVisibilityState {
+  if (typeof window === "undefined") return DEFAULT_LINE_VISIBILITY;
+
+  try {
+    const raw = window.localStorage.getItem(CHART_LINE_VISIBILITY_STORAGE_KEY);
+    if (!raw) return DEFAULT_LINE_VISIBILITY;
+
+    const parsed = JSON.parse(raw) as Partial<LineVisibilityState>;
+    return { ...DEFAULT_LINE_VISIBILITY, ...parsed };
+  } catch {
+    return DEFAULT_LINE_VISIBILITY;
+  }
+}
 
 type ChartFunctionId =
   | "none"
@@ -651,6 +725,16 @@ function formatPacificTime(epochSeconds: number, includeDate = false): string {
 function formatPrice(value: number | null): string {
   if (value === null || Number.isNaN(value)) return "N/A";
   return value >= 10 ? value.toFixed(2) : value.toFixed(4);
+}
+
+
+function formatCompactVolume(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return `${Math.round(value)}`;
 }
 
 function formatVolume(value: number | null): string {
@@ -1617,6 +1701,11 @@ function minuteBucketStart(ms: number): number {
   return Math.floor(ms / 60000) * 60000;
 }
 
+function isDailyTimeframe(timeframe: string): boolean {
+  const tf = String(timeframe || "1m").trim().toLowerCase();
+  return tf === "1d" || tf === "day" || tf === "daily";
+}
+
 function timeframeToMinutes(timeframe: string): number {
   const tf = String(timeframe || "1m").trim().toLowerCase();
   if (tf === "1m") return 1;
@@ -1624,20 +1713,32 @@ function timeframeToMinutes(timeframe: string): number {
   if (tf === "15m") return 15;
   if (tf === "30m") return 30;
   if (tf === "1h" || tf === "60m") return 60;
+  if (isDailyTimeframe(tf)) return 1440;
   return 1;
 }
 
 function chartLookbackForTimeframe(timeframe: string): string {
-  // Use wider windows so late night / weekends do not return empty 1m or 5m charts.
-  // Backend still limits final bars, so this will not overload the chart.
+  // Keep the browser smooth: fetch enough context for studies without dragging
+  // thousands of old candles through React on every symbol switch.
   const tf = String(timeframe || "1m").trim().toLowerCase();
-  if (tf === "1m") return "5d";
-  if (tf === "5m") return "10d";
-  if (tf === "15m") return "20d";
-  if (tf === "30m") return "30d";
-  if (tf === "1h" || tf === "60m") return "60d";
+  if (tf === "1m") return "2d";
+  if (tf === "5m") return "3d";
+  if (tf === "15m") return "5d";
+  if (tf === "30m") return "10d";
+  if (tf === "1h" || tf === "60m") return "20d";
   if (tf === "1d" || tf === "day") return "6m";
-  return "10d";
+  return "3d";
+}
+
+function chartLimitForTimeframe(timeframe: string): number {
+  const tf = String(timeframe || "1m").trim().toLowerCase();
+  if (tf === "1m") return 650;
+  if (tf === "5m") return 550;
+  if (tf === "15m") return 450;
+  if (tf === "30m") return 400;
+  if (tf === "1h" || tf === "60m") return 350;
+  if (tf === "1d" || tf === "day") return 500;
+  return 500;
 }
 
 function normalizeBarsForChart(rawBars: unknown): Candle[] {
@@ -1688,7 +1789,59 @@ function normalizeBarsForChart(rawBars: unknown): Candle[] {
 
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
 }
+
+function aggregateIntradayBarsToEtDailyBar(intradayBars: Candle[], preferredEtDate?: string | null): Candle | null {
+  if (!intradayBars.length) return null;
+
+  const barsByDate = new Map<string, Candle[]>();
+  for (const bar of intradayBars) {
+    const etDate = getEtBarParts(bar.time).date;
+    const list = barsByDate.get(etDate) ?? [];
+    list.push(bar);
+    barsByDate.set(etDate, list);
+  }
+
+  const sortedDates = Array.from(barsByDate.keys()).sort();
+  if (!sortedDates.length) return null;
+
+  const targetDate = preferredEtDate && barsByDate.has(preferredEtDate)
+    ? preferredEtDate
+    : sortedDates[sortedDates.length - 1];
+
+  const dayBars = (barsByDate.get(targetDate) ?? []).slice().sort((a, b) => a.time - b.time);
+  if (!dayBars.length) return null;
+
+  return {
+    time: Number(etDateHmToUtcTimestamp(targetDate, 0)) * 1000,
+    open: dayBars[0].open,
+    high: Math.max(...dayBars.map((bar) => bar.high)),
+    low: Math.min(...dayBars.map((bar) => bar.low)),
+    close: dayBars[dayBars.length - 1].close,
+    volume: dayBars.reduce((sum, bar) => sum + (Number.isFinite(bar.volume) ? bar.volume : 0), 0),
+  };
+}
+
+function upsertCurrentDailyBarFromIntraday(dailyBars: Candle[], intradayBars: Candle[], preferredEtDate?: string | null): Candle[] {
+  const currentDailyBar = aggregateIntradayBarsToEtDailyBar(intradayBars, preferredEtDate);
+  if (!currentDailyBar) return dailyBars;
+
+  const nextBars = dailyBars.slice();
+  const existingIndex = nextBars.findIndex((bar) => getEtBarParts(bar.time).date === getEtBarParts(currentDailyBar.time).date);
+
+  if (existingIndex >= 0) {
+    nextBars[existingIndex] = currentDailyBar;
+  } else {
+    nextBars.push(currentDailyBar);
+  }
+
+  return nextBars.sort((a, b) => a.time - b.time);
+}
 function bucketStartForTimeframe(ms: number, timeframe: string): number {
+  if (isDailyTimeframe(timeframe)) {
+    const etDate = getEtBarParts(ms).date;
+    return Number(etDateHmToUtcTimestamp(etDate, 0)) * 1000;
+  }
+
   const minutes = Math.max(1, timeframeToMinutes(timeframe));
   const bucketSizeMs = minutes * 60_000;
   return Math.floor(ms / bucketSizeMs) * bucketSizeMs;
@@ -3492,6 +3645,29 @@ function getSessionLabel(kind: SessionKind): string {
   return "OVN";
 }
 
+function etDateHmToUtcTimestamp(date: string, hm: number): UTCTimestamp {
+  const [yearRaw, monthRaw, dayRaw] = date.split("-").map(Number);
+  const year = Number.isFinite(yearRaw) ? yearRaw : 1970;
+  const month = Number.isFinite(monthRaw) ? monthRaw : 1;
+  const day = Number.isFinite(dayRaw) ? dayRaw : 1;
+  const hour = Math.floor(hm / 100);
+  const minute = hm % 100;
+
+  const targetWallMs = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  let guessMs = Date.UTC(year, month - 1, day, hour + 5, minute, 0, 0);
+
+  for (let i = 0; i < 4; i += 1) {
+    const et = getEtBarParts(guessMs);
+    const [etYearRaw, etMonthRaw, etDayRaw] = et.date.split("-").map(Number);
+    const etWallMs = Date.UTC(etYearRaw, etMonthRaw - 1, etDayRaw, et.hour, et.minute, 0, 0);
+    const diffMs = targetWallMs - etWallMs;
+    if (Math.abs(diffMs) < 1000) break;
+    guessMs += diffMs;
+  }
+
+  return Math.floor(guessMs / 1000) as UTCTimestamp;
+}
+
 function getCurrentEtSessionKind(): SessionKind {
   return getSessionKindFromHm(getEtBarParts(Date.now()).hm);
 }
@@ -3499,6 +3675,141 @@ function getCurrentEtSessionKind(): SessionKind {
 function isCurrentEtExtendedHours(): boolean {
   const kind = getCurrentEtSessionKind();
   return kind !== "regular";
+}
+
+
+function isIntradayChartTimeframe(timeframe: string): boolean {
+  return !isDailyTimeframe(timeframe);
+}
+
+function getBestEtTradingDateForTimeAxis(bars: Candle[], tradingDate: string | null): string | null {
+  if (!bars.length) return tradingDate;
+  if (tradingDate && bars.some((bar) => getEtBarParts(bar.time).date === tradingDate)) return tradingDate;
+  return getEtBarParts(bars[bars.length - 1].time).date;
+}
+
+function getSessionTimelineTimes(
+  bars: Candle[],
+  timeframe: string,
+  tradingDate: string | null
+): UTCTimestamp[] {
+  if (!isIntradayChartTimeframe(timeframe) || bars.length === 0) {
+    return bars.map((bar) => toChartTime(bar.time));
+  }
+
+  const stepSeconds = Math.max(60, timeframeToMinutes(timeframe) * 60);
+  const dates = Array.from(new Set(bars.map((bar) => getEtBarParts(bar.time).date)));
+  if (tradingDate && !dates.includes(tradingDate)) dates.push(tradingDate);
+  dates.sort();
+
+  const allTimes = new Set<number>();
+
+  // Keep every real bar exactly where Polygon put it.
+  for (const bar of bars) {
+    allTimes.add(Number(toChartTime(bar.time)));
+  }
+
+  // Add every regular 04:00-20:00 ET time slot so the time scale does not
+  // compress quiet extended-hours periods. This mirrors TOS/TradingView style
+  // continuity while studies still use the original real Polygon bars.
+  for (const date of dates) {
+    const start = Number(etDateHmToUtcTimestamp(date, 400));
+    const end = Number(etDateHmToUtcTimestamp(date, 2000));
+    for (let t = start; t <= end; t += stepSeconds) {
+      allTimes.add(t);
+    }
+  }
+
+  return Array.from(allTimes).sort((a, b) => a - b).map((time) => time as UTCTimestamp);
+}
+
+function buildSessionFilledCandleData(
+  realCandles: CandlePoint[],
+  bars: Candle[],
+  timeframe: string,
+  tradingDate: string | null
+): CandlePoint[] {
+  if (!isIntradayChartTimeframe(timeframe) || !realCandles.length) return realCandles;
+
+  const timeline = getSessionTimelineTimes(bars, timeframe, tradingDate);
+  const realByTime = new Map<number, CandlePoint>();
+  for (const candle of realCandles) realByTime.set(Number(candle.time), candle);
+
+  const out: CandlePoint[] = [];
+  let previousClose: number | null = null;
+
+  for (const time of timeline) {
+    const real = realByTime.get(Number(time));
+    if (real) {
+      out.push(real);
+      previousClose = real.close;
+      continue;
+    }
+
+    if (previousClose == null) {
+      continue;
+    }
+
+    // Flat, zero-volume display candle. This gives the same continuous candle
+    // spacing TOS shows during quiet premarket/after-hours gaps without feeding
+    // fake bars into IFVG/FVG/VWAP/scanner logic.
+    out.push({
+      time,
+      open: previousClose,
+      high: previousClose,
+      low: previousClose,
+      close: previousClose,
+    });
+  }
+
+  return out;
+}
+
+function buildSessionFilledVolumeData(
+  realVolume: VolumePoint[],
+  displayCandles: CandlePoint[]
+): VolumePoint[] {
+  const realByTime = new Map<number, VolumePoint>();
+  for (const row of realVolume) realByTime.set(Number(row.time), row);
+
+  return displayCandles.map((candle) => {
+    const real = realByTime.get(Number(candle.time));
+    if (real) return real;
+    return { time: candle.time, value: 0, color: "rgba(148,163,184,0.0)" };
+  });
+}
+
+function extendLineToSessionEnd(
+  data: LinePoint[],
+  bars: Candle[],
+  timeframe: string,
+  tradingDate: string | null
+): LinePoint[] {
+  if (!data.length) return data;
+  const timeline = getSessionTimelineTimes(bars, timeframe, tradingDate);
+  if (!timeline.length) return data;
+
+  const byTime = new Map<number, LinePoint>();
+  for (const point of data) byTime.set(Number(point.time), point);
+
+  const out: LinePoint[] = [];
+  let lastValue: number | null = null;
+
+  for (const time of timeline) {
+    const real = byTime.get(Number(time));
+    if (real) {
+      out.push(real);
+      lastValue = real.value;
+      continue;
+    }
+    if (lastValue != null) out.push({ time, value: lastValue });
+  }
+
+  return out;
+}
+
+function getDisplaySlotCountWithSessionTail(bars: Candle[], timeframe: string, tradingDate: string | null): number {
+  return getSessionTimelineTimes(bars, timeframe, tradingDate).length || bars.length;
 }
 
 function computeSessionStats(
@@ -3511,6 +3822,9 @@ function computeSessionStats(
     currentSessionLabel: getSessionLabel(currentSession),
     premarketHigh: null,
     regularHigh: null,
+    regularLow: null,
+    previousRegularHigh: null,
+    previousRegularLow: null,
     afterHoursHigh: null,
     extendedHigh: null,
   };
@@ -3524,8 +3838,22 @@ function computeSessionStats(
   const regularBars = dayBars.filter((bar) => getSessionKindFromHm(getEtBarParts(bar.time).hm) === "regular");
   const afterHoursBars = dayBars.filter((bar) => getSessionKindFromHm(getEtBarParts(bar.time).hm) === "afterhours");
 
+  const sortedDates = Array.from(new Set(bars.map((bar) => getEtBarParts(bar.time).date)))
+    .filter((date) => date < tradingDate)
+    .sort();
+  const previousTradingDate = sortedDates.length ? sortedDates[sortedDates.length - 1] : null;
+  const previousRegularBars = previousTradingDate
+    ? bars.filter((bar) =>
+        getEtBarParts(bar.time).date === previousTradingDate &&
+        getSessionKindFromHm(getEtBarParts(bar.time).hm) === "regular"
+      )
+    : [];
+
   const premarketHigh = premarketBars.length ? Math.max(...premarketBars.map((bar) => bar.high)) : null;
   const regularHigh = regularBars.length ? Math.max(...regularBars.map((bar) => bar.high)) : null;
+  const regularLow = regularBars.length ? Math.min(...regularBars.map((bar) => bar.low)) : null;
+  const previousRegularHigh = previousRegularBars.length ? Math.max(...previousRegularBars.map((bar) => bar.high)) : null;
+  const previousRegularLow = previousRegularBars.length ? Math.min(...previousRegularBars.map((bar) => bar.low)) : null;
   const afterHoursHigh = afterHoursBars.length ? Math.max(...afterHoursBars.map((bar) => bar.high)) : null;
 
   const extCandidates = [premarketHigh, afterHoursHigh].filter(
@@ -3537,398 +3865,98 @@ function computeSessionStats(
     currentSessionLabel: getSessionLabel(currentSession),
     premarketHigh,
     regularHigh,
+    regularLow,
+    previousRegularHigh,
+    previousRegularLow,
     afterHoursHigh,
     extendedHigh: extCandidates.length ? Math.max(...extCandidates) : null,
   };
+}
+
+function estimateBarIntervalSeconds(bars: Candle[]): number {
+  const times = bars
+    .map((bar) => toChartTime(bar.time))
+    .filter((time): time is UTCTimestamp => Number.isFinite(Number(time)))
+    .map(Number)
+    .sort((a, b) => a - b);
+
+  const gaps: number[] = [];
+  for (let i = 1; i < times.length; i += 1) {
+    const gap = times[i] - times[i - 1];
+    if (gap > 0 && gap <= 60 * 60 * 8) gaps.push(gap);
+  }
+
+  if (!gaps.length) return 60;
+  gaps.sort((a, b) => a - b);
+  return Math.max(30, Math.min(gaps[Math.floor(gaps.length / 2)], 60 * 30));
 }
 
 function computeSessionBandRanges(
   bars: Candle[],
   tradingDate: string | null
 ): SessionBandRange[] {
-  if (!bars.length || !tradingDate) return [];
-
-  const ranges: SessionBandRange[] = [];
-  const dayBars = bars.filter((bar) => {
-    const et = getEtBarParts(bar.time);
-    return et.date === tradingDate;
-  });
-
-  if (!dayBars.length) return ranges;
-
-  let activeKind: SessionKind | null = null;
-  let activeStart: UTCTimestamp | null = null;
-  let activeEnd: UTCTimestamp | null = null;
-
-  const flush = () => {
-    if (activeKind == null || activeStart == null || activeEnd == null) return;
-    if (activeKind !== "overnight") {
-      ranges.push({
-        kind: activeKind,
-        label: getSessionLabel(activeKind),
-        startTime: activeStart,
-        endTime: activeEnd,
-      });
-    }
-  };
-
-  for (const bar of dayBars) {
-    const time = toChartTime(bar.time);
-    const kind = getSessionKindFromHm(getEtBarParts(bar.time).hm);
-
-    if (kind === "overnight") continue;
-
-    if (activeKind == null) {
-      activeKind = kind;
-      activeStart = time;
-      activeEnd = time;
-      continue;
-    }
-
-    if (kind === activeKind) {
-      activeEnd = time;
-      continue;
-    }
-
-    flush();
-    activeKind = kind;
-    activeStart = time;
-    activeEnd = time;
-  }
-
-  flush();
-  return ranges;
-}
-
-function getPreviousTradingDateFromBars(
-  bars: Candle[],
-  targetDate: string
-): string | null {
-  const dates = Array.from(
-    new Set(
-      bars
-        .map((bar) => getEtBarParts(bar.time).date)
-        .filter((date) => date < targetDate)
-    )
-  ).sort();
-
-  return dates.length ? dates[dates.length - 1] : null;
-}
-
-function isInExtendedWindowForMorningSetup(
-  bar: Candle,
-  currentDate: string,
-  previousDate: string | null
-): boolean {
-  const et = getEtBarParts(bar.time);
-
-  const isPrevAfterHours =
-    previousDate !== null &&
-    et.date === previousDate &&
-    et.hm >= 1600 &&
-    et.hm <= 2359;
-
-  const isCurrentMorningSession =
-    et.date === currentDate &&
-    et.hm >= 400 &&
-    et.hm <= 1300;
-
-  return isPrevAfterHours || isCurrentMorningSession;
-}
-
-type ResistanceAnchor = {
-  index: number;
-  time: UTCTimestamp;
-  rawHigh: number;
-  anchorPrice: number;
-  isSpike: boolean;
-  kind: "top_zone" | "lower_high";
-  rejectionScore: number;
-};
-
-function getUpperWick(bar: Candle): number {
-  return bar.high - Math.max(bar.open, bar.close);
-}
-
-function getBodySize(bar: Candle): number {
-  return Math.abs(bar.close - bar.open);
-}
-
-function getAnchorTolerance(price: number): number {
-  if (!Number.isFinite(price) || price <= 0) return 0.03;
-  if (price < 1) return Math.max(0.01, price * 0.01);
-  if (price < 5) return Math.max(0.02, price * 0.006);
-  return Math.max(0.03, price * 0.004);
-}
-
-function isLoosePivotHigh(
-  bars: Candle[],
-  index: number,
-  left = 1,
-  right = 1
-): boolean {
-  if (index < left || index + right >= bars.length) return false;
-
-  const candidate = bars[index].high;
-  const tol = getAnchorTolerance(candidate);
-
-  for (let i = index - left; i <= index + right; i++) {
-    if (i === index) continue;
-    if (bars[i].high > candidate + tol) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function isSpikeHigh(
-  bars: Candle[],
-  index: number
-): boolean {
-  const bar = bars[index];
-  const upperWick = getUpperWick(bar);
-  const body = getBodySize(bar);
-  const prevHigh = index > 0 ? bars[index - 1].high : bar.high;
-  const nextHigh = index < bars.length - 1 ? bars[index + 1].high : bar.high;
-  const neighborHigh = Math.max(prevHigh, nextHigh);
-
-  const wickVsBody = upperWick > Math.max(0.12, body * 1.75);
-  const extensionVsNeighbors = bar.high > neighborHigh * 1.04;
-
-  return wickVsBody && extensionVsNeighbors;
-}
-
-function getClusterBoundsByHigh(
-  bars: Candle[],
-  centerIndex: number,
-  tolerancePct = 0.004
-): { start: number; end: number } {
-  const refHigh = bars[centerIndex].high;
-  const tol = Math.max(0.03, refHigh * tolerancePct);
-
-  let start = centerIndex;
-  let end = centerIndex;
-
-  for (let i = centerIndex - 1; i >= 0; i--) {
-    if (Math.abs(bars[i].high - refHigh) <= tol) {
-      start = i;
-    } else {
-      break;
-    }
-  }
-
-  for (let i = centerIndex + 1; i < bars.length; i++) {
-    if (Math.abs(bars[i].high - refHigh) <= tol) {
-      end = i;
-    } else {
-      break;
-    }
-  }
-
-  return { start, end };
-}
-
-function getClusterAnchorPrice(
-  bars: Candle[],
-  start: number,
-  end: number,
-  preferAcceptedPrice = true
-): number {
-  const candidates: number[] = [];
-
-  for (let i = start; i <= end; i++) {
-    candidates.push(bodyHigh(bars[i]));
-    candidates.push((bars[i].high + bodyHigh(bars[i])) / 2);
-
-    if (!preferAcceptedPrice) {
-      candidates.push(bars[i].high);
-    }
-  }
-
-  const filtered = candidates
-    .filter((v) => Number.isFinite(v))
-    .sort((a, b) => a - b);
-
-  if (!filtered.length) {
-    return bodyHigh(bars[start]);
-  }
-
-  return filtered[Math.floor(filtered.length / 2)];
-}
-
-function scoreRejectionAfter(
-  bars: Candle[],
-  index: number,
-  lookahead = 4
-): number {
-  const end = Math.min(bars.length - 1, index + lookahead);
-  const anchorBar = bars[index];
-
-  let score = 0;
-
-  for (let i = index + 1; i <= end; i++) {
-    const bar = bars[i];
-
-    if (bar.low < anchorBar.low) score += 2;
-    if (bar.close < anchorBar.close) score += 2;
-    if (bodyHigh(bar) < bodyHigh(anchorBar)) score += 1.5;
-    if (bar.close < bar.open) score += 1;
-  }
-
-  return score;
-}
-
-function buildResistanceAnchorFromCluster(
-  bars: Candle[],
-  centerIndex: number,
-  kind: "top_zone" | "lower_high"
-): ResistanceAnchor {
-  const spike = isSpikeHigh(bars, centerIndex);
-  const bounds = getClusterBoundsByHigh(bars, centerIndex, 0.004);
-
-  const anchorIndex = bounds.start;
-  const rawHigh = bars[centerIndex].high;
-
-  const anchorPrice = spike
-    ? getClusterAnchorPrice(bars, bounds.start, bounds.end, true)
-    : getClusterAnchorPrice(bars, bounds.start, bounds.end, false);
-
-  const rejectionScore = scoreRejectionAfter(bars, centerIndex, 4);
-
-  return {
-    index: anchorIndex,
-    time: toChartTime(bars[anchorIndex].time),
-    rawHigh,
-    anchorPrice,
-    isSpike: spike,
-    kind,
-    rejectionScore,
-  };
-}
-
-function dedupeAnchorsByTime(anchors: ResistanceAnchor[]): ResistanceAnchor[] {
-  const out: ResistanceAnchor[] = [];
-  const seen = new Set<number>();
-
-  for (const anchor of anchors) {
-    if (seen.has(anchor.index)) continue;
-    seen.add(anchor.index);
-    out.push(anchor);
-  }
-
-  return out;
-}
-
-function findTopZoneAnchors(bars: Candle[]): ResistanceAnchor[] {
   if (!bars.length) return [];
 
-  const sessionHigh = Math.max(...bars.map((b) => b.high));
-  const topZoneFloor = sessionHigh * 0.94;
-  const anchors: ResistanceAnchor[] = [];
+  // Pro session system:
+  // Build bands from the actual loaded candles instead of fixed wall-clock endpoints.
+  // This keeps PRE/AH shading visible for every loaded day and avoids Lightweight Charts
+  // returning null for 04:00/09:30/16:00/20:00 timestamps that do not exist in the series.
+  const sortedBars = [...bars]
+    .map((bar) => ({
+      bar,
+      ts: Number(toChartTime(bar.time)),
+      et: getEtBarParts(bar.time),
+    }))
+    .filter((item) => Number.isFinite(item.ts))
+    .sort((a, b) => a.ts - b.ts);
 
-  for (let i = 1; i < bars.length - 1; i++) {
-    if (bars[i].high < topZoneFloor) continue;
-    if (!isLoosePivotHigh(bars, i, 1, 1)) continue;
+  const ranges: SessionBandRange[] = [];
+  let active: {
+    kind: SessionKind;
+    label: string;
+    date: string;
+    startTime: UTCTimestamp;
+    endTime: UTCTimestamp;
+  } | null = null;
 
-    const anchor = buildResistanceAnchorFromCluster(bars, i, "top_zone");
+  const closeActive = () => {
+    if (!active) return;
+    ranges.push({
+      kind: active.kind,
+      label: active.label,
+      startTime: active.startTime,
+      endTime: active.endTime,
+    });
+    active = null;
+  };
 
-    if (anchor.rejectionScore >= 3) {
-      anchors.push(anchor);
+  for (const item of sortedBars) {
+    const kind = getSessionKindFromHm(item.et.hm);
+    const time = item.ts as UTCTimestamp;
+
+    // Keep overnight bars out of the grey bands. They can exist on some feeds,
+    // but the user-requested shaded zones are PRE and AH, with RTH boundaries.
+    if (kind === "overnight") {
+      closeActive();
+      continue;
+    }
+
+    if (!active || active.kind !== kind || active.date !== item.et.date) {
+      closeActive();
+      active = {
+        kind,
+        label: getSessionLabel(kind),
+        date: item.et.date,
+        startTime: time,
+        endTime: time,
+      };
+    } else {
+      active.endTime = time;
     }
   }
+  closeActive();
 
-  return dedupeAnchorsByTime(anchors);
-}
-
-function findLowerHighAnchors(
-  bars: Candle[],
-  topAnchor: ResistanceAnchor
-): ResistanceAnchor[] {
-  const anchors: ResistanceAnchor[] = [];
-  const minStart = topAnchor.index + 1;
-  const maxHighAllowed = topAnchor.anchorPrice - getAnchorTolerance(topAnchor.anchorPrice);
-
-  for (let i = minStart + 1; i < bars.length - 1; i++) {
-    const bar = bars[i];
-
-    if (bar.high >= maxHighAllowed) continue;
-    if (!isLoosePivotHigh(bars, i, 1, 1)) continue;
-
-    const anchor = buildResistanceAnchorFromCluster(bars, i, "lower_high");
-
-    if (anchor.anchorPrice >= topAnchor.anchorPrice) continue;
-    if (anchor.rejectionScore < 2) continue;
-
-    anchors.push(anchor);
-  }
-
-  return dedupeAnchorsByTime(anchors);
-}
-
-function getLineValueAtIndex(
-  aIndex: number,
-  aPrice: number,
-  bIndex: number,
-  bPrice: number,
-  targetIndex: number
-): number {
-  if (bIndex === aIndex) return aPrice;
-  const slope = (bPrice - aPrice) / (bIndex - aIndex);
-  return aPrice + slope * (targetIndex - aIndex);
-}
-
-function scoreProResistanceLine(
-  bars: Candle[],
-  a: ResistanceAnchor,
-  b: ResistanceAnchor
-): number {
-  if (b.index <= a.index) return Number.NEGATIVE_INFINITY;
-  if (b.anchorPrice >= a.anchorPrice) return Number.NEGATIVE_INFINITY;
-
-  let respectTouches = 0;
-  let violations = 0;
-  let closeRespects = 0;
-
-  for (let i = a.index; i < bars.length; i++) {
-    const expected = getLineValueAtIndex(
-      a.index,
-      a.anchorPrice,
-      b.index,
-      b.anchorPrice,
-      i
-    );
-
-    const tol = getAnchorTolerance(expected);
-    const bar = bars[i];
-
-    if (Math.abs(bar.high - expected) <= tol) {
-      respectTouches += 1;
-    }
-
-    if (Math.abs(bodyHigh(bar) - expected) <= tol) {
-      closeRespects += 1;
-    }
-
-    if (i > b.index && bar.high > expected + tol * 1.5) {
-      violations += 1;
-    }
-  }
-
-  const spanScore = Math.max(0, b.index - a.index) * 0.4;
-  const dropScore = Math.max(0, a.anchorPrice - b.anchorPrice) * 10;
-  const rejectionScore = a.rejectionScore * 4 + b.rejectionScore * 5;
-  const spikePenalty = a.isSpike ? 14 : 0;
-
-  return (
-    respectTouches * 7 +
-    closeRespects * 9 +
-    spanScore +
-    dropScore +
-    rejectionScore -
-    violations * 18 -
-    spikePenalty
-  );
+  return ranges;
 }
 
 function numberFromOrderValue(value: unknown): number | null {
@@ -4260,6 +4288,9 @@ function ChartPanelComponent({
   openOrders = [],
   onCancelOrder,
   onReplaceOrderPrice,
+  lookback,
+  loadDelayMs = 0,
+  enableLiveStream = true,
   legendDensity = "compact",
   compactTools = false,
 }: Props) {
@@ -4281,6 +4312,8 @@ function ChartPanelComponent({
   const vwapSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const projectionScaleAnchorSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const pmhSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const previousRthHighSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const previousRthLowSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const compressionTopSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const compressionBottomSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const projectionPriceLinesRef = useRef<any[]>([]);
@@ -4316,6 +4349,8 @@ function ChartPanelComponent({
     significantCandles: visibility.significantCandles ?? true,
     liquiditySweeps: visibility.liquiditySweeps ?? true,
     volumeSignals: visibility.volumeSignals ?? true,
+    volumeProfile: visibility.volumeProfile ?? false,
+    previousRthHighLow: visibility.previousRthHighLow ?? true,
     trendlineCloseAlerts: visibility.trendlineCloseAlerts ?? true,
     bodyBreakDots: visibility.bodyBreakDots ?? true,
     closeAbovePrevCloseDots: visibility.closeAbovePrevCloseDots ?? true,
@@ -4332,6 +4367,7 @@ function ChartPanelComponent({
   const lastRemoteTrendlineWriteRef = useRef("");
   const barsRef = useRef<Candle[]>([]);
   const tradingDateRef = useRef<string | null>(null);
+  const displaySlotCountRef = useRef(0);
   const liveStartedRef = useRef(false);
   const openOrdersRef = useRef<ChartOrder[]>(openOrders);
   const onCancelOrderRef = useRef(onCancelOrder);
@@ -4384,9 +4420,13 @@ function ChartPanelComponent({
       100;
 
     const rightPaddingBars = 8;
-    const visibleBars = Math.min(bars.length, targetBars);
-    const from = Math.max(0, bars.length - visibleBars);
-    const to = bars.length - 1 + rightPaddingBars;
+    const displaySlots = Math.max(
+      bars.length,
+      displaySlotCountRef.current || getDisplaySlotCountWithSessionTail(bars, timeframe, tradingDateRef.current)
+    );
+    const visibleBars = Math.min(displaySlots, targetBars);
+    const from = Math.max(0, displaySlots - visibleBars);
+    const to = displaySlots - 1 + rightPaddingBars;
 
     chart.timeScale().applyOptions({
       rightOffset: rightPaddingBars,
@@ -4442,6 +4482,9 @@ function ChartPanelComponent({
       currentSessionLabel: getSessionLabel(getCurrentEtSessionKind()),
       premarketHigh: null,
       regularHigh: null,
+      regularLow: null,
+      previousRegularHigh: null,
+      previousRegularLow: null,
       afterHoursHigh: null,
       extendedHigh: null,
     },
@@ -4473,6 +4516,10 @@ function ChartPanelComponent({
   const [bracketZoneOverlays, setBracketZoneOverlays] = useState<BracketZoneOverlay[]>([]);
   const [orderPriceOverrides, setOrderPriceOverrides] = useState<Record<string, number>>({});
   const [chochMarkers, setChochMarkers] = useState<MarkerOverlay[]>([]);
+  const [volumeProfileOverlays, setVolumeProfileOverlays] = useState<VolumeProfileOverlay[]>([]);
+  const [keyLevelLabelOverlays, setKeyLevelLabelOverlays] = useState<KeyLevelLabelOverlay[]>([]);
+  const [previousRthRangeOverlay, setPreviousRthRangeOverlay] = useState<PreviousRthRangeOverlay | null>(null);
+  const [collapsedKeyLevelLabels, setCollapsedKeyLevelLabels] = useState<Record<string, boolean>>({});
   const [expandedSignalLabelKey, setExpandedSignalLabelKey] = useState<string | null>(null);
   const [fvgLabelsExpanded, setFvgLabelsExpanded] = useState(false);
   const [sessionBands, setSessionBands] = useState<SessionBandOverlay[]>([]);
@@ -4490,25 +4537,7 @@ function ChartPanelComponent({
   const [saveProjectionLines, setSaveProjectionLines] = useState(false);
   const [projectionSettingsOpen, setProjectionSettingsOpen] = useState(false);
   const [lineSettingsOpen, setLineSettingsOpen] = useState(false);
-  const [lineVisibility, setLineVisibility] = useState<LineVisibilityState>({
-    pmh: true,
-    vwap: true,
-    compression: true,
-    choch: true,
-    sessionBands: true,
-    projections: true,
-    trendlines: true,
-    fakeEngulfing: true,
-    significantCandles: true,
-    liquiditySweeps: true,
-    volumeSignals: true,
-    trendlineCloseAlerts: true,
-    bodyBreakDots: true,
-    closeAbovePrevCloseDots: true,
-    atrExpansionCandles: true,
-    resistanceBreakoutConfirm: true,
-    fvgFlip: true,
-  });
+  const [lineVisibility, setLineVisibility] = useState<LineVisibilityState>(() => readStoredLineVisibility());
   const [activeChartFunctionId, setActiveChartFunctionId] = useState<ChartFunctionId>(DEFAULT_CHART_FUNCTION_ID);
   const [projectionSelection, setProjectionSelection] = useState<ProjectionSelection | null>(null);
   const [selectedSavedProjectionId, setSelectedSavedProjectionId] = useState<string | null>(null);
@@ -4532,6 +4561,9 @@ function ChartPanelComponent({
       currentSessionLabel: getSessionLabel(getCurrentEtSessionKind()),
       premarketHigh: null,
       regularHigh: null,
+      regularLow: null,
+      previousRegularHigh: null,
+      previousRegularLow: null,
       afterHoursHigh: null,
       extendedHigh: null,
     },
@@ -4556,6 +4588,8 @@ function ChartPanelComponent({
       significantCandles: (visibility.significantCandles ?? true) && lineVisibility.significantCandles,
       liquiditySweeps: (visibility.liquiditySweeps ?? true) && lineVisibility.liquiditySweeps,
       volumeSignals: (visibility.volumeSignals ?? true) && lineVisibility.volumeSignals,
+      volumeProfile: (visibility.volumeProfile ?? true) && lineVisibility.volumeProfile,
+      previousRthHighLow: (visibility.previousRthHighLow ?? true) && lineVisibility.previousRthHighLow,
       trendlineCloseAlerts: (visibility.trendlineCloseAlerts ?? true) && lineVisibility.trendlineCloseAlerts,
       bodyBreakDots: (visibility.bodyBreakDots ?? true) && lineVisibility.bodyBreakDots,
       closeAbovePrevCloseDots: (visibility.closeAbovePrevCloseDots ?? true) && lineVisibility.closeAbovePrevCloseDots,
@@ -4575,6 +4609,8 @@ function ChartPanelComponent({
       visibility.significantCandles,
       visibility.liquiditySweeps,
       visibility.volumeSignals,
+      visibility.volumeProfile,
+      visibility.previousRthHighLow,
       visibility.trendlineCloseAlerts,
       visibility.bodyBreakDots,
       visibility.closeAbovePrevCloseDots,
@@ -4655,6 +4691,16 @@ function ChartPanelComponent({
   useEffect(() => {
     latestLineVisibilityRef.current = effectiveLineVisibility;
   }, [effectiveLineVisibility]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    try {
+      window.localStorage.setItem(CHART_LINE_VISIBILITY_STORAGE_KEY, JSON.stringify(lineVisibility));
+    } catch {
+      // Keep chart controls usable even if storage is blocked/full.
+    }
+  }, [lineVisibility]);
 
   useEffect(() => {
     onStatsUpdateRef.current = onStatsUpdate;
@@ -4849,6 +4895,7 @@ function ChartPanelComponent({
       setCloseAbovePrevCloseDotMarkers([]);
       setChochMarkers([]);
       setLiquiditySweepMarkers([]);
+      setVolumeProfileOverlays([]);
       setControlState({
         label: "NEUTRAL",
         color: "#cbd5e1",
@@ -5814,6 +5861,9 @@ function ChartPanelComponent({
       setSignalMarkers([]);
       setChochMarkers([]);
       setLiquiditySweepMarkers([]);
+      setVolumeProfileOverlays([]);
+      setKeyLevelLabelOverlays([]);
+      setPreviousRthRangeOverlay(null);
       setTrendlineHandleOverlays([]);
       setTrendlineFocusOverlay(null);
       setOrderLineOverlays([]);
@@ -5824,10 +5874,191 @@ function ChartPanelComponent({
 
     const timeScale = chart.timeScale();
 
+    const chartWidth = containerRef.current?.clientWidth ?? 0;
+    const visibleLogical = timeScale.getVisibleLogicalRange?.();
+
+    if (latestLineVisibilityRef.current.volumeProfile && barsRef.current.length > 0 && chartWidth > 0) {
+      const bars = barsRef.current;
+      const fromIndex = visibleLogical
+        ? Math.max(0, Math.floor(Number(visibleLogical.from)))
+        : Math.max(0, bars.length - 160);
+      const toIndex = visibleLogical
+        ? Math.min(bars.length - 1, Math.ceil(Number(visibleLogical.to)))
+        : bars.length - 1;
+      const visibleBars = bars.slice(fromIndex, toIndex + 1);
+      const validBars = visibleBars.filter((bar) =>
+        Number.isFinite(bar.high) &&
+        Number.isFinite(bar.low) &&
+        Number.isFinite(bar.close) &&
+        Number.isFinite(bar.volume) &&
+        bar.volume > 0 &&
+        bar.high >= bar.low
+      );
+
+      if (validBars.length > 0) {
+        const visibleHigh = Math.max(...validBars.map((bar) => bar.high));
+        const visibleLow = Math.min(...validBars.map((bar) => bar.low));
+        const priceRange = Math.max(visibleHigh - visibleLow, visibleHigh * 0.002, 0.01);
+        const targetRows = Math.max(18, Math.min(72, Math.round((containerRef.current?.clientHeight ?? 420) / 9)));
+        const rawStep = priceRange / targetRows;
+        const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep || 0.01)));
+        const normalizedStep = rawStep / magnitude;
+        const priceStep = (normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10) * magnitude;
+        const bucketVolume = new Map<number, number>();
+
+        for (const bar of validBars) {
+          const typicalPrice = (bar.high + bar.low + bar.close) / 3;
+          const bucket = Math.round(typicalPrice / priceStep) * priceStep;
+          bucketVolume.set(bucket, (bucketVolume.get(bucket) ?? 0) + bar.volume);
+        }
+
+        const maxVolume = Math.max(...Array.from(bucketVolume.values()), 1);
+        const pocPrice = Array.from(bucketVolume.entries()).reduce(
+          (best, current) => current[1] > best[1] ? current : best,
+          [0, 0]
+        )[0];
+        const maxProfileWidth = Math.max(70, Math.min(160, chartWidth * 0.18));
+        const nextVolumeProfileOverlays = Array.from(bucketVolume.entries())
+          .map(([price, volume]) => {
+            const topCoord = candleSeries.priceToCoordinate(price + priceStep / 2);
+            const bottomCoord = candleSeries.priceToCoordinate(price - priceStep / 2);
+            const centerCoord = candleSeries.priceToCoordinate(price);
+            if (centerCoord == null || !Number.isFinite(centerCoord)) return null;
+            const top = topCoord != null && bottomCoord != null
+              ? Math.min(topCoord, bottomCoord)
+              : centerCoord - 2;
+            const bottom = topCoord != null && bottomCoord != null
+              ? Math.max(topCoord, bottomCoord)
+              : centerCoord + 2;
+            const height = Math.max(2, Math.min(18, bottom - top));
+            const width = Math.max(3, (volume / maxVolume) * maxProfileWidth);
+            const isPoc = Math.abs(price - pocPrice) < priceStep / 2;
+            return {
+              price,
+              top,
+              height,
+              width,
+              volume,
+              isPoc,
+              label: `${isPoc ? "POC · " : ""}${formatPrice(price)} · Vol ${formatCompactVolume(volume)}`,
+            } satisfies VolumeProfileOverlay;
+          })
+          .filter((item): item is VolumeProfileOverlay => item !== null)
+          .sort((a, b) => a.top - b.top);
+
+        setVolumeProfileOverlays(nextVolumeProfileOverlays);
+      } else {
+        setVolumeProfileOverlays([]);
+      }
+    } else {
+      setVolumeProfileOverlays([]);
+    }
+
+
+    const nextKeyLevelLabels: KeyLevelLabelOverlay[] = [];
+    const pushKeyLevelLabel = (
+      id: string,
+      shortLabel: string,
+      fullLabel: string,
+      price: number | null,
+      color: string,
+      background: string,
+      border: string
+    ) => {
+      if (price == null || !Number.isFinite(price)) return;
+      const y = candleSeries.priceToCoordinate(price);
+      if (y == null || !Number.isFinite(y)) return;
+      nextKeyLevelLabels.push({ id, shortLabel, fullLabel, price, top: y, color, background, border });
+    };
+
+    const labelSessionStats = computeSessionStats(barsRef.current, tradingDateRef.current);
+    const previousRthHighForZone = labelSessionStats.previousRegularHigh;
+    const previousRthLowForZone = labelSessionStats.previousRegularLow;
+    if (
+      latestLineVisibilityRef.current.previousRthHighLow &&
+      previousRthHighForZone != null &&
+      previousRthLowForZone != null &&
+      Number.isFinite(previousRthHighForZone) &&
+      Number.isFinite(previousRthLowForZone) &&
+      previousRthHighForZone > previousRthLowForZone
+    ) {
+      const highY = candleSeries.priceToCoordinate(previousRthHighForZone);
+      const lowY = candleSeries.priceToCoordinate(previousRthLowForZone);
+      if (highY != null && lowY != null && Number.isFinite(highY) && Number.isFinite(lowY)) {
+        const top = Math.min(highY, lowY);
+        const bottom = Math.max(highY, lowY);
+        setPreviousRthRangeOverlay({
+          top,
+          height: Math.max(2, bottom - top),
+          high: previousRthHighForZone,
+          low: previousRthLowForZone,
+          labelTop: top + Math.max(2, bottom - top) / 2,
+        });
+      } else {
+        setPreviousRthRangeOverlay(null);
+      }
+    } else {
+      setPreviousRthRangeOverlay(null);
+    }
+    const latestVwapForLabel = calcVWAP(barsRef.current).at(-1) ?? null;
+    if (latestLineVisibilityRef.current.vwap) {
+      pushKeyLevelLabel("vwap", "VWAP", `VWAP ${formatPrice(latestVwapForLabel)}`, latestVwapForLabel, "#bae6fd", "rgba(14,116,144,0.92)", "1px solid rgba(56,189,248,0.75)");
+    }
+    if (latestLineVisibilityRef.current.pmh) {
+      pushKeyLevelLabel("pmh", "PMH", `PMH ${formatPrice(labelSessionStats.premarketHigh)}`, labelSessionStats.premarketHigh, "#fffbeb", "rgba(146,64,14,0.94)", "1px solid rgba(251,191,36,0.85)");
+    }
+    if (latestLineVisibilityRef.current.previousRthHighLow && labelSessionStats.previousRegularHigh != null && labelSessionStats.previousRegularLow != null) {
+      const rangeMid = (labelSessionStats.previousRegularHigh + labelSessionStats.previousRegularLow) / 2;
+      pushKeyLevelLabel(
+        "prev-rth-range",
+        "RTH",
+        `Prev RTH Range ${formatPrice(labelSessionStats.previousRegularLow)} - ${formatPrice(labelSessionStats.previousRegularHigh)}`,
+        rangeMid,
+        "#f8fafc",
+        "rgba(75,85,99,0.92)",
+        "1px solid rgba(209,213,219,0.55)"
+      );
+    }
+    if (legend.last != null && Number.isFinite(legend.last)) {
+      pushKeyLevelLabel("last", "LAST", `Last ${formatPrice(legend.last)}`, legend.last, "#dcfce7", "rgba(22,101,52,0.92)", "1px solid rgba(74,222,128,0.72)");
+    }
+
+    const sortedKeyLevelLabels = nextKeyLevelLabels
+      .sort((a, b) => a.top - b.top)
+      .map((label, index, labels) => {
+        let adjustedTop = label.top;
+        const previous = labels[index - 1];
+        if (previous && Math.abs(adjustedTop - previous.top) < 18) {
+          adjustedTop = previous.top + 18;
+        }
+        return { ...label, top: adjustedTop };
+      });
+    setKeyLevelLabelOverlays(sortedKeyLevelLabels);
+
     const nextSessionBands: SessionBandOverlay[] = [];
+    const visibleBarsForBandSpacing: number[] = [];
+    for (const bar of barsRef.current) {
+      const coord = timeScale.timeToCoordinate(toChartTime(bar.time) as Time);
+      if (coord != null && Number.isFinite(Number(coord))) {
+        visibleBarsForBandSpacing.push(Number(coord));
+      }
+    }
+    visibleBarsForBandSpacing.sort((a, b) => a - b);
+    const bandGaps: number[] = [];
+    for (let i = 1; i < visibleBarsForBandSpacing.length; i += 1) {
+      const currentX = visibleBarsForBandSpacing[i];
+      const previousX = visibleBarsForBandSpacing[i - 1];
+      const gap = currentX - previousX;
+      if (gap > 0 && gap < 80) bandGaps.push(gap);
+    }
+    bandGaps.sort((a, b) => a - b);
+    const sessionBandPad = Math.max(2, Math.min(bandGaps.length ? bandGaps[Math.floor(bandGaps.length / 2)] : 6, 18));
+
     for (const band of computeSessionBandRanges(barsRef.current, tradingDateRef.current)) {
-      const leftX = timeScale.timeToCoordinate(band.startTime as Time);
-      const rightX = timeScale.timeToCoordinate(band.endTime as Time);
+      const leftCoord = timeScale.timeToCoordinate(band.startTime as Time);
+      const rightCoord = timeScale.timeToCoordinate(band.endTime as Time);
+      const leftX = leftCoord == null ? null : Number(leftCoord);
+      const rightX = rightCoord == null ? null : Number(rightCoord);
 
       if (
         leftX == null ||
@@ -5838,10 +6069,13 @@ function ChartPanelComponent({
         continue;
       }
 
+      const left = Math.min(leftX, rightX) - sessionBandPad / 2;
+      const width = Math.max(Math.abs(rightX - leftX) + sessionBandPad, 2);
+
       nextSessionBands.push({
         ...band,
-        left: Math.min(leftX, rightX),
-        width: Math.max(Math.abs(rightX - leftX), 2),
+        left,
+        width,
       });
     }
     setSessionBands(nextSessionBands);
@@ -5850,8 +6084,6 @@ function ChartPanelComponent({
       const fvgZone = computeLatestFvgFlipZone(barsRef.current);
 
       if (fvgZone) {
-        const chartWidth = containerRef.current?.clientWidth ?? 0;
-        const visibleLogical = timeScale.getVisibleLogicalRange?.();
         const coordinateForIndex = (index: number): number | null => {
           const byLogical = timeScale.logicalToCoordinate(index as Logical);
           if (byLogical != null && Number.isFinite(byLogical)) return byLogical;
@@ -6488,6 +6720,10 @@ function ChartPanelComponent({
   }, [symbol]);
 
   useEffect(() => {
+    window.requestAnimationFrame(updateOverlayPositions);
+  }, [effectiveLineVisibility, updateOverlayPositions]);
+
+  useEffect(() => {
     const bars = barsRef.current;
     if (!bars.length) {
       latestAtrExpansionMarkersRef.current = [];
@@ -6593,8 +6829,13 @@ function ChartPanelComponent({
           ]
         : [];
 
-    vwapSeriesRef.current?.setData(effectiveLineVisibility.vwap ? vwapData : []);
-    pmhSeriesRef.current?.setData(effectiveLineVisibility.pmh ? pmhData : []);
+    const extendedVwapData = extendLineToSessionEnd(vwapData, bars, timeframe, tradingDate);
+    const extendedPmhData = extendLineToSessionEnd(pmhData, bars, timeframe, tradingDate);
+
+    vwapSeriesRef.current?.setData(effectiveLineVisibility.vwap ? extendedVwapData : []);
+    pmhSeriesRef.current?.setData(effectiveLineVisibility.pmh ? extendedPmhData : []);
+    previousRthHighSeriesRef.current?.setData([]);
+    previousRthLowSeriesRef.current?.setData([]);
     compressionTopSeriesRef.current?.setData(compressionTopData);
     compressionBottomSeriesRef.current?.setData(compressionBottomData);
 
@@ -6615,6 +6856,7 @@ function ChartPanelComponent({
     async (bars: Candle[], tradingDate: string | null, lastOverride?: number | null) => {
       barsRef.current = bars;
       tradingDateRef.current = tradingDate;
+      displaySlotCountRef.current = getDisplaySlotCountWithSessionTail(bars, timeframe, tradingDate);
 
       const atrValues = computeRollingAtrValues(bars, 14);
       const fakeEngulfingSignals = computeFakeEngulfingSignals(bars);
@@ -6714,10 +6956,19 @@ function ChartPanelComponent({
             ]
           : [];
 
-      candleSeriesRef.current?.setData(candleData);
-      volumeSeriesRef.current?.setData(volumeData);
-      vwapSeriesRef.current?.setData(latestLineVisibilityRef.current.vwap ? vwapData : []);
-      pmhSeriesRef.current?.setData(latestLineVisibilityRef.current.pmh ? pmhData : []);
+      const extendedCandleData = buildSessionFilledCandleData(candleData, bars, timeframe, tradingDate);
+      const extendedVolumeData = buildSessionFilledVolumeData(volumeData, extendedCandleData);
+      const extendedVwapData = extendLineToSessionEnd(vwapData, bars, timeframe, tradingDate);
+      const extendedPmhData = extendLineToSessionEnd(pmhData, bars, timeframe, tradingDate);
+
+      displaySlotCountRef.current = extendedCandleData.length || getDisplaySlotCountWithSessionTail(bars, timeframe, tradingDate);
+
+      candleSeriesRef.current?.setData(extendedCandleData);
+      volumeSeriesRef.current?.setData(extendedVolumeData);
+      vwapSeriesRef.current?.setData(latestLineVisibilityRef.current.vwap ? extendedVwapData : []);
+      pmhSeriesRef.current?.setData(latestLineVisibilityRef.current.pmh ? extendedPmhData : []);
+      previousRthHighSeriesRef.current?.setData([]);
+      previousRthLowSeriesRef.current?.setData([]);
       compressionTopSeriesRef.current?.setData(compressionTopData);
       compressionBottomSeriesRef.current?.setData(compressionBottomData);
 
@@ -7079,6 +7330,24 @@ function ChartPanelComponent({
       crosshairMarkerVisible: false,
     });
 
+    const previousRthHighSeries = chart.addSeries(LineSeries, {
+      color: "#22c55e",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: true,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+    });
+
+    const previousRthLowSeries = chart.addSeries(LineSeries, {
+      color: "#ef4444",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: true,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+    });
+
     const compressionTopSeries = chart.addSeries(LineSeries, {
       color: "#a78bfa",
       lineWidth: 2,
@@ -7099,6 +7368,8 @@ function ChartPanelComponent({
 
     vwapSeries.applyOptions({ autoscaleInfoProvider: () => null });
     pmhSeries.applyOptions({ autoscaleInfoProvider: () => null });
+    previousRthHighSeries.applyOptions({ autoscaleInfoProvider: () => null });
+    previousRthLowSeries.applyOptions({ autoscaleInfoProvider: () => null });
     compressionTopSeries.applyOptions({ autoscaleInfoProvider: () => null });
     compressionBottomSeries.applyOptions({ autoscaleInfoProvider: () => null });
 
@@ -7482,6 +7753,8 @@ function ChartPanelComponent({
     vwapSeriesRef.current = vwapSeries;
     projectionScaleAnchorSeriesRef.current = projectionScaleAnchorSeries;
     pmhSeriesRef.current = pmhSeries;
+    previousRthHighSeriesRef.current = previousRthHighSeries;
+    previousRthLowSeriesRef.current = previousRthLowSeries;
     compressionTopSeriesRef.current = compressionTopSeries;
     compressionBottomSeriesRef.current = compressionBottomSeries;
 
@@ -7583,6 +7856,8 @@ function ChartPanelComponent({
       vwapSeriesRef.current = null;
       projectionScaleAnchorSeriesRef.current = null;
       pmhSeriesRef.current = null;
+      previousRthHighSeriesRef.current = null;
+      previousRthLowSeriesRef.current = null;
       compressionTopSeriesRef.current = null;
       compressionBottomSeriesRef.current = null;
     };
@@ -7613,13 +7888,38 @@ function ChartPanelComponent({
       setError("");
 
       try {
+        if (loadDelayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, loadDelayMs));
+          if (cancelled) return;
+        }
+
         const barsResp = await fetchBars(symbol, timeframe, {
-          lookback: chartLookbackForTimeframe(timeframe),
-          forceRefresh: true,
+          lookback: lookback || chartLookbackForTimeframe(timeframe),
+          limit: chartLimitForTimeframe(timeframe),
+          forceRefresh: false,
         });
         if (cancelled) return;
 
-        const normalizedBars = normalizeBarsForChart(barsResp.bars ?? []);
+        let normalizedBars = normalizeBarsForChart(barsResp.bars ?? []);
+
+        if (isDailyTimeframe(timeframe)) {
+          try {
+            const intradayResp = await fetchBars(symbol, "1m", {
+              lookback: "2d",
+              limit: 1200,
+              forceRefresh: true,
+            });
+            const intradayBars = normalizeBarsForChart(intradayResp.bars ?? []);
+            normalizedBars = upsertCurrentDailyBarFromIntraday(
+              normalizedBars,
+              intradayBars,
+              intradayResp.trading_date ?? barsResp.trading_date ?? null
+            );
+          } catch {
+            // Keep the normal daily response if the intraday overlay request fails.
+          }
+        }
+
         await renderBars(normalizedBars, barsResp.trading_date ?? null);
 
         if (normalizedBars.length === 0) {
@@ -7632,6 +7932,7 @@ function ChartPanelComponent({
         latestVwapSignalsRef.current = [];
         barsRef.current = [];
         tradingDateRef.current = null;
+        displaySlotCountRef.current = 0;
 
         setCompressionRect(null);
         setBreakoutMarker(null);
@@ -7647,6 +7948,8 @@ function ChartPanelComponent({
         volumeSeriesRef.current?.setData([]);
         vwapSeriesRef.current?.setData([]);
         pmhSeriesRef.current?.setData([]);
+        previousRthHighSeriesRef.current?.setData([]);
+        previousRthLowSeriesRef.current?.setData([]);
         compressionTopSeriesRef.current?.setData([]);
         compressionBottomSeriesRef.current?.setData([]);
 
@@ -7669,6 +7972,9 @@ function ChartPanelComponent({
             currentSessionLabel: getSessionLabel(getCurrentEtSessionKind()),
             premarketHigh: null,
             regularHigh: null,
+            regularLow: null,
+            previousRegularHigh: null,
+            previousRegularLow: null,
             afterHoursHigh: null,
             extendedHigh: null,
           },
@@ -7694,10 +8000,43 @@ function ChartPanelComponent({
     return () => {
       cancelled = true;
     };
-  }, [symbol, timeframe, renderBars]);
+  }, [symbol, timeframe, lookback, loadDelayMs, renderBars]);
 
   useEffect(() => {
+    if (!enableLiveStream) return;
+
     let disposed = false;
+    let lastLiveRenderAt = 0;
+    let liveRenderTimer: number | null = null;
+    let pendingLiveRender: { bars: Candle[]; tradingDate: string | null; lastPrice: number | null } | null = null;
+
+    const flushLiveRender = async () => {
+      if (disposed || !pendingLiveRender) return;
+      const pending = pendingLiveRender;
+      pendingLiveRender = null;
+      lastLiveRenderAt = Date.now();
+      setError("");
+      await renderBars(pending.bars, pending.tradingDate, pending.lastPrice);
+    };
+
+    const scheduleLiveRender = async (bars: Candle[], tradingDate: string | null, lastPrice: number | null) => {
+      pendingLiveRender = { bars, tradingDate, lastPrice };
+      const elapsed = Date.now() - lastLiveRenderAt;
+      const wait = Math.max(0, 250 - elapsed);
+      if (wait <= 0) {
+        if (liveRenderTimer != null) {
+          window.clearTimeout(liveRenderTimer);
+          liveRenderTimer = null;
+        }
+        await flushLiveRender();
+        return;
+      }
+      if (liveRenderTimer != null) return;
+      liveRenderTimer = window.setTimeout(() => {
+        liveRenderTimer = null;
+        void flushLiveRender();
+      }, wait);
+    };
 
     const handlePayload = async (payload: unknown) => {
       if (disposed) return;
@@ -7803,8 +8142,7 @@ function ChartPanelComponent({
         }
 
         if (changed) {
-          setError("");
-          await renderBars(
+          await scheduleLiveRender(
             nextBars,
             tradingDateRef.current,
             lastPriceOverride ?? nextBars[nextBars.length - 1]?.close ?? null
@@ -7832,9 +8170,13 @@ function ChartPanelComponent({
 
     return () => {
       disposed = true;
+      if (liveRenderTimer != null) {
+        window.clearTimeout(liveRenderTimer);
+        liveRenderTimer = null;
+      }
       marketSocket.unsubscribe(symbol, handlePayload);
     };
-  }, [symbol, timeframe, renderBars]);
+  }, [symbol, timeframe, enableLiveStream, renderBars]);
 
   const canAddWatchlist = useMemo(
     () => Boolean(onRequestAddSymbolToWatchlist),
@@ -8049,6 +8391,9 @@ function ChartPanelComponent({
           <>
             <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>PMH: {formatPrice(legend.pmh)}</div>
             <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>RTH H: {formatPrice(legend.session.regularHigh)}</div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>RTH L: {formatPrice(legend.session.regularLow)}</div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>PDH: {formatPrice(legend.session.previousRegularHigh)}</div>
+            <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>PDL: {formatPrice(legend.session.previousRegularLow)}</div>
             <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>AH H: {formatPrice(legend.session.afterHoursHigh)}</div>
             <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>EXT H: {formatPrice(legend.session.extendedHigh)}</div>
             {hoveredCandle ? (
@@ -8521,6 +8866,8 @@ function ChartPanelComponent({
               ["significantCandles", "Significant Candle Dots"],
               ["liquiditySweeps", "Liquidity Sweeps"],
               ["volumeSignals", "Volume Signals"],
+              ["volumeProfile", "Volume Profile"],
+              ["previousRthHighLow", "Previous Day RTH High/Low"],
               ["bodyBreakDots", "Black Dots: Open/Close Below Prev Body"],
               ["closeAbovePrevCloseDots", "White Dots: Close Above Prev Close"],
               ["atrExpansionCandles", "ATR Expansion Candles"],
@@ -8575,6 +8922,7 @@ function ChartPanelComponent({
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <button
               onClick={() => setLineVisibility({
+                ...DEFAULT_LINE_VISIBILITY,
                 pmh: false,
                 vwap: false,
                 compression: false,
@@ -8586,6 +8934,8 @@ function ChartPanelComponent({
                 significantCandles: false,
                 liquiditySweeps: false,
                 volumeSignals: false,
+                volumeProfile: false,
+                previousRthHighLow: false,
                 bodyBreakDots: false,
                 closeAbovePrevCloseDots: false,
                 atrExpansionCandles: false,
@@ -8605,25 +8955,7 @@ function ChartPanelComponent({
               Hide All
             </button>
             <button
-              onClick={() => setLineVisibility({
-                pmh: true,
-                vwap: true,
-                compression: true,
-                choch: true,
-                sessionBands: true,
-                projections: true,
-                trendlines: true,
-                fakeEngulfing: true,
-                significantCandles: true,
-                liquiditySweeps: true,
-                volumeSignals: true,
-                bodyBreakDots: true,
-                closeAbovePrevCloseDots: true,
-                atrExpansionCandles: true,
-                resistanceBreakoutConfirm: true,
-                trendlineCloseAlerts: true,
-                fvgFlip: true,
-              })}
+              onClick={() => setLineVisibility(DEFAULT_LINE_VISIBILITY)}
               style={{
                 ...toolbarButtonStyle,
                 width: "100%",
@@ -9101,6 +9433,8 @@ function ChartPanelComponent({
               top: 0,
               width: band.width,
               height: "100%",
+              pointerEvents: "none",
+              zIndex: 1,
               background:
                 band.kind === "premarket" || band.kind === "afterhours" || band.kind === "overnight"
                   ? "rgba(209,213,219,0.16)"
@@ -9755,6 +10089,32 @@ function ChartPanelComponent({
         }) : null}
 
 
+        {effectiveLineVisibility.volumeProfile ? volumeProfileOverlays.map((level, idx) => {
+          const profileRight = Math.max(18, (containerRef.current?.clientWidth ?? 0) - 64);
+          const left = profileRight - level.width;
+
+          return (
+            <div
+              key={`${level.price}-${idx}-volume-profile`}
+              style={{
+                position: "absolute",
+                left,
+                top: level.top,
+                width: level.width,
+                height: level.height,
+                borderRadius: "999px 0 0 999px",
+                background: level.isPoc ? "rgba(251,191,36,0.58)" : "rgba(59,130,246,0.30)",
+                border: level.isPoc ? "1px solid rgba(251,191,36,0.95)" : "1px solid rgba(147,197,253,0.18)",
+                boxShadow: level.isPoc ? "0 0 10px rgba(251,191,36,0.45)" : "none",
+                pointerEvents: "auto",
+                zIndex: 2,
+              }}
+              title={level.label}
+            />
+          );
+        }) : null}
+
+
         {effectiveLineVisibility.volumeSignals ? volumeSignalMarkers.map((marker, idx) => {
           const dotSize = marker.dotSize ?? 11;
 
@@ -9997,6 +10357,132 @@ function ChartPanelComponent({
           cursor: drawMode ? "crosshair" : "default",
         }}
       />
+
+      {/* Collapsible line labels render above the chart canvas. Click each label to collapse/expand it. */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+          zIndex: 12,
+        }}
+      >
+  
+      {effectiveLineVisibility.previousRthHighLow && previousRthRangeOverlay ? (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 58,
+            top: previousRthRangeOverlay.top,
+            height: previousRthRangeOverlay.height,
+            background: "linear-gradient(90deg, rgba(200,200,200,0.075), rgba(200,200,200,0.035))",
+            borderTop: "1px solid rgba(200,200,200,0.24)",
+            borderBottom: "1px solid rgba(200,200,200,0.24)",
+            boxShadow: "inset 0 0 18px rgba(200,200,200,0.08)",
+            pointerEvents: "none",
+            zIndex: 4,
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              right: 8,
+              top: "50%",
+              transform: "translateY(-50%)",
+              padding: "2px 8px",
+              borderRadius: 999,
+              border: "1px solid rgba(200,200,200,0.40)",
+              background: "rgba(45,45,45,0.82)",
+              color: "#f3f4f6",
+              fontSize: 11,
+              fontWeight: 900,
+              whiteSpace: "nowrap",
+              boxShadow: "0 5px 14px rgba(0,0,0,0.30)",
+            }}
+          >
+            Prev RTH Range {formatPrice(previousRthRangeOverlay.low)} - {formatPrice(previousRthRangeOverlay.high)}
+          </div>
+        </div>
+      ) : null}
+
+      {keyLevelLabelOverlays.map((item) => {
+          const collapsed = collapsedKeyLevelLabels[item.id] ?? false;
+          const right = 58;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setCollapsedKeyLevelLabels((prev) => ({ ...prev, [item.id]: !(prev[item.id] ?? false) }));
+              }}
+              style={{
+                position: "absolute",
+                right,
+                top: item.top,
+                transform: "translateY(-50%)",
+                maxWidth: collapsed ? 56 : 168,
+                minWidth: collapsed ? 40 : 92,
+                height: 22,
+                padding: collapsed ? "0 7px" : "0 9px",
+                borderRadius: 999,
+                border: item.border,
+                background: item.background,
+                color: item.color,
+                fontSize: 11,
+                fontWeight: 900,
+                letterSpacing: 0.1,
+                lineHeight: "20px",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                cursor: "pointer",
+                pointerEvents: "auto",
+                boxShadow: "0 5px 16px rgba(0,0,0,0.35)",
+              }}
+              title={`${item.fullLabel} · click to ${collapsed ? "expand" : "collapse"}`}
+            >
+              {collapsed ? item.shortLabel : item.fullLabel}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Volume Profile must render AFTER the chart container so the chart canvas does not cover it. */}
+      {effectiveLineVisibility.volumeProfile ? (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            zIndex: 9,
+          }}
+        >
+          {volumeProfileOverlays.map((level, idx) => {
+            const profileRight = Math.max(18, (containerRef.current?.clientWidth ?? 0) - 64);
+            const left = profileRight - level.width;
+
+            return (
+              <div
+                key={`${level.price}-${idx}-volume-profile-top-layer`}
+                style={{
+                  position: "absolute",
+                  left,
+                  top: level.top,
+                  width: level.width,
+                  height: level.height,
+                  borderRadius: "999px 0 0 999px",
+                  background: level.isPoc ? "rgba(251,191,36,0.72)" : "rgba(59,130,246,0.42)",
+                  border: level.isPoc ? "1px solid rgba(251,191,36,0.98)" : "1px solid rgba(147,197,253,0.30)",
+                  boxShadow: level.isPoc ? "0 0 12px rgba(251,191,36,0.55)" : "none",
+                }}
+                title={level.label}
+              />
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }

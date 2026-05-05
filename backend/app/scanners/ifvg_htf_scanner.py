@@ -158,6 +158,60 @@ def _find_latest_ifvg(bars: List[Dict[str, float]], max_age_bars: int = 24) -> O
     return latest
 
 
+def _ifvg_trade_phase(
+    *,
+    status: str,
+    direction: str,
+    price: float,
+    open_price: float,
+    prev_close: float,
+    zone_low: float,
+    zone_high: float,
+    distance_pct: float,
+    age_bars: int,
+    bars_since_touch: Optional[int],
+    bounce_confirmed: bool,
+    failure: bool,
+    rvol: float,
+) -> str:
+    """Timing label for the HTF IFVG watchlist.
+
+    EARLY      = zone is fresh / first retest is happening; best RR window.
+    CONFIRMED  = bounce/reaction is valid and still close enough to the zone.
+    EXTENDED   = bounce already happened or price moved too far; do not chase.
+    FAILED     = zone invalidated.
+    """
+    if failure or status == "failure":
+        return "FAILED"
+
+    # If price has already moved far away from the zone, the best entry window is gone.
+    if distance_pct >= 2.75:
+        return "EXTENDED"
+
+    # A confirmed bounce can still be tradable if it is fresh and close to the zone.
+    if bounce_confirmed or status == "bounce_confirmed":
+        if age_bars <= 8 and distance_pct <= 1.75 and (bars_since_touch is None or bars_since_touch <= 4):
+            return "CONFIRMED"
+        return "EXTENDED"
+
+    # First touch / retest zone = early decision area.
+    if status in {"retest", "approaching", "fresh"}:
+        if age_bars <= 10 and distance_pct <= 1.50:
+            return "EARLY"
+        if age_bars <= 16 and distance_pct <= 2.25:
+            return "CONFIRMED"
+        return "EXTENDED"
+
+    return "CONFIRMED" if distance_pct <= 2.0 else "EXTENDED"
+
+
+def _find_bars_since_zone_touch(bars: List[Dict[str, float]], zone_low: float, zone_high: float) -> Optional[int]:
+    for offset, bar in enumerate(reversed(bars)):
+        if bar["low"] <= zone_high and bar["high"] >= zone_low:
+            return offset
+    return None
+
+
 def _classify_ifvg(ifvg: Dict[str, Any], bars: List[Dict[str, float]]) -> Dict[str, Any]:
     last = bars[-1]
     prev = bars[-2] if len(bars) >= 2 else last
@@ -165,13 +219,15 @@ def _classify_ifvg(ifvg: Dict[str, Any], bars: List[Dict[str, float]]) -> Dict[s
     zone_high = float(ifvg["zone_high"])
     direction = str(ifvg["direction"])
     price = float(last["close"])
+    open_price = float(last["open"])
     avg_vol = _avg_volume(bars[:-1] or bars, 20)
     rvol = (last["volume"] / avg_vol) if avg_vol > 0 else 0.0
 
     touched = bool(last["low"] <= zone_high and last["high"] >= zone_low)
+    bars_since_touch = _find_bars_since_zone_touch(bars, zone_low, zone_high)
     distance_pct = _pct_distance(price, zone_low, zone_high)
     status = "fresh"
-    phase = "watch"
+    alert_phase = "watch"
     score = 45.0
     notes: List[str] = []
 
@@ -188,35 +244,35 @@ def _classify_ifvg(ifvg: Dict[str, Any], bars: List[Dict[str, float]]) -> Dict[s
 
     if distance_pct <= 0.0:
         status = "retest"
-        phase = "prealert"
+        alert_phase = "prealert"
         score += 18
         notes.append("price inside IFVG zone")
     elif distance_pct <= 1.0:
         status = "approaching"
-        phase = "watch"
+        alert_phase = "watch"
         score += 10
         notes.append("within 1% of zone")
     elif distance_pct <= 2.0:
         status = "approaching"
-        phase = "watch"
+        alert_phase = "watch"
         score += 5
         notes.append("within 2% of zone")
 
     if direction == "bullish":
-        bounce = touched and price > zone_high and price > last["open"] and price >= prev["close"]
+        bounce = touched and price > zone_high and price > open_price and price >= prev["close"]
         failure = price < zone_low
     else:
-        bounce = touched and price < zone_low and price < last["open"] and price <= prev["close"]
+        bounce = touched and price < zone_low and price < open_price and price <= prev["close"]
         failure = price > zone_high
 
     if bounce:
         status = "bounce_confirmed"
-        phase = "confirmed"
+        alert_phase = "confirmed"
         score += 24
         notes.append("reaction confirmed")
     elif failure:
         status = "failure"
-        phase = "confirmed"
+        alert_phase = "confirmed"
         score += 16
         notes.append("zone failed")
 
@@ -235,14 +291,45 @@ def _classify_ifvg(ifvg: Dict[str, Any], bars: List[Dict[str, float]]) -> Dict[s
         score -= 12
         notes.append("wide/risky zone")
 
+    trade_phase = _ifvg_trade_phase(
+        status=status,
+        direction=direction,
+        price=price,
+        open_price=open_price,
+        prev_close=float(prev["close"]),
+        zone_low=zone_low,
+        zone_high=zone_high,
+        distance_pct=distance_pct,
+        age_bars=age,
+        bars_since_touch=bars_since_touch,
+        bounce_confirmed=bounce,
+        failure=failure,
+        rvol=rvol,
+    )
+
+    if trade_phase == "EARLY":
+        score += 10
+        notes.append("early timing window")
+    elif trade_phase == "CONFIRMED":
+        score += 5
+        notes.append("confirmed but still tradable")
+    elif trade_phase == "EXTENDED":
+        score -= 14
+        notes.append("late/extended - avoid chasing")
+    elif trade_phase == "FAILED":
+        score -= 18
+        notes.append("failed/invalidation state")
+
     return {
         "status": status,
-        "phase": phase,
+        "phase": trade_phase,
+        "alert_phase": alert_phase,
         "score": round(max(0.0, min(100.0, score)), 2),
         "last_price": round(price, 4),
         "distance_to_zone_pct": round(distance_pct, 2),
         "rvol": round(rvol, 2),
         "zone_width_pct": round(zone_width_pct, 2),
+        "bars_since_touch": bars_since_touch,
         "notes": notes,
     }
 
@@ -346,6 +433,7 @@ class IFVGHTFScanner(ScannerBase):
             "ifvg_score": state["score"],
             "ifvg_status": state["status"],
             "ifvg_phase": state["phase"],
+            "ifvg_alert_phase": state.get("alert_phase"),
             "ifvg_direction": ifvg["direction"],
             "zone_low": round(float(ifvg["zone_low"]), 4),
             "zone_high": round(float(ifvg["zone_high"]), 4),
@@ -353,6 +441,7 @@ class IFVGHTFScanner(ScannerBase):
             "rvol": state["rvol"],
             "zone_width_pct": state["zone_width_pct"],
             "age_bars": int(ifvg.get("age_bars") or 0),
+            "bars_since_touch": state.get("bars_since_touch"),
             "volume": int(_safe_float(bars[-1].get("volume"), 0.0)),
             "source": candidate.get("source"),
             "notes": state["notes"],
@@ -406,15 +495,22 @@ class IFVGHTFScanner(ScannerBase):
         raw_results = await asyncio.gather(*tasks) if tasks else []
         rows = [row for row in raw_results if row]
 
+        phase_rank = {
+            "EARLY": 5,
+            "CONFIRMED": 4,
+            "EXTENDED": 2,
+            "FAILED": 1,
+        }
         status_rank = {
-            "bounce_confirmed": 5,
-            "retest": 4,
+            "retest": 5,
+            "bounce_confirmed": 4,
             "approaching": 3,
             "fresh": 2,
             "failure": 1,
         }
         rows.sort(
             key=lambda row: (
+                phase_rank.get(str(row.get("ifvg_phase")), 0),
                 float(row.get("score") or 0),
                 status_rank.get(str(row.get("ifvg_status")), 0),
                 -float(row.get("distance_to_zone_pct") or 999),

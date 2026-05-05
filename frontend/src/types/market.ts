@@ -57,6 +57,7 @@ export type ScannerV2Row = {
   ifvg_score?: number | null;
   ifvg_status?: string | null;
   ifvg_phase?: string | null;
+  ifvg_alert_phase?: string | null;
   ifvg_direction?: string | null;
   zone_low?: number | null;
   zone_high?: number | null;
@@ -64,6 +65,7 @@ export type ScannerV2Row = {
   rvol?: number | null;
   zone_width_pct?: number | null;
   age_bars?: number | null;
+  bars_since_touch?: number | null;
   last_price: number | null;
   prev_close: number | null;
   ah_gap_pct?: number | null;

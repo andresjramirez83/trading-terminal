@@ -4,7 +4,7 @@ import type { ScannerV2Response, ScannerV2Row } from "../types/market";
 
 type Props = {
   selectedSymbol: string;
-  onSelectSymbol: (symbol: string) => void;
+  onSelectSymbol: (symbol: string, row?: ScannerV2Row) => void;
   compact?: boolean;
 };
 
@@ -20,6 +20,25 @@ function statusStyle(status?: string | null) {
   if (value.includes("failure")) return { color: "#fecaca", border: "rgba(248,113,113,0.35)", background: "rgba(127,29,29,0.25)" };
   if (value.includes("approach")) return { color: "#bfdbfe", border: "rgba(59,130,246,0.35)", background: "rgba(30,64,175,0.22)" };
   return { color: "#cbd5e1", border: "rgba(148,163,184,0.25)", background: "rgba(51,65,85,0.20)" };
+}
+
+
+function phaseStyle(phase?: string | null) {
+  const value = String(phase || "").toUpperCase();
+  if (value === "EARLY") return { color: "#022c22", border: "rgba(16,185,129,0.60)", background: "#34d399" };
+  if (value === "CONFIRMED") return { color: "#eff6ff", border: "rgba(96,165,250,0.55)", background: "rgba(37,99,235,0.85)" };
+  if (value === "EXTENDED") return { color: "#451a03", border: "rgba(245,158,11,0.65)", background: "#fbbf24" };
+  if (value === "FAILED") return { color: "#fee2e2", border: "rgba(248,113,113,0.55)", background: "rgba(153,27,27,0.85)" };
+  return { color: "#cbd5e1", border: "rgba(148,163,184,0.25)", background: "rgba(51,65,85,0.30)" };
+}
+
+function phaseHint(phase?: string | null): string {
+  const value = String(phase || "").toUpperCase();
+  if (value === "EARLY") return "Best RR window";
+  if (value === "CONFIRMED") return "Valid, still tradable";
+  if (value === "EXTENDED") return "Late — avoid chasing";
+  if (value === "FAILED") return "Invalidated";
+  return "Watching";
 }
 
 function normalizeRows(data: ScannerV2Response | null): ScannerV2Row[] {
@@ -154,11 +173,14 @@ export default function IfvgHtfScannerPanel({ selectedSymbol, onSelectSymbol, co
           {rows.map((row, index) => {
             const active = row.symbol === selectedSymbol;
             const chip = statusStyle(row.ifvg_status);
+            const phase = String(row.ifvg_phase || "WATCH").toUpperCase();
+            const phaseChip = phaseStyle(phase);
             return (
               <button
                 key={`${row.symbol}-${row.timeframe}-${index}`}
                 type="button"
-                onClick={() => onSelectSymbol(row.symbol)}
+                onClick={() => onSelectSymbol(row.symbol, row)}
+                title={phaseHint(phase)}
                 style={{
                   textAlign: "left",
                   padding: "9px 10px",
@@ -171,9 +193,17 @@ export default function IfvgHtfScannerPanel({ selectedSymbol, onSelectSymbol, co
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                   <div style={{ fontWeight: 900 }}>{row.symbol}</div>
-                  <div style={{ fontSize: 10, border: `1px solid ${chip.border}`, background: chip.background, color: chip.color, borderRadius: 999, padding: "2px 7px", fontWeight: 800 }}>
-                    {row.timeframe || "HTF"} · {String(row.ifvg_status || "watch").replace(/_/g, " ")}
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <div style={{ fontSize: 10, border: `1px solid ${phaseChip.border}`, background: phaseChip.background, color: phaseChip.color, borderRadius: 999, padding: "2px 7px", fontWeight: 900 }}>
+                      {phase}
+                    </div>
+                    <div style={{ fontSize: 10, border: `1px solid ${chip.border}`, background: chip.background, color: chip.color, borderRadius: 999, padding: "2px 7px", fontWeight: 800 }}>
+                      {row.timeframe || "HTF"} · {String(row.ifvg_status || "watch").replace(/_/g, " ")}
+                    </div>
                   </div>
+                </div>
+                <div style={{ marginTop: 5, fontSize: 10, color: phase === "EXTENDED" ? "#fde68a" : phase === "FAILED" ? "#fecaca" : "rgba(219,234,254,0.82)", fontWeight: 700 }}>
+                  {phaseHint(phase)}
                 </div>
                 <div style={{ marginTop: 6, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, opacity: 0.82 }}>
                   <div>Score: <strong>{fmt(row.ifvg_score ?? row.score, 1)}</strong></div>
