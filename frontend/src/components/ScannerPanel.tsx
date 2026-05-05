@@ -65,12 +65,6 @@ type ScannerRow = {
   compression_score?: number;
   breakout_score?: number;
   volume_accel_pct?: number;
-  atr_mult?: number;
-  body_pct?: number;
-  upper_wick_pct?: number;
-  close_position_pct?: number;
-  trigger_time_et?: string;
-  scan_date?: string;
   runner_score?: number;
   pm_runner_score?: number;
   float_shares?: number | null;
@@ -95,9 +89,7 @@ type ScannerResponse = {
   meta?: ScannerMeta;
 };
 
-type SnapshotResponse =
-  | string[]
-  | { snapshot_dates?: string[]; dates?: string[]; latest?: string | null };
+type SnapshotResponse = string[] | { snapshot_dates?: string[]; dates?: string[]; latest?: string | null };
 
 function formatVolume(value?: number | null): string {
   const safe = value ?? 0;
@@ -117,10 +109,7 @@ function arraysEqual(a: string[], b: string[]): boolean {
   return a.every((item, index) => item === b[index]);
 }
 
-function normalizeSnapshotInfo(raw: SnapshotResponse): {
-  dates: string[];
-  latest: string;
-} {
+function normalizeSnapshotInfo(raw: SnapshotResponse): { dates: string[]; latest: string } {
   if (Array.isArray(raw)) {
     return { dates: raw, latest: raw[0] ?? "" };
   }
@@ -138,8 +127,7 @@ export default function ScannerPanel({
   const isWorkspace = mode === "workspace";
 
   const [definitions, setDefinitions] = useState<ScannerDefinition[]>([]);
-  const [selectedScannerId, setSelectedScannerId] =
-    useState("overnight_runner");
+  const [selectedScannerId, setSelectedScannerId] = useState("overnight_runner");
   const [data, setData] = useState<ScannerResponse | null>(null);
   const [snapshotDates, setSnapshotDates] = useState<string[]>([]);
   const [latestSnapshot, setLatestSnapshot] = useState("");
@@ -148,17 +136,14 @@ export default function ScannerPanel({
   const [savingAh, setSavingAh] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
-  const [cacheStatus, setCacheStatus] = useState<ScannerCacheResponse | null>(
-    null,
-  );
+  const [cacheStatus, setCacheStatus] = useState<ScannerCacheResponse | null>(null);
 
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshSeconds, setRefreshSeconds] = useState(20);
 
   const [workflow, setWorkflow] = useState<Workflow>("auto");
   const [ahDate, setAhDate] = useState("");
-  const [runnerTypeFilter, setRunnerTypeFilter] =
-    useState<RunnerTypeFilter>("all");
+  const [runnerTypeFilter, setRunnerTypeFilter] = useState<RunnerTypeFilter>("all");
   const [preset, setPreset] = useState<PresetKey>("custom");
 
   const [maxSymbols, setMaxSymbols] = useState(25);
@@ -182,19 +167,14 @@ export default function ScannerPanel({
 
   const selectedDefinition = useMemo(
     () => definitions.find((item) => item.id === selectedScannerId) ?? null,
-    [definitions, selectedScannerId],
+    [definitions, selectedScannerId]
   );
-
-  const supportsAfterhoursSnapshot = selectedScannerId === "overnight_runner";
 
   async function loadDefinitions() {
     try {
       const result = (await fetchScannerDefinitions()) as ScannerDefinition[];
       setDefinitions(result ?? []);
-      if (
-        result?.length &&
-        !result.some((item) => item.id === selectedScannerId)
-      ) {
+      if (result?.length && !result.some((item) => item.id === selectedScannerId)) {
         setSelectedScannerId(result[0].id);
       }
     } catch (err) {
@@ -205,9 +185,7 @@ export default function ScannerPanel({
   async function loadSnapshots(nextScannerId?: string) {
     if (!isWorkspace) return;
     try {
-      const raw = (await fetchOvernightSnapshots(
-        nextScannerId ?? selectedScannerId,
-      )) as SnapshotResponse;
+      const raw = (await fetchOvernightSnapshots(nextScannerId ?? selectedScannerId)) as SnapshotResponse;
       const info = normalizeSnapshotInfo(raw);
       setSnapshotDates(info.dates);
       setLatestSnapshot(info.latest);
@@ -300,9 +278,7 @@ export default function ScannerPanel({
       min_pm_dollar_volume: minPmDollarVolume,
       min_compression_score: minCompressionScore,
       min_breakout_score: minBreakoutScore,
-      max_float_shares: maxFloatShares.trim()
-        ? Number(maxFloatShares)
-        : undefined,
+      max_float_shares: maxFloatShares.trim() ? Number(maxFloatShares) : undefined,
       low_float_only: lowFloatOnly,
       hours_back: hoursBack,
     };
@@ -320,19 +296,15 @@ export default function ScannerPanel({
 
       setCacheStatus(cacheResponse);
 
-      const cachedData = cacheResponse.data as ScannerResponse | null;
-      const cachedRows = cachedData?.rows ?? [];
-      const cacheScannerId = String(cachedData?.scanner_id ?? "");
-      const cacheIsWrongScanner = Boolean(
-        cacheScannerId && cacheScannerId !== selectedScannerId,
-      );
-      const cacheIsEmpty = !cachedData || cachedRows.length === 0;
+      const cachedRows = ((cacheResponse.data as ScannerResponse | null)?.rows ?? []);
+      const cacheIsEmpty = !cacheResponse.data || cachedRows.length === 0;
 
-      if (cachedData && !cacheIsEmpty && !cacheIsWrongScanner) {
-        setData(cachedData);
+      if (cacheResponse.data && !cacheIsEmpty) {
+        setData(cacheResponse.data as ScannerResponse);
       } else if (!cacheResponse.last_error) {
-        // Important: if the background cache is empty or belongs to another scanner,
-        // immediately run a manual refresh using the visible scanner settings.
+        // Important: if the background cache is empty, immediately run a manual refresh
+        // using the visible scanner settings. Otherwise the UI can sit on an old empty
+        // cache and make it look like Polygon is not returning data.
         const seeded = await refreshScannerCache(scannerRequestParams() as any);
         setCacheStatus(seeded);
         if (seeded.data) setData(seeded.data as ScannerResponse);
@@ -347,9 +319,7 @@ export default function ScannerPanel({
         await loadSnapshots(selectedScannerId);
       }
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load scanner cache",
-      );
+      setError(err instanceof Error ? err.message : "Failed to load scanner cache");
     } finally {
       setLoading(false);
     }
@@ -377,13 +347,9 @@ export default function ScannerPanel({
         const reasonText = rejectCounts
           ? ` | Checked ${rejectCounts.checked ?? 0}: no AH bars ${rejectCounts.no_afterhours_bars ?? 0}, price ${rejectCounts.price ?? 0}, volume ${rejectCounts.ah_volume ?? 0}, gap ${rejectCounts.ah_gap_pct ?? 0}, dollar volume ${rejectCounts.ah_dollar_volume ?? 0}`
           : "";
-        setStatus(
-          `${result?.message ?? "No AH snapshot was saved."}${reasonText}`,
-        );
+        setStatus(`${result?.message ?? "No AH snapshot was saved."}${reasonText}`);
       } else {
-        setStatus(
-          `Saved AH snapshot for ${result.trade_date} with ${result.count} rows.`,
-        );
+        setStatus(`Saved AH snapshot for ${result.trade_date} with ${result.count} rows.`);
       }
 
       await loadSnapshots(selectedScannerId);
@@ -391,11 +357,7 @@ export default function ScannerPanel({
         setAhDate(result.trade_date);
       }
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to save afterhours snapshot",
-      );
+      setError(err instanceof Error ? err.message : "Failed to save afterhours snapshot");
     } finally {
       setSavingAh(false);
     }
@@ -439,7 +401,6 @@ export default function ScannerPanel({
 
   const filteredRows = useMemo(() => {
     const byRunner = rows.filter((row) => {
-      if (selectedScannerId !== "overnight_runner") return true;
       if (runnerTypeFilter === "all") return true;
       return String(row.runner_type ?? "").toLowerCase() === runnerTypeFilter;
     });
@@ -456,21 +417,15 @@ export default function ScannerPanel({
 
       const aStr = String(av ?? "");
       const bStr = String(bv ?? "");
-      return sortDir === "asc"
-        ? aStr.localeCompare(bStr)
-        : bStr.localeCompare(aStr);
+      return sortDir === "asc" ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
     });
 
     return sorted;
-  }, [rows, runnerTypeFilter, sortKey, sortDir, selectedScannerId]);
+  }, [rows, runnerTypeFilter, sortKey, sortDir]);
 
   const runnerCounts = useMemo(() => {
-    const momentum = rows.filter(
-      (row) => String(row.runner_type ?? "").toLowerCase() === "momentum",
-    ).length;
-    const overnight = rows.filter(
-      (row) => String(row.runner_type ?? "").toLowerCase() === "overnight",
-    ).length;
+    const momentum = rows.filter((row) => String(row.runner_type ?? "").toLowerCase() === "momentum").length;
+    const overnight = rows.filter((row) => String(row.runner_type ?? "").toLowerCase() === "overnight").length;
     return { all: rows.length, momentum, overnight };
   }, [rows]);
 
@@ -490,13 +445,10 @@ export default function ScannerPanel({
 
     if (unique.length) {
       localStorage.setItem("watchlist", JSON.stringify(unique));
-      if (!unique.includes(selectedSymbol)) {
-        onSelectSymbol(unique[0]);
-      }
     } else {
       localStorage.removeItem("watchlist");
     }
-  }, [rows, onWatchlistChange, onSelectSymbol, selectedSymbol]);
+  }, [rows, onWatchlistChange]);
 
   function toggleSort(nextKey: keyof ScannerRow) {
     if (sortKey === nextKey) {
@@ -509,27 +461,16 @@ export default function ScannerPanel({
 
   const activeFilterChips = useMemo(() => {
     const chips: string[] = [];
-    if (minCompressionScore > 0)
-      chips.push(`Compression ≥ ${minCompressionScore}`);
+    if (minCompressionScore > 0) chips.push(`Compression ≥ ${minCompressionScore}`);
     if (minBreakoutScore > 0) chips.push(`Breakout ≥ ${minBreakoutScore}`);
-    if (maxFloatShares.trim())
-      chips.push(`Float ≤ ${formatVolume(Number(maxFloatShares))}`);
+    if (maxFloatShares.trim()) chips.push(`Float ≤ ${formatVolume(Number(maxFloatShares))}`);
     if (lowFloatOnly) chips.push("Low float only");
     chips.push(`AH save $Vol ≥ ${formatVolume(minAhDollarVolume)}`);
     chips.push(`Lookback ${hoursBack}h`);
     return chips;
-  }, [
-    minCompressionScore,
-    minBreakoutScore,
-    maxFloatShares,
-    lowFloatOnly,
-    minAhDollarVolume,
-    hoursBack,
-  ]);
+  }, [minCompressionScore, minBreakoutScore, maxFloatShares, lowFloatOnly, minAhDollarVolume, hoursBack]);
 
-  const lastRunText = cacheStatus?.last_run
-    ? new Date(cacheStatus.last_run).toLocaleTimeString()
-    : "waiting";
+  const lastRunText = cacheStatus?.last_run ? new Date(cacheStatus.last_run).toLocaleTimeString() : "waiting";
   const cacheSummary = `Cache: ${cacheStatus?.status ?? "loading"} | Last: ${lastRunText} | Count: ${data?.count ?? rows.length}`;
 
   const summaryText = isWorkspace
@@ -540,76 +481,49 @@ export default function ScannerPanel({
     <div
       style={{
         display: "grid",
-        gridTemplateRows: isWorkspace
-          ? "auto auto auto auto auto 1fr"
-          : "auto auto 1fr",
+        gridTemplateRows: isWorkspace ? "auto auto auto auto auto 1fr" : "auto auto 1fr",
         gap: 12,
         height: "100%",
         minHeight: 0,
       }}
     >
       <div style={panelStyle}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            gap: 12,
-            flexWrap: "wrap",
-            alignItems: "center",
-          }}
-        >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 700 }}>
-              {isWorkspace
-                ? (selectedDefinition?.name ?? "Scanner Workspace")
-                : "Scanner"}
+              {isWorkspace ? (selectedDefinition?.name ?? "Scanner Workspace") : "Scanner"}
             </div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>{summaryText}</div>
             {data?.meta?.combined_fallback ? (
               <div style={{ fontSize: 12, color: "#facc15", marginTop: 6 }}>
-                Combined fallback → Live:{" "}
-                {data.meta.combined_fallback_reason ?? "No AH snapshot"}
+                Combined fallback → Live: {data.meta.combined_fallback_reason ?? "No AH snapshot"}
               </div>
             ) : null}
           </div>
 
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              alignItems: "center",
-              flexWrap: "wrap",
-            }}
-          >
-            <select
-              value={selectedScannerId}
-              onChange={(e) => setSelectedScannerId(e.target.value)}
-              style={{ ...inputStyle, minWidth: isWorkspace ? 220 : 180 }}
-              title="Auto scanner module"
-            >
-              {definitions.length ? (
-                definitions.map((item) => (
+          {!isWorkspace ? (
+            <label style={{ ...labelStyle, minWidth: 0, flex: "1 1 100%" }}>
+              <div style={labelTextStyle}>Scanner</div>
+              <select
+                value={selectedScannerId}
+                onChange={(e) => setSelectedScannerId(e.target.value)}
+                style={inputStyle}
+              >
+                {definitions.length === 0 ? (
+                  <option value={selectedScannerId}>{selectedDefinition?.name ?? selectedScannerId}</option>
+                ) : null}
+                {definitions.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.name}
                   </option>
-                ))
-              ) : (
-                <option value={selectedScannerId}>Loading scanners...</option>
-              )}
-            </select>
-            <label
-              style={{
-                fontSize: 12,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(e) => setAutoRefresh(e.target.checked)}
-              />
+                ))}
+              </select>
+            </label>
+          ) : null}
+
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
               Auto
             </label>
             <input
@@ -620,11 +534,7 @@ export default function ScannerPanel({
               onChange={(e) => setRefreshSeconds(Number(e.target.value) || 20)}
               style={{ ...inputStyle, width: 72 }}
             />
-            <button
-              onClick={() => loadScanner({ forceRefresh: true })}
-              disabled={loading}
-              style={buttonStyle}
-            >
+            <button onClick={() => loadScanner({ forceRefresh: true })} disabled={loading} style={buttonStyle}>
               {loading ? "Refreshing..." : "Manual Refresh"}
             </button>
           </div>
@@ -632,24 +542,19 @@ export default function ScannerPanel({
       </div>
 
       {isWorkspace ? (
-        <div
-          style={{
-            ...panelStyle,
-            display: "grid",
-            gridTemplateColumns:
-              "minmax(170px,220px) minmax(170px,220px) 1fr auto",
-            gap: 12,
-            alignItems: "end",
-          }}
-        >
+        <div style={{ ...panelStyle, display: "grid", gridTemplateColumns: "minmax(220px,300px) minmax(170px,220px) minmax(170px,220px) 1fr auto", gap: 12, alignItems: "end" }}>
+          <label style={labelStyle}>
+            <div style={labelTextStyle}>Scanner Module</div>
+            <select value={selectedScannerId} onChange={(e) => setSelectedScannerId(e.target.value)} style={inputStyle}>
+              {definitions.map((item) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </label>
+
           <label style={labelStyle}>
             <div style={labelTextStyle}>Workflow</div>
-            <select
-              value={workflow}
-              onChange={(e) => setWorkflow(e.target.value as Workflow)}
-              style={inputStyle}
-              disabled={!supportsAfterhoursSnapshot}
-            >
+            <select value={workflow} onChange={(e) => setWorkflow(e.target.value as Workflow)} style={inputStyle}>
               <option value="auto">Auto</option>
               <option value="combined">Combined (Saved AH + PM)</option>
               <option value="live">Live PM Only</option>
@@ -658,403 +563,130 @@ export default function ScannerPanel({
 
           <label style={labelStyle}>
             <div style={labelTextStyle}>Saved AH Date</div>
-            <select
-              value={ahDate}
-              onChange={(e) => setAhDate(e.target.value)}
-              style={inputStyle}
-              disabled={!supportsAfterhoursSnapshot || workflow !== "combined"}
-            >
-              {snapshotDates.length ? (
-                snapshotDates.map((dateValue) => (
-                  <option key={dateValue} value={dateValue}>
-                    {dateValue}
-                  </option>
-                ))
-              ) : (
-                <option value="">No saved AH snapshot</option>
-              )}
+            <select value={ahDate} onChange={(e) => setAhDate(e.target.value)} style={inputStyle} disabled={workflow !== "combined"}>
+              {snapshotDates.length ? snapshotDates.map((dateValue) => (
+                <option key={dateValue} value={dateValue}>{dateValue}</option>
+              )) : <option value="">No saved AH snapshot</option>}
             </select>
           </label>
 
-          <div
-            style={{
-              border: "1px solid #1f2631",
-              borderRadius: 10,
-              padding: 10,
-              background: "#0b0f14",
-              fontSize: 13,
-              opacity: 0.95,
-            }}
-          >
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>
-              {supportsAfterhoursSnapshot
-                ? "Overnight Workflow"
-                : "Scanner Details"}
-            </div>
-            <div>
-              {selectedDefinition?.description ?? "Loading scanner module..."}
-            </div>
-            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
-              Latest saved AH: {latestSnapshot || "none"}
-            </div>
+          <div style={{ border: "1px solid #1f2631", borderRadius: 10, padding: 10, background: "#0b0f14", fontSize: 13, opacity: 0.95 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Overnight Workflow</div>
+            <div>{selectedDefinition?.description ?? "Loading scanner module..."}</div>
+            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>Latest saved AH: {latestSnapshot || "none"}</div>
             {data?.meta?.workflow_auto_rule ? (
-              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
-                {data.meta.workflow_auto_rule}
-              </div>
+              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>{data.meta.workflow_auto_rule}</div>
             ) : null}
           </div>
 
-          {supportsAfterhoursSnapshot ? (
-            <button
-              onClick={handleSaveAfterhours}
-              disabled={savingAh}
-              style={{ ...buttonStyle, minWidth: 150 }}
-            >
-              {savingAh ? "Saving AH..." : "Save AH Snapshot"}
-            </button>
-          ) : (
-            <button
-              onClick={() => loadScanner({ forceRefresh: true })}
-              disabled={loading}
-              style={{ ...buttonStyle, minWidth: 150 }}
-            >
-              {loading ? "Scanning..." : "Run Scanner"}
-            </button>
-          )}
+          <button onClick={handleSaveAfterhours} disabled={savingAh} style={{ ...buttonStyle, minWidth: 150 }}>
+            {savingAh ? "Saving AH..." : "Save AH Snapshot"}
+          </button>
         </div>
       ) : null}
 
       {isWorkspace ? (
         <div style={panelStyle}>
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-              marginBottom: 10,
-            }}
-          >
-            <button
-              onClick={() => applyPreset("early")}
-              style={preset === "early" ? activeButtonStyle : buttonStyle}
-            >
-              Early Detection
-            </button>
-            <button
-              onClick={() => applyPreset("breakout")}
-              style={preset === "breakout" ? activeButtonStyle : buttonStyle}
-            >
-              Clean Breakouts
-            </button>
-            <button
-              onClick={() => applyPreset("momentum")}
-              style={preset === "momentum" ? activeButtonStyle : buttonStyle}
-            >
-              Momentum Hunt
-            </button>
-            <button
-              onClick={() => applyPreset("lowfloat")}
-              style={preset === "lowfloat" ? activeButtonStyle : buttonStyle}
-            >
-              Low Float Focus
-            </button>
-            <button
-              onClick={() => setPreset("custom")}
-              style={preset === "custom" ? activeButtonStyle : buttonStyle}
-            >
-              Custom
-            </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <button onClick={() => applyPreset("early")} style={preset === "early" ? activeButtonStyle : buttonStyle}>Early Detection</button>
+            <button onClick={() => applyPreset("breakout")} style={preset === "breakout" ? activeButtonStyle : buttonStyle}>Clean Breakouts</button>
+            <button onClick={() => applyPreset("momentum")} style={preset === "momentum" ? activeButtonStyle : buttonStyle}>Momentum Hunt</button>
+            <button onClick={() => applyPreset("lowfloat")} style={preset === "lowfloat" ? activeButtonStyle : buttonStyle}>Low Float Focus</button>
+            <button onClick={() => setPreset("custom")} style={preset === "custom" ? activeButtonStyle : buttonStyle}>Custom</button>
           </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(7, minmax(110px, 1fr))",
-              gap: 10,
-            }}
-          >
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Max Symbols</div>
-              <input
-                type="number"
-                value={maxSymbols}
-                onChange={(e) => setMaxSymbols(Number(e.target.value) || 25)}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Min Price</div>
-              <input
-                type="number"
-                value={minPrice}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinPrice(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Max Price</div>
-              <input
-                type="number"
-                value={maxPrice}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMaxPrice(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Min PM Volume</div>
-              <input
-                type="number"
-                value={minVolume}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinVolume(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Min PM Gap %</div>
-              <input
-                type="number"
-                value={minGapPct}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinGapPct(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Min PM Range %</div>
-              <input
-                type="number"
-                value={minPmRangePct}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinPmRangePct(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Min $ Volume</div>
-              <input
-                type="number"
-                value={minPmDollarVolume}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinPmDollarVolume(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(110px, 1fr))", gap: 10 }}>
+            <label style={labelStyle}><div style={labelTextStyle}>Max Symbols</div><input type="number" value={maxSymbols} onChange={(e) => setMaxSymbols(Number(e.target.value) || 25)} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Min Price</div><input type="number" value={minPrice} onChange={(e) => { setPreset("custom"); setMinPrice(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Max Price</div><input type="number" value={maxPrice} onChange={(e) => { setPreset("custom"); setMaxPrice(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Min PM Volume</div><input type="number" value={minVolume} onChange={(e) => { setPreset("custom"); setMinVolume(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Min PM Gap %</div><input type="number" value={minGapPct} onChange={(e) => { setPreset("custom"); setMinGapPct(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Min PM Range %</div><input type="number" value={minPmRangePct} onChange={(e) => { setPreset("custom"); setMinPmRangePct(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Min $ Volume</div><input type="number" value={minPmDollarVolume} onChange={(e) => { setPreset("custom"); setMinPmDollarVolume(Number(e.target.value) || 0); }} style={inputStyle} /></label>
           </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(6, minmax(140px, 1fr))",
-              gap: 10,
-              marginTop: 10,
-            }}
-          >
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Min Compression</div>
-              <input
-                type="number"
-                value={minCompressionScore}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinCompressionScore(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Min Breakout</div>
-              <input
-                type="number"
-                value={minBreakoutScore}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinBreakoutScore(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Max Float Shares</div>
-              <input
-                type="number"
-                value={maxFloatShares}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMaxFloatShares(e.target.value);
-                }}
-                style={inputStyle}
-                placeholder="optional"
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>AH Save Min $Vol</div>
-              <input
-                type="number"
-                value={minAhDollarVolume}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setMinAhDollarVolume(Number(e.target.value) || 0);
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              <div style={labelTextStyle}>Lookback Hours</div>
-              <input
-                type="number"
-                min={24}
-                value={hoursBack}
-                onChange={(e) => {
-                  setPreset("custom");
-                  setHoursBack(Math.max(24, Number(e.target.value) || 96));
-                }}
-                style={inputStyle}
-              />
-            </label>
-            <label style={{ ...labelStyle, justifyContent: "flex-end" }}>
-              <div style={labelTextStyle}>Low Float Only</div>
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  height: 42,
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={lowFloatOnly}
-                  onChange={(e) => {
-                    setPreset("custom");
-                    setLowFloatOnly(e.target.checked);
-                  }}
-                />
-                Only ≤ 50M
-              </label>
-            </label>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(140px, 1fr))", gap: 10, marginTop: 10 }}>
+            <label style={labelStyle}><div style={labelTextStyle}>Min Compression</div><input type="number" value={minCompressionScore} onChange={(e) => { setPreset("custom"); setMinCompressionScore(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Min Breakout</div><input type="number" value={minBreakoutScore} onChange={(e) => { setPreset("custom"); setMinBreakoutScore(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Max Float Shares</div><input type="number" value={maxFloatShares} onChange={(e) => { setPreset("custom"); setMaxFloatShares(e.target.value); }} style={inputStyle} placeholder="optional" /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>AH Save Min $Vol</div><input type="number" value={minAhDollarVolume} onChange={(e) => { setPreset("custom"); setMinAhDollarVolume(Number(e.target.value) || 0); }} style={inputStyle} /></label>
+            <label style={labelStyle}><div style={labelTextStyle}>Lookback Hours</div><input type="number" min={24} value={hoursBack} onChange={(e) => { setPreset("custom"); setHoursBack(Math.max(24, Number(e.target.value) || 96)); }} style={inputStyle} /></label>
+            <label style={{ ...labelStyle, justifyContent: "flex-end" }}><div style={labelTextStyle}>Low Float Only</div><label style={{ display: "flex", alignItems: "center", gap: 8, height: 42 }}><input type="checkbox" checked={lowFloatOnly} onChange={(e) => { setPreset("custom"); setLowFloatOnly(e.target.checked); }} />Only ≤ 50M</label></label>
           </div>
         </div>
       ) : null}
 
-      {status ? (
-        <div
-          style={{
-            ...panelStyle,
-            borderColor: "#2f5c2a",
-            background: "rgba(67,132,57,0.15)",
-            color: "#b7f0af",
-            fontSize: 13,
-          }}
-        >
-          {status}
-        </div>
-      ) : null}
+      {status ? <div style={{ ...panelStyle, borderColor: "#2f5c2a", background: "rgba(67,132,57,0.15)", color: "#b7f0af", fontSize: 13 }}>{status}</div> : null}
 
-      {isWorkspace && selectedScannerId === "overnight_runner" ? (
+      {isWorkspace ? (
         <div style={panelStyle}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 10,
-              flexWrap: "wrap",
-            }}
-          >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button
-                onClick={() => setRunnerTypeFilter("all")}
-                style={
-                  runnerTypeFilter === "all" ? activeButtonStyle : buttonStyle
-                }
-              >
-                All ({runnerCounts.all})
-              </button>
-              <button
-                onClick={() => setRunnerTypeFilter("momentum")}
-                style={
-                  runnerTypeFilter === "momentum"
-                    ? activeButtonStyle
-                    : buttonStyle
-                }
-              >
-                Momentum ({runnerCounts.momentum})
-              </button>
-              <button
-                onClick={() => setRunnerTypeFilter("overnight")}
-                style={
-                  runnerTypeFilter === "overnight"
-                    ? activeButtonStyle
-                    : buttonStyle
-                }
-              >
-                Overnight ({runnerCounts.overnight})
-              </button>
+              <button onClick={() => setRunnerTypeFilter("all")} style={runnerTypeFilter === "all" ? activeButtonStyle : buttonStyle}>All ({runnerCounts.all})</button>
+              <button onClick={() => setRunnerTypeFilter("momentum")} style={runnerTypeFilter === "momentum" ? activeButtonStyle : buttonStyle}>Momentum ({runnerCounts.momentum})</button>
+              <button onClick={() => setRunnerTypeFilter("overnight")} style={runnerTypeFilter === "overnight" ? activeButtonStyle : buttonStyle}>Overnight ({runnerCounts.overnight})</button>
             </div>
-            <div style={{ fontSize: 12, opacity: 0.8 }}>
-              Sort: {String(sortKey)} ({sortDir})
-            </div>
+            <div style={{ fontSize: 12, opacity: 0.8 }}>Sort: {String(sortKey)} ({sortDir})</div>
           </div>
           {activeFilterChips.length ? (
-            <div
-              style={{
-                display: "flex",
-                gap: 8,
-                flexWrap: "wrap",
-                marginTop: 10,
-              }}
-            >
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {activeFilterChips.map((chip) => (
-                <div
-                  key={chip}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: 999,
-                    background: "#0b0f14",
-                    border: "1px solid #2a2f3a",
-                    fontSize: 12,
-                  }}
-                >
-                  {chip}
-                </div>
+                <div key={chip} style={{ padding: "6px 10px", borderRadius: 999, background: "#0b0f14", border: "1px solid #2a2f3a", fontSize: 12 }}>{chip}</div>
               ))}
             </div>
           ) : null}
         </div>
       ) : null}
 
-      <div
-        style={{ ...panelStyle, overflow: "auto", minHeight: 0, padding: 0 }}
-      >
+      <div style={{ ...panelStyle, overflow: "auto", minHeight: 0, padding: isWorkspace ? 0 : 10 }}>
         {error ? (
           <div style={{ color: "#ff7b7b", padding: 14 }}>{error}</div>
+        ) : !isWorkspace ? (
+          <div style={{ display: "grid", gap: 8 }}>
+            {filteredRows.length === 0 && !loading ? (
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: "1px dashed rgba(255,255,255,0.12)",
+                  background: "rgba(7,23,49,0.55)",
+                  color: "rgba(255,255,255,0.6)",
+                  fontSize: 12,
+                }}
+              >
+                Scanner watchlist is empty. Run or refresh the scanner.
+              </div>
+            ) : null}
+
+            {filteredRows.map((row) => {
+              const isSelected = row.symbol === selectedSymbol;
+              return (
+                <button
+                  key={row.symbol}
+                  type="button"
+                  onClick={() => onSelectSymbol(row.symbol)}
+                  style={{
+                    textAlign: "left",
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: isSelected
+                      ? "1px solid #4ea1ff"
+                      : "1px solid rgba(255,255,255,0.08)",
+                    background: isSelected ? "#12396b" : "#071731",
+                    color: "white",
+                    cursor: "pointer",
+                    fontWeight: isSelected ? 800 : 700,
+                    letterSpacing: 0.2,
+                  }}
+                >
+                  {row.symbol}
+                </button>
+              );
+            })}
+          </div>
         ) : (
-          <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
-          >
-            <thead
-              style={{
-                position: "sticky",
-                top: 0,
-                background: "#161d29",
-                zIndex: 1,
-              }}
-            >
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead style={{ position: "sticky", top: 0, background: "#161d29", zIndex: 1 }}>
               <tr>
                 {[
                   ["symbol", "Symbol"],
@@ -1063,10 +695,6 @@ export default function ScannerPanel({
                   ["pm_gap_pct", "Change%"],
                   ["pm_range_pct", "Range%"],
                   ["pm_volume", "Volume"],
-                  ["atr_mult", "ATR x"],
-                  ["body_pct", "Body%"],
-                  ["upper_wick_pct", "Upper Wick%"],
-                  ["trigger_time_et", "Trigger"],
                   ["pm_dollar_volume", "$Vol"],
                   ["compression_score", "Compression"],
                   ["breakout_score", "Breakout"],
@@ -1081,18 +709,9 @@ export default function ScannerPanel({
                 ].map(([key, header]) => (
                   <th
                     key={String(key)}
-                    onClick={() =>
-                      key !== "notes"
-                        ? toggleSort(key as keyof ScannerRow)
-                        : undefined
-                    }
+                    onClick={() => key !== "notes" ? toggleSort(key as keyof ScannerRow) : undefined}
                     style={{
-                      textAlign:
-                        header === "Symbol" ||
-                        header === "Type" ||
-                        header === "Notes"
-                          ? "left"
-                          : "right",
+                      textAlign: header === "Symbol" || header === "Type" || header === "Notes" ? "left" : "right",
                       padding: "10px 12px",
                       borderBottom: "1px solid #2a2f3a",
                       whiteSpace: "nowrap",
@@ -1108,120 +727,36 @@ export default function ScannerPanel({
               {filteredRows.map((row) => {
                 const isSelected = row.symbol === selectedSymbol;
                 const squeezeValue = row.squeeze_rank ?? null;
-                const squeezeColor =
-                  squeezeValue != null && squeezeValue > 80
-                    ? "#ff4d4f"
-                    : squeezeValue != null && squeezeValue > 60
-                      ? "#fa8c16"
-                      : "#fff";
-
+                const squeezeColor = squeezeValue != null && squeezeValue > 80 ? "#ff4d4f" : squeezeValue != null && squeezeValue > 60 ? "#fa8c16" : "#fff";
                 return (
                   <tr
                     key={row.symbol}
                     onClick={() => onSelectSymbol(row.symbol)}
-                    style={{
-                      cursor: "pointer",
-                      background: isSelected
-                        ? "rgba(120, 90, 255, 0.18)"
-                        : "transparent",
-                    }}
+                    style={{ cursor: "pointer", background: isSelected ? "rgba(120, 90, 255, 0.18)" : "transparent" }}
                   >
-                    <td style={cellLeft}>
-                      <strong>{row.symbol}</strong>
-                    </td>
-                    <td style={cellLeft}>
-                      {String(row.runner_type ?? row.source ?? "scanner")}
-                    </td>
-                    <td style={cellRight}>
-                      {formatMaybe(row.last_price ?? row.price)}
-                    </td>
-                    <td
-                      style={{
-                        ...cellRight,
-                        color:
-                          (row.pm_gap_pct ??
-                            row.gap_pct ??
-                            row.change_pct ??
-                            0) >= 0
-                            ? "#66d17a"
-                            : "#ff7b7b",
-                      }}
-                    >
-                      {formatMaybe(
-                        row.pm_gap_pct ?? row.gap_pct ?? row.change_pct,
-                      )}
-                      %
-                    </td>
-                    <td style={cellRight}>
-                      {formatMaybe(row.pm_range_pct ?? row.range_pct)}%
-                    </td>
-                    <td style={cellRight}>
-                      {formatVolume(row.pm_volume ?? row.volume)}
-                    </td>
-                    <td style={cellRight}>{formatMaybe(row.atr_mult)}</td>
-                    <td style={cellRight}>{formatMaybe(row.body_pct, 1)}%</td>
-                    <td style={cellRight}>
-                      {formatMaybe(row.upper_wick_pct, 1)}%
-                    </td>
-                    <td style={{ ...cellLeft, whiteSpace: "nowrap" }}>
-                      {row.trigger_time_et ?? "-"}
-                    </td>
-                    <td style={cellRight}>
-                      {formatVolume(
-                        row.pm_dollar_volume ??
-                          (row.price ?? row.last_price ?? 0) *
-                            (row.volume ?? row.pm_volume ?? 0),
-                      )}
-                    </td>
-                    <td style={cellRight}>
-                      {formatMaybe(row.compression_score)}
-                    </td>
+                    <td style={cellLeft}><strong>{row.symbol}</strong></td>
+                    <td style={cellLeft}>{String(row.runner_type ?? row.source ?? "scanner")}</td>
+                    <td style={cellRight}>{formatMaybe(row.last_price ?? row.price)}</td>
+                    <td style={{ ...cellRight, color: (row.pm_gap_pct ?? row.gap_pct ?? row.change_pct ?? 0) >= 0 ? "#66d17a" : "#ff7b7b" }}>{formatMaybe(row.pm_gap_pct ?? row.gap_pct ?? row.change_pct)}%</td>
+                    <td style={cellRight}>{formatMaybe(row.pm_range_pct ?? row.range_pct)}%</td>
+                    <td style={cellRight}>{formatVolume(row.pm_volume ?? row.volume)}</td>
+                    <td style={cellRight}>{formatVolume(row.pm_dollar_volume ?? ((row.price ?? row.last_price ?? 0) * (row.volume ?? row.pm_volume ?? 0)))}</td>
+                    <td style={cellRight}>{formatMaybe(row.compression_score)}</td>
                     <td style={cellRight}>{formatMaybe(row.breakout_score)}</td>
-                    <td style={cellRight}>
-                      {formatMaybe(row.volume_accel_pct)}%
-                    </td>
-                    <td style={cellRight}>
-                      {row.float_shares == null
-                        ? "-"
-                        : formatVolume(row.float_shares)}
-                    </td>
-                    <td style={cellRight}>
-                      {formatMaybe(row.short_interest_pct)}
-                    </td>
-                    <td style={cellRight}>
-                      {formatMaybe(row.short_interest_rank)}
-                    </td>
+                    <td style={cellRight}>{formatMaybe(row.volume_accel_pct)}%</td>
+                    <td style={cellRight}>{row.float_shares == null ? "-" : formatVolume(row.float_shares)}</td>
+                    <td style={cellRight}>{formatMaybe(row.short_interest_pct)}</td>
+                    <td style={cellRight}>{formatMaybe(row.short_interest_rank)}</td>
                     <td style={cellRight}>{formatMaybe(row.turnover_pct)}%</td>
-                    <td
-                      style={{
-                        ...cellRight,
-                        color: squeezeColor,
-                        fontWeight: 700,
-                      }}
-                    >
-                      {formatMaybe(row.squeeze_rank)}
-                    </td>
-                    <td
-                      style={{
-                        ...cellRight,
-                        color: "#9dd8ff",
-                        fontWeight: 700,
-                      }}
-                    >
-                      {formatMaybe(row.runner_score ?? row.score)}
-                    </td>
-                    <td style={cellLeft}>
-                      {(row.notes ?? []).join(", ") || "-"}
-                    </td>
+                    <td style={{ ...cellRight, color: squeezeColor, fontWeight: 700 }}>{formatMaybe(row.squeeze_rank)}</td>
+                    <td style={{ ...cellRight, color: "#9dd8ff", fontWeight: 700 }}>{formatMaybe(row.runner_score ?? row.score)}</td>
+                    <td style={cellLeft}>{(row.notes ?? []).join(", ") || "-"}</td>
                   </tr>
                 );
               })}
-
               {!loading && filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={21} style={{ padding: 16, opacity: 0.7 }}>
-                    No results for the current filter set.
-                  </td>
+                  <td colSpan={17} style={{ padding: 16, opacity: 0.7 }}>No results for the current filter set.</td>
                 </tr>
               ) : null}
             </tbody>

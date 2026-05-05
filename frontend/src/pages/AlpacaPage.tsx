@@ -1,25 +1,10 @@
 import { API_BASE_URL } from "../config";
-import {
-  startTransition,
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from "react";
+import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import ChartPanel, {
-  type OverlayVisibility,
-  type TrendlineControlAction,
-} from "../components/ChartPanel";
+import ChartPanel, { type OverlayVisibility, type TrendlineControlAction } from "../components/ChartPanel";
 import ScannerPanel from "../components/ScannerPanel";
 import GlobalHotkeys from "../components/GlobalHotkeys";
-import QuickOrderModal, {
-  type OrderTemplate,
-} from "../components/QuickOrderModal";
+import QuickOrderModal, { type OrderTemplate } from "../components/QuickOrderModal";
 import QuickAlertModal from "../components/QuickAlertModal";
 import {
   fetchAlpacaAccount,
@@ -120,15 +105,12 @@ const OVERLAY_PRESETS: Record<OverlayPreset, OverlayVisibility> = {
 const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_ON;
 
 const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility";
-const CHART_STUDY_VISIBILITY_STORAGE_KEY =
-  "alpacaChartStudyVisibilityByTimeframe";
+const CHART_STUDY_VISIBILITY_STORAGE_KEY = "alpacaChartStudyVisibilityByTimeframe";
 type ChartTimeframe = Exclude<ExpandedChartKey, null>;
 type ChartStudyVisibilityMap = Record<ChartTimeframe, OverlayVisibility>;
 type ChartPresetMap = Record<ChartTimeframe, OverlayPreset>;
 
-function normalizeOverlayVisibility(
-  value: Partial<OverlayVisibility> | null | undefined,
-): OverlayVisibility {
+function normalizeOverlayVisibility(value: Partial<OverlayVisibility> | null | undefined): OverlayVisibility {
   return {
     ...ALL_STUDIES_ON,
     ...(value ?? {}),
@@ -149,9 +131,7 @@ function loadChartStudyVisibilityMap(): ChartStudyVisibilityMap {
   try {
     const raw = window.localStorage.getItem(CHART_STUDY_VISIBILITY_STORAGE_KEY);
     if (!raw) return defaults;
-    const parsed = JSON.parse(raw) as Partial<
-      Record<ChartTimeframe, Partial<OverlayVisibility>>
-    >;
+    const parsed = JSON.parse(raw) as Partial<Record<ChartTimeframe, Partial<OverlayVisibility>>>;
     return {
       "1m": normalizeOverlayVisibility(parsed["1m"]),
       "5m": normalizeOverlayVisibility(parsed["5m"]),
@@ -164,10 +144,7 @@ function loadChartStudyVisibilityMap(): ChartStudyVisibilityMap {
 
 function saveChartStudyVisibilityMap(nextMap: ChartStudyVisibilityMap) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(
-    CHART_STUDY_VISIBILITY_STORAGE_KEY,
-    JSON.stringify(nextMap),
-  );
+  window.localStorage.setItem(CHART_STUDY_VISIBILITY_STORAGE_KEY, JSON.stringify(nextMap));
 }
 
 function countVisibleStudies(visibility: OverlayVisibility): number {
@@ -177,9 +154,7 @@ function countVisibleStudies(visibility: OverlayVisibility): number {
 function loadSharedStudyVisibility(): OverlayVisibility {
   if (typeof window === "undefined") return ALL_STUDIES_ON;
   try {
-    const raw = window.localStorage.getItem(
-      SHARED_STUDY_VISIBILITY_STORAGE_KEY,
-    );
+    const raw = window.localStorage.getItem(SHARED_STUDY_VISIBILITY_STORAGE_KEY);
     if (!raw) return ALL_STUDIES_ON;
     return normalizeOverlayVisibility(JSON.parse(raw));
   } catch {
@@ -189,16 +164,14 @@ function loadSharedStudyVisibility(): OverlayVisibility {
 
 function saveSharedStudyVisibility(nextVisibility: OverlayVisibility) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(
-    SHARED_STUDY_VISIBILITY_STORAGE_KEY,
-    JSON.stringify(nextVisibility),
-  );
+  window.localStorage.setItem(SHARED_STUDY_VISIBILITY_STORAGE_KEY, JSON.stringify(nextVisibility));
   window.dispatchEvent(
     new CustomEvent<OverlayVisibility>("shared-chart-study-visibility-change", {
       detail: nextVisibility,
-    }),
+    })
   );
 }
+
 
 const EMERGENCY_FALLBACK_SYMBOL = "AAPL";
 
@@ -213,14 +186,9 @@ const BROKER_POLL_MS = 30000;
 const MAX_ALPACA_SCANNER_SYMBOLS = 25;
 
 function uniqueSymbols(items: Array<string | null | undefined>): string[] {
-  return Array.from(
-    new Set(
-      items
-        .map((item) => normalizeSingleSymbol(String(item ?? "")))
-        .filter(Boolean),
-    ),
-  );
+  return Array.from(new Set(items.map((item) => normalizeSingleSymbol(String(item ?? ""))).filter(Boolean)));
 }
+
 
 function extractScannerSymbols(payload: any): string[] {
   const rows =
@@ -236,7 +204,7 @@ function extractScannerSymbols(payload: any): string[] {
     rows
       .map((row: any) => row?.symbol ?? row?.ticker ?? row)
       .filter(Boolean)
-      .slice(0, MAX_ALPACA_SCANNER_SYMBOLS),
+      .slice(0, MAX_ALPACA_SCANNER_SYMBOLS)
   );
 }
 
@@ -263,25 +231,19 @@ function loadInitialWatchlist(): string[] {
 
 function loadInitialSelectedSymbol(initialWatchlist: string[]): string {
   if (typeof window !== "undefined") {
-    const stored = normalizeSingleSymbol(
-      window.localStorage.getItem(ACTIVE_SYMBOL_STORAGE_KEY) || "",
-    );
+    const stored = normalizeSingleSymbol(window.localStorage.getItem(ACTIVE_SYMBOL_STORAGE_KEY) || "");
     if (stored) return stored;
   }
   return initialWatchlist[0] || EMERGENCY_FALLBACK_SYMBOL;
 }
 
-function normalizeExpandedChart(
-  value: string | null | undefined,
-): ExpandedChartKey {
+function normalizeExpandedChart(value: string | null | undefined): ExpandedChartKey {
   return value === "1m" || value === "5m" || value === "15m" ? value : null;
 }
 
 function loadInitialExpandedChart(): ExpandedChartKey {
   if (typeof window === "undefined") return null;
-  return normalizeExpandedChart(
-    window.localStorage.getItem(ACTIVE_ALPACA_CHART_STORAGE_KEY),
-  );
+  return normalizeExpandedChart(window.localStorage.getItem(ACTIVE_ALPACA_CHART_STORAGE_KEY));
 }
 
 function saveActiveAlpacaChartLocal(nextChart: ExpandedChartKey) {
@@ -302,9 +264,7 @@ function chartRangeKey(symbol: string, timeframe: string): string {
   return `${normalizeSingleSymbol(symbol)}::${String(timeframe).toLowerCase()}`;
 }
 
-function normalizeChartRanges(
-  value: unknown,
-): Record<string, SharedChartRange> {
+function normalizeChartRanges(value: unknown): Record<string, SharedChartRange> {
   if (!value || typeof value !== "object") return {};
   const out: Record<string, SharedChartRange> = {};
   for (const [key, range] of Object.entries(value as Record<string, any>)) {
@@ -319,15 +279,8 @@ function normalizeChartRanges(
 function saveScannerWatchlistLocal(nextWatchlist: string[]) {
   if (typeof window === "undefined") return;
   const cleanWatchlist = uniqueSymbols(nextWatchlist);
-  window.localStorage.setItem(
-    SCANNER_WATCHLIST_STORAGE_KEY,
-    JSON.stringify(cleanWatchlist),
-  );
-  window.dispatchEvent(
-    new CustomEvent<string[]>("scanner-watchlist-change", {
-      detail: cleanWatchlist,
-    }),
-  );
+  window.localStorage.setItem(SCANNER_WATCHLIST_STORAGE_KEY, JSON.stringify(cleanWatchlist));
+  window.dispatchEvent(new CustomEvent<string[]>("scanner-watchlist-change", { detail: cleanWatchlist }));
 }
 
 function saveActiveSymbolLocal(nextSymbol: string) {
@@ -335,11 +288,7 @@ function saveActiveSymbolLocal(nextSymbol: string) {
   const cleanSymbol = normalizeSingleSymbol(nextSymbol);
   if (!cleanSymbol) return;
   window.localStorage.setItem(ACTIVE_SYMBOL_STORAGE_KEY, cleanSymbol);
-  window.dispatchEvent(
-    new CustomEvent<string>("scanner-active-symbol-change", {
-      detail: cleanSymbol,
-    }),
-  );
+  window.dispatchEvent(new CustomEvent<string>("scanner-active-symbol-change", { detail: cleanSymbol }));
 }
 
 function loadManualWatchlist(): string[] {
@@ -378,19 +327,14 @@ function formatMoney(value: string | number | null | undefined): string {
   return num.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
 
-function formatNumber(
-  value: string | number | null | undefined,
-  digits = 2,
-): string {
+function formatNumber(value: string | number | null | undefined, digits = 2): string {
   if (value == null || value === "") return "N/A";
   const num = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(num)) return String(value);
   return num.toFixed(digits);
 }
 
-function formatSignedPercent(
-  value: string | number | null | undefined,
-): string {
+function formatSignedPercent(value: string | number | null | undefined): string {
   if (value == null || value === "") return "N/A";
   const num = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(num)) return String(value);
@@ -398,28 +342,31 @@ function formatSignedPercent(
   return `${sign}${num.toFixed(2)}%`;
 }
 
+function normalizeWatchlist(input: string): string[] {
+  return Array.from(
+    new Set(
+      input
+        .split(/[^A-Za-z.]+/)
+        .map((item) => item.trim().toUpperCase())
+        .filter(Boolean)
+    )
+  );
+}
+
 function normalizeSingleSymbol(input: string): string {
-  return input
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z.]/g, "");
+  return input.trim().toUpperCase().replace(/[^A-Z.]/g, "");
 }
 
 function bracketPlanStorageKey(mode: AlpacaMode, symbol: string): string {
   return `${BRACKET_PLAN_STORAGE_PREFIX}:${mode}:${normalizeSingleSymbol(symbol)}`;
 }
 
-function loadBracketPlan(
-  mode: AlpacaMode,
-  symbol: string,
-): { targetPrice: string; stopPrice: string } | null {
+function loadBracketPlan(mode: AlpacaMode, symbol: string): { targetPrice: string; stopPrice: string } | null {
   if (typeof window === "undefined") return null;
   const normalizedSymbol = normalizeSingleSymbol(symbol);
   if (!normalizedSymbol) return null;
   try {
-    const raw = window.localStorage.getItem(
-      bracketPlanStorageKey(mode, normalizedSymbol),
-    );
+    const raw = window.localStorage.getItem(bracketPlanStorageKey(mode, normalizedSymbol));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     return {
@@ -431,12 +378,7 @@ function loadBracketPlan(
   }
 }
 
-function saveBracketPlan(
-  mode: AlpacaMode,
-  symbol: string,
-  targetPrice: string,
-  stopPrice: string,
-): void {
+function saveBracketPlan(mode: AlpacaMode, symbol: string, targetPrice: string, stopPrice: string): void {
   if (typeof window === "undefined") return;
   const normalizedSymbol = normalizeSingleSymbol(symbol);
   if (!normalizedSymbol) return;
@@ -454,7 +396,7 @@ function saveBracketPlan(
       targetPrice: cleanTarget,
       stopPrice: cleanStop,
       updatedAt: Date.now(),
-    }),
+    })
   );
 }
 
@@ -465,9 +407,7 @@ function clearBracketPlan(mode: AlpacaMode, symbol: string): void {
   window.localStorage.removeItem(bracketPlanStorageKey(mode, normalizedSymbol));
 }
 
-function parsePositiveNumber(
-  value: string | number | null | undefined,
-): number {
+function parsePositiveNumber(value: string | number | null | undefined): number {
   if (value == null || value === "") return 0;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
@@ -489,28 +429,14 @@ function AlpacaPage() {
 
   const [mode, setMode] = useState<AlpacaMode>("paper");
   const initialWatchlistRef = useRef<string[]>(loadInitialWatchlist());
-  const [symbol, setSymbol] = useState<string>(() =>
-    loadInitialSelectedSymbol(initialWatchlistRef.current),
-  );
-  const [symbolInput, setSymbolInput] = useState<string>(() =>
-    loadInitialSelectedSymbol(initialWatchlistRef.current),
-  );
-  const [watchlist, setWatchlist] = useState<string[]>(
-    () => initialWatchlistRef.current,
-  );
-  const [, setWatchlistInput] = useState<string>(() =>
-    initialWatchlistRef.current.join(", "),
-  );
-  const [manualWatchlist, setManualWatchlist] = useState<string[]>(() =>
-    loadManualWatchlist(),
-  );
+  const [symbol, setSymbol] = useState<string>(() => loadInitialSelectedSymbol(initialWatchlistRef.current));
+  const [symbolInput, setSymbolInput] = useState<string>(() => loadInitialSelectedSymbol(initialWatchlistRef.current));
+  const [watchlist, setWatchlist] = useState<string[]>(() => initialWatchlistRef.current);
+  const [watchlistInput, setWatchlistInput] = useState<string>(() => initialWatchlistRef.current.join(", "));
+  const [manualWatchlist, setManualWatchlist] = useState<string[]>(() => loadManualWatchlist());
   const [manualWatchlistInput, setManualWatchlistInput] = useState<string>("");
-  const [expandedChart, setExpandedChart] = useState<ExpandedChartKey>(() =>
-    loadInitialExpandedChart(),
-  );
-  const [chartRanges, setChartRanges] = useState<
-    Record<string, SharedChartRange>
-  >({});
+  const [expandedChart, setExpandedChart] = useState<ExpandedChartKey>(() => loadInitialExpandedChart());
+  const [chartRanges, setChartRanges] = useState<Record<string, SharedChartRange>>({});
   const sharedStateHydratedRef = useRef(false);
   const sharedStateSaveTimerRef = useRef<number | null>(null);
   const bracketPlanHydratedRef = useRef(false);
@@ -523,9 +449,7 @@ function AlpacaPage() {
   const [error, setError] = useState<string>("");
   const [submitMessage, setSubmitMessage] = useState<string>("");
   const brokerLoadInFlightRef = useRef(false);
-  const orderPriceLocksRef = useRef<
-    Record<string, { price: number; kind: string; expiresAt: number }>
-  >({});
+  const orderPriceLocksRef = useRef<Record<string, { price: number; kind: string; expiresAt: number }>>({});
   // Order cancel quarantine: Alpaca can return a just-canceled order in the next
   // open-orders poll for a short moment. Keep those ids locally hidden so the
   // chart X deletes on the first click and polling cannot re-add it.
@@ -552,24 +476,15 @@ function AlpacaPage() {
   const [stopPrice, setStopPrice] = useState<string>("");
 
   const [quickOrderOpen, setQuickOrderOpen] = useState(false);
-  const [quickOrderTemplate, setQuickOrderTemplate] =
-    useState<OrderTemplate>("buy_only");
+  const [quickOrderTemplate, setQuickOrderTemplate] = useState<OrderTemplate>("buy_only");
   const [quickAlertOpen, setQuickAlertOpen] = useState(false);
   const [chartResetNonce, setChartResetNonce] = useState(0);
-  const [trendlineAction, setTrendlineAction] =
-    useState<TrendlineControlAction>({ type: "none" });
+  const [trendlineAction, setTrendlineAction] = useState<TrendlineControlAction>({ type: "none" });
   const [overlayPreset, setOverlayPreset] = useState<OverlayPreset>("runner");
-  const [chartOverlayPresets, setChartOverlayPresets] =
-    useState<ChartPresetMap>({
-      "1m": "runner",
-      "5m": "runner",
-      "15m": "runner",
-    });
-  const [chartStudyVisibility, setChartStudyVisibility] =
-    useState<ChartStudyVisibilityMap>(() => loadChartStudyVisibilityMap());
+  const [chartOverlayPresets, setChartOverlayPresets] = useState<ChartPresetMap>({ "1m": "runner", "5m": "runner", "15m": "runner" });
+  const [chartStudyVisibility, setChartStudyVisibility] = useState<ChartStudyVisibilityMap>(() => loadChartStudyVisibilityMap());
   const deferredChartStudyVisibility = useDeferredValue(chartStudyVisibility);
-  const [openStudiesMenu, setOpenStudiesMenu] =
-    useState<ExpandedChartKey>(null);
+  const [openStudiesMenu, setOpenStudiesMenu] = useState<ExpandedChartKey>(null);
   const [trendlineUiState, setTrendlineUiState] = useState({
     drawMode: false,
     pendingPoint: false,
@@ -587,9 +502,7 @@ function AlpacaPage() {
         const remote = await fetchSharedAlpacaState();
         if (cancelled || !remote) return;
 
-        const nextSymbol = normalizeSingleSymbol(
-          String(remote.selectedSymbol || ""),
-        );
+        const nextSymbol = normalizeSingleSymbol(String(remote.selectedSymbol || ""));
         if (nextSymbol) {
           setSymbol(nextSymbol);
           setSymbolInput(nextSymbol);
@@ -604,9 +517,7 @@ function AlpacaPage() {
         // Do not hydrate one shared visibility object here, or clearing one chart
         // would modify every other chart after a refresh/sync.
 
-        const remoteActiveChart = normalizeExpandedChart(
-          remote.activeChart || remote.timeframe || null,
-        );
+        const remoteActiveChart = normalizeExpandedChart(remote.activeChart || remote.timeframe || null);
         if (remoteActiveChart) {
           setExpandedChart(remoteActiveChart);
           saveActiveAlpacaChartLocal(remoteActiveChart);
@@ -640,8 +551,7 @@ function AlpacaPage() {
 
     sharedStateSaveTimerRef.current = window.setTimeout(() => {
       sharedStateSaveTimerRef.current = null;
-      const persistedActiveChart =
-        expandedChart || loadInitialExpandedChart() || "1m";
+      const persistedActiveChart = expandedChart || loadInitialExpandedChart() || "1m";
       void saveSharedAlpacaState({
         selectedSymbol: symbol,
         timeframe: persistedActiveChart,
@@ -655,65 +565,44 @@ function AlpacaPage() {
     }, 650);
   }, [symbol, expandedChart, watchlist, manualWatchlist, chartRanges]);
 
-  const handleVisibleRangeChange = useCallback(
-    (timeframe: Exclude<ExpandedChartKey, null>, range: SharedChartRange) => {
-      const key = chartRangeKey(symbol, timeframe);
-      setChartRanges((prev) => {
-        const previous = prev[key];
-        if (
-          previous &&
-          Math.abs(previous.from - range.from) < 0.01 &&
-          Math.abs(previous.to - range.to) < 0.01
-        ) {
-          return prev;
-        }
-        return { ...prev, [key]: range };
+  const handleVisibleRangeChange = useCallback((timeframe: Exclude<ExpandedChartKey, null>, range: SharedChartRange) => {
+    const key = chartRangeKey(symbol, timeframe);
+    setChartRanges((prev) => {
+      const previous = prev[key];
+      if (previous && Math.abs(previous.from - range.from) < 0.01 && Math.abs(previous.to - range.to) < 0.01) {
+        return prev;
+      }
+      return { ...prev, [key]: range };
+    });
+  }, [symbol]);
+
+  const selectActiveSymbol = useCallback((nextSymbol: string, options?: { addToScannerWatchlist?: boolean; addToManualWatchlist?: boolean }) => {
+    const next = normalizeSingleSymbol(nextSymbol);
+    if (!next) return;
+
+    setSubmitMessage("");
+    setError("");
+    setSymbol(next);
+    setSymbolInput(next);
+    saveActiveSymbolLocal(next);
+
+    if (options?.addToScannerWatchlist) {
+      setWatchlist((prev) => {
+        const updated = prev.includes(next) ? prev : [next, ...prev];
+        setWatchlistInput(updated.join(", "));
+        saveScannerWatchlistLocal(updated);
+        return updated;
       });
-    },
-    [symbol],
-  );
+    }
 
-  const selectActiveSymbol = useCallback(
-    (
-      nextSymbol: string,
-      options?: {
-        addToScannerWatchlist?: boolean;
-        addToManualWatchlist?: boolean;
-      },
-    ) => {
-      const next = normalizeSingleSymbol(nextSymbol);
-      if (!next) return;
-
-      setSubmitMessage("");
-      setError("");
-      setSymbol(next);
-      setSymbolInput(next);
-      saveActiveSymbolLocal(next);
-
-      if (options?.addToScannerWatchlist) {
-        setWatchlist((prev) => {
-          const updated = prev.includes(next) ? prev : [next, ...prev];
-          setWatchlistInput(updated.join(", "));
-          saveScannerWatchlistLocal(updated);
-          return updated;
-        });
-      }
-
-      if (options?.addToManualWatchlist) {
-        setManualWatchlist((prev) =>
-          prev.includes(next) ? prev : [next, ...prev],
-        );
-      }
-    },
-    [],
-  );
+    if (options?.addToManualWatchlist) {
+      setManualWatchlist((prev) => (prev.includes(next) ? prev : [next, ...prev]));
+    }
+  }, []);
 
   useEffect(() => {
     const applyScannerWatchlist = (symbols: string[]) => {
-      const cleaned = uniqueSymbols(symbols).slice(
-        0,
-        MAX_ALPACA_SCANNER_SYMBOLS,
-      );
+      const cleaned = uniqueSymbols(symbols).slice(0, MAX_ALPACA_SCANNER_SYMBOLS);
       if (arraysEqual(lastScannerSymbolsRef.current, cleaned)) return;
 
       lastScannerSymbolsRef.current = cleaned;
@@ -738,9 +627,7 @@ function AlpacaPage() {
     };
 
     const handleScannerActiveSymbolEvent = (event: Event) => {
-      const next = normalizeSingleSymbol(
-        (event as CustomEvent<string>).detail || "",
-      );
+      const next = normalizeSingleSymbol((event as CustomEvent<string>).detail || "");
       if (!next) return;
       setSymbol(next);
       setSymbolInput(next);
@@ -765,25 +652,13 @@ function AlpacaPage() {
       }
     };
 
-    window.addEventListener(
-      "scanner-watchlist-change",
-      handleScannerWatchlistEvent,
-    );
-    window.addEventListener(
-      "scanner-active-symbol-change",
-      handleScannerActiveSymbolEvent,
-    );
+    window.addEventListener("scanner-watchlist-change", handleScannerWatchlistEvent);
+    window.addEventListener("scanner-active-symbol-change", handleScannerActiveSymbolEvent);
     window.addEventListener("storage", handleStorage);
 
     return () => {
-      window.removeEventListener(
-        "scanner-watchlist-change",
-        handleScannerWatchlistEvent,
-      );
-      window.removeEventListener(
-        "scanner-active-symbol-change",
-        handleScannerActiveSymbolEvent,
-      );
+      window.removeEventListener("scanner-watchlist-change", handleScannerWatchlistEvent);
+      window.removeEventListener("scanner-active-symbol-change", handleScannerActiveSymbolEvent);
       window.removeEventListener("storage", handleStorage);
     };
   }, []);
@@ -812,8 +687,7 @@ function AlpacaPage() {
         const payload = await response.json();
         const nextSymbols = extractScannerSymbols(payload);
 
-        if (!mounted || arraysEqual(lastScannerSymbolsRef.current, nextSymbols))
-          return;
+        if (!mounted || arraysEqual(lastScannerSymbolsRef.current, nextSymbols)) return;
 
         lastScannerSymbolsRef.current = nextSymbols;
         saveScannerWatchlistLocal(nextSymbols);
@@ -843,8 +717,7 @@ function AlpacaPage() {
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
-      if (event.key !== CHART_STUDY_VISIBILITY_STORAGE_KEY || !event.newValue)
-        return;
+      if (event.key !== CHART_STUDY_VISIBILITY_STORAGE_KEY || !event.newValue) return;
       try {
         setChartStudyVisibility(loadChartStudyVisibilityMap());
       } catch {
@@ -857,10 +730,7 @@ function AlpacaPage() {
   }, []);
 
   const syncOrderSymbol = useCallback((nextSymbol: string) => {
-    setOrderForm((prev: PlaceAlpacaOrderRequest) => ({
-      ...prev,
-      symbol: nextSymbol,
-    }));
+    setOrderForm((prev: PlaceAlpacaOrderRequest) => ({ ...prev, symbol: nextSymbol }));
   }, []);
 
   useEffect(() => {
@@ -889,11 +759,9 @@ function AlpacaPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(
-      MANUAL_WATCHLIST_STORAGE_KEY,
-      JSON.stringify(uniqueSymbols(manualWatchlist)),
-    );
+    window.localStorage.setItem(MANUAL_WATCHLIST_STORAGE_KEY, JSON.stringify(uniqueSymbols(manualWatchlist)));
   }, [manualWatchlist]);
+
 
   const patchOrderWithPriceLock = useCallback((order: any) => {
     const orderId = String(order?.id ?? "");
@@ -908,17 +776,11 @@ function AlpacaPage() {
     const patched: any = { ...order };
 
     if (kind === "take_profit") {
-      patched.take_profit = {
-        ...(patched.take_profit ?? {}),
-        limit_price: lock.price,
-      };
+      patched.take_profit = { ...(patched.take_profit ?? {}), limit_price: lock.price };
       patched.take_profit_price = lock.price;
       patched.takeProfitPrice = lock.price;
     } else if (kind === "stop_loss" || kind === "stop") {
-      patched.stop_loss = {
-        ...(patched.stop_loss ?? {}),
-        stop_price: lock.price,
-      };
+      patched.stop_loss = { ...(patched.stop_loss ?? {}), stop_price: lock.price };
       patched.stop_loss_price = lock.price;
       patched.stopLossPrice = lock.price;
       patched.stop_price = lock.price;
@@ -932,21 +794,14 @@ function AlpacaPage() {
     return patched;
   }, []);
 
-  const applyOrderPriceLocks = useCallback(
-    (incomingOrders: any[]) => {
-      const now = Date.now();
-      for (const [orderId, lock] of Object.entries(
-        orderPriceLocksRef.current,
-      )) {
-        if (!lock || now > lock.expiresAt)
-          delete orderPriceLocksRef.current[orderId];
-      }
-      return (Array.isArray(incomingOrders) ? incomingOrders : []).map(
-        patchOrderWithPriceLock,
-      );
-    },
-    [patchOrderWithPriceLock],
-  );
+  const applyOrderPriceLocks = useCallback((incomingOrders: any[]) => {
+    const now = Date.now();
+    for (const [orderId, lock] of Object.entries(orderPriceLocksRef.current)) {
+      if (!lock || now > lock.expiresAt) delete orderPriceLocksRef.current[orderId];
+    }
+    return (Array.isArray(incomingOrders) ? incomingOrders : []).map(patchOrderWithPriceLock);
+  }, [patchOrderWithPriceLock]);
+
 
   const collectOrderRelationIds = useCallback((order: any): string[] => {
     const ids = new Set<string>();
@@ -972,137 +827,103 @@ function AlpacaPage() {
     return Array.from(ids);
   }, []);
 
-  const applyCancelOrderLocks = useCallback(
-    (incomingOrders: any[]) => {
-      const now = Date.now();
-      for (const [orderId, expiresAt] of Object.entries(
-        cancelOrderLocksRef.current,
-      )) {
-        if (!expiresAt || now > expiresAt)
-          delete cancelOrderLocksRef.current[orderId];
+  const applyCancelOrderLocks = useCallback((incomingOrders: any[]) => {
+    const now = Date.now();
+    for (const [orderId, expiresAt] of Object.entries(cancelOrderLocksRef.current)) {
+      if (!expiresAt || now > expiresAt) delete cancelOrderLocksRef.current[orderId];
+    }
+
+    const lockedIds = new Set(Object.keys(cancelOrderLocksRef.current));
+    if (!lockedIds.size) return Array.isArray(incomingOrders) ? incomingOrders : [];
+
+    return (Array.isArray(incomingOrders) ? incomingOrders : []).filter((order) => {
+      const relationIds = collectOrderRelationIds(order);
+      return !relationIds.some((id) => lockedIds.has(id));
+    });
+  }, [collectOrderRelationIds]);
+
+  const lockCanceledOrder = useCallback((orderId: string, ttlMs = 20000) => {
+    const id = String(orderId || "").trim();
+    if (!id) return;
+
+    const expiresAt = Date.now() + ttlMs;
+    cancelOrderLocksRef.current[id] = expiresAt;
+
+    // Also quarantine any known bracket children/parent ids tied to this order.
+    for (const order of Array.isArray(orders) ? orders : []) {
+      const relationIds = collectOrderRelationIds(order);
+      if (relationIds.includes(id)) {
+        for (const relatedId of relationIds) cancelOrderLocksRef.current[relatedId] = expiresAt;
       }
+    }
 
-      const lockedIds = new Set(Object.keys(cancelOrderLocksRef.current));
-      if (!lockedIds.size)
-        return Array.isArray(incomingOrders) ? incomingOrders : [];
+    forceOrderLockRender((value) => value + 1);
+  }, [collectOrderRelationIds, orders]);
 
-      return (Array.isArray(incomingOrders) ? incomingOrders : []).filter(
-        (order) => {
-          const relationIds = collectOrderRelationIds(order);
-          return !relationIds.some((id) => lockedIds.has(id));
-        },
-      );
-    },
-    [collectOrderRelationIds],
-  );
+  const lockChartOrderPrice = useCallback((orderId: string, kind: string, price: number, ttlMs = 12000) => {
+    if (!orderId || !Number.isFinite(price) || price <= 0) return;
+    orderPriceLocksRef.current[orderId] = {
+      price,
+      kind: String(kind || "limit").toLowerCase(),
+      expiresAt: Date.now() + ttlMs,
+    };
+    forceOrderLockRender((value) => value + 1);
+  }, []);
 
-  const lockCanceledOrder = useCallback(
-    (orderId: string, ttlMs = 20000) => {
-      const id = String(orderId || "").trim();
-      if (!id) return;
+  const patchOrderPrice = useCallback((order: any, kind: string, price: number) => {
+    const lineKind = String(kind || "limit").toLowerCase();
+    const patched: any = { ...order };
+    if (lineKind === "take_profit") {
+      patched.take_profit = { ...(patched.take_profit ?? {}), limit_price: price };
+      patched.take_profit_price = price;
+      patched.takeProfitPrice = price;
+    } else if (lineKind === "stop_loss" || lineKind === "stop") {
+      patched.stop_loss = { ...(patched.stop_loss ?? {}), stop_price: price };
+      patched.stop_loss_price = price;
+      patched.stopLossPrice = price;
+      patched.stop_price = price;
+      patched.stopPrice = price;
+    } else {
+      patched.limit_price = price;
+      patched.limitPrice = price;
+      patched.price = price;
+    }
+    return patched;
+  }, []);
 
-      const expiresAt = Date.now() + ttlMs;
-      cancelOrderLocksRef.current[id] = expiresAt;
+  const loadBrokerData = useCallback(async (silent = false) => {
+    if (brokerLoadInFlightRef.current) return;
+    brokerLoadInFlightRef.current = true;
 
-      // Also quarantine any known bracket children/parent ids tied to this order.
-      for (const order of Array.isArray(orders) ? orders : []) {
-        const relationIds = collectOrderRelationIds(order);
-        if (relationIds.includes(id)) {
-          for (const relatedId of relationIds)
-            cancelOrderLocksRef.current[relatedId] = expiresAt;
-        }
-      }
+    if (silent) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
 
-      forceOrderLockRender((value) => value + 1);
-    },
-    [collectOrderRelationIds, orders],
-  );
+    setError("");
 
-  const lockChartOrderPrice = useCallback(
-    (orderId: string, kind: string, price: number, ttlMs = 12000) => {
-      if (!orderId || !Number.isFinite(price) || price <= 0) return;
-      orderPriceLocksRef.current[orderId] = {
-        price,
-        kind: String(kind || "limit").toLowerCase(),
-        expiresAt: Date.now() + ttlMs,
-      };
-      forceOrderLockRender((value) => value + 1);
-    },
-    [],
-  );
+    try {
+      const [accountResponse, positionsResponse, ordersResponse] = await Promise.all([
+        fetchAlpacaAccount(mode),
+        fetchAlpacaPositions(mode),
+        fetchAlpacaOrders(mode, "open"),
+      ]);
 
-  const patchOrderPrice = useCallback(
-    (order: any, kind: string, price: number) => {
-      const lineKind = String(kind || "limit").toLowerCase();
-      const patched: any = { ...order };
-      if (lineKind === "take_profit") {
-        patched.take_profit = {
-          ...(patched.take_profit ?? {}),
-          limit_price: price,
-        };
-        patched.take_profit_price = price;
-        patched.takeProfitPrice = price;
-      } else if (lineKind === "stop_loss" || lineKind === "stop") {
-        patched.stop_loss = { ...(patched.stop_loss ?? {}), stop_price: price };
-        patched.stop_loss_price = price;
-        patched.stopLossPrice = price;
-        patched.stop_price = price;
-        patched.stopPrice = price;
-      } else {
-        patched.limit_price = price;
-        patched.limitPrice = price;
-        patched.price = price;
-      }
-      return patched;
-    },
-    [],
-  );
-
-  const loadBrokerData = useCallback(
-    async (silent = false) => {
-      if (brokerLoadInFlightRef.current) return;
-      brokerLoadInFlightRef.current = true;
-
+      setAccount(accountResponse);
+      setPositions(Array.isArray(positionsResponse) ? positionsResponse : []);
+      setOrders(applyCancelOrderLocks(applyOrderPriceLocks(Array.isArray(ordersResponse) ? ordersResponse : [])));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load Alpaca data");
+    } finally {
+      brokerLoadInFlightRef.current = false;
       if (silent) {
-        setRefreshing(true);
+        setRefreshing(false);
       } else {
-        setLoading(true);
+        setLoading(false);
       }
-
-      setError("");
-
-      try {
-        const [accountResponse, positionsResponse, ordersResponse] =
-          await Promise.all([
-            fetchAlpacaAccount(mode),
-            fetchAlpacaPositions(mode),
-            fetchAlpacaOrders(mode, "open"),
-          ]);
-
-        setAccount(accountResponse);
-        setPositions(Array.isArray(positionsResponse) ? positionsResponse : []);
-        setOrders(
-          applyCancelOrderLocks(
-            applyOrderPriceLocks(
-              Array.isArray(ordersResponse) ? ordersResponse : [],
-            ),
-          ),
-        );
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to load Alpaca data",
-        );
-      } finally {
-        brokerLoadInFlightRef.current = false;
-        if (silent) {
-          setRefreshing(false);
-        } else {
-          setLoading(false);
-        }
-      }
-    },
-    [mode, applyOrderPriceLocks],
-  );
+    }
+  }, [mode, applyOrderPriceLocks]);
 
   useEffect(() => {
     void loadBrokerData();
@@ -1116,37 +937,31 @@ function AlpacaPage() {
     return () => window.clearInterval(id);
   }, [loadBrokerData]);
 
-  const handleScannerWatchlistChange = useCallback((symbols: string[]) => {
-    const cleaned = uniqueSymbols(symbols).slice(0, MAX_ALPACA_SCANNER_SYMBOLS);
-    lastScannerSymbolsRef.current = cleaned;
-    setWatchlist((prev) => (arraysEqual(prev, cleaned) ? prev : cleaned));
-    setWatchlistInput(cleaned.join(", "));
-    saveScannerWatchlistLocal(cleaned);
-  }, []);
+  const applyWatchlist = () => {
+    const next = normalizeWatchlist(watchlistInput);
+    setWatchlist(next);
+    setWatchlistInput(next.join(", "));
+    saveScannerWatchlistLocal(next);
+    lastScannerSymbolsRef.current = next;
+  };
 
-  const handleScannerSelectSymbol = useCallback(
-    (nextSymbol: string) => {
-      const next = normalizeSingleSymbol(nextSymbol);
-      if (!next) return;
-      setSubmitMessage("");
-      setError("");
-      // Keep expanded chart open while switching symbols; Restore is the only exit.
-      selectActiveSymbol(next);
-    },
-    [selectActiveSymbol],
-  );
+  const handleScannerSelectSymbol = useCallback((nextSymbol: string) => {
+    const next = normalizeSingleSymbol(nextSymbol);
+    if (!next) return;
+    setSubmitMessage("");
+    setError("");
+    // Keep expanded chart open while switching symbols; Restore is the only exit.
+    selectActiveSymbol(next);
+  }, [selectActiveSymbol]);
 
-  const handleManualSelectSymbol = useCallback(
-    (nextSymbol: string) => {
-      const next = normalizeSingleSymbol(nextSymbol);
-      if (!next) return;
-      setSubmitMessage("");
-      setError("");
-      // Keep expanded chart open while switching symbols; Restore is the only exit.
-      selectActiveSymbol(next);
-    },
-    [selectActiveSymbol],
-  );
+  const handleManualSelectSymbol = useCallback((nextSymbol: string) => {
+    const next = normalizeSingleSymbol(nextSymbol);
+    if (!next) return;
+    setSubmitMessage("");
+    setError("");
+    // Keep expanded chart open while switching symbols; Restore is the only exit.
+    selectActiveSymbol(next);
+  }, [selectActiveSymbol]);
 
   const handleRemoveManualSymbol = useCallback((nextSymbol: string) => {
     const next = normalizeSingleSymbol(nextSymbol);
@@ -1161,9 +976,7 @@ function AlpacaPage() {
     setError("");
     // Keep expanded chart open while switching symbols; Restore is the only exit.
     selectActiveSymbol(next);
-    setManualWatchlist((prev) =>
-      prev.includes(next) ? prev : [next, ...prev],
-    );
+    setManualWatchlist((prev) => (prev.includes(next) ? prev : [next, ...prev]));
     setManualWatchlistInput("");
   }, [manualWatchlistInput, symbol, selectActiveSymbol]);
 
@@ -1177,18 +990,15 @@ function AlpacaPage() {
     selectActiveSymbol(nextSymbol, { addToScannerWatchlist: true });
   }, [symbolInput, selectActiveSymbol]);
 
-  const handleAddSymbolToWatchlist = useCallback(
-    (nextSymbol: string) => {
-      const next = normalizeSingleSymbol(nextSymbol);
-      if (!next) return;
+  const handleAddSymbolToWatchlist = useCallback((nextSymbol: string) => {
+    const next = normalizeSingleSymbol(nextSymbol);
+    if (!next) return;
 
-      setSubmitMessage("");
-      setError("");
-      // Keep expanded chart open while switching symbols; Restore is the only exit.
-      selectActiveSymbol(next, { addToManualWatchlist: true });
-    },
-    [selectActiveSymbol],
-  );
+    setSubmitMessage("");
+    setError("");
+    // Keep expanded chart open while switching symbols; Restore is the only exit.
+    selectActiveSymbol(next, { addToManualWatchlist: true });
+  }, [selectActiveSymbol]);
 
   const getModeButtonStyle = (buttonMode: AlpacaMode): CSSProperties => {
     const isActive = mode === buttonMode;
@@ -1200,7 +1010,9 @@ function AlpacaPage() {
         border: isActive
           ? "1px solid rgba(239,68,68,0.85)"
           : "1px solid rgba(255,255,255,0.12)",
-        background: isActive ? "rgba(127,29,29,0.65)" : "#071731",
+        background: isActive
+          ? "rgba(127,29,29,0.65)"
+          : "#071731",
         color: "#ffffff",
         fontWeight: 700,
         cursor: "pointer",
@@ -1213,7 +1025,9 @@ function AlpacaPage() {
       border: isActive
         ? "1px solid rgba(78,161,255,0.85)"
         : "1px solid rgba(255,255,255,0.12)",
-      background: isActive ? "rgba(18,57,107,0.75)" : "#071731",
+      background: isActive
+        ? "rgba(18,57,107,0.75)"
+        : "#071731",
       color: "#ffffff",
       fontWeight: 700,
       cursor: "pointer",
@@ -1235,65 +1049,45 @@ function AlpacaPage() {
     }, 80);
   }, []);
 
-  const updateChartStudyVisibility = useCallback(
-    (
-      timeframe: ChartTimeframe,
-      updater: (current: OverlayVisibility) => OverlayVisibility,
-    ) => {
-      startTransition(() => {
-        setChartStudyVisibility((prev) => {
-          const nextMap: ChartStudyVisibilityMap = {
-            ...prev,
-            [timeframe]: normalizeOverlayVisibility(
-              updater(prev[timeframe] ?? ALL_STUDIES_ON),
-            ),
-          };
-          saveChartStudyVisibilityMap(nextMap);
-          return nextMap;
-        });
+  const updateChartStudyVisibility = useCallback((timeframe: ChartTimeframe, updater: (current: OverlayVisibility) => OverlayVisibility) => {
+    startTransition(() => {
+      setChartStudyVisibility((prev) => {
+        const nextMap: ChartStudyVisibilityMap = {
+          ...prev,
+          [timeframe]: normalizeOverlayVisibility(updater(prev[timeframe] ?? ALL_STUDIES_ON)),
+        };
+        saveChartStudyVisibilityMap(nextMap);
+        return nextMap;
       });
-    },
-    [],
-  );
+    });
+  }, []);
 
-  const applyOverlayPreset = useCallback(
-    (timeframe: ChartTimeframe, nextPreset: OverlayPreset) => {
-      setOverlayPreset(nextPreset);
-      setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: nextPreset }));
-      updateChartStudyVisibility(timeframe, () => OVERLAY_PRESETS[nextPreset]);
-    },
-    [updateChartStudyVisibility],
-  );
+  const applyOverlayPreset = useCallback((timeframe: ChartTimeframe, nextPreset: OverlayPreset) => {
+    setOverlayPreset(nextPreset);
+    setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: nextPreset }));
+    updateChartStudyVisibility(timeframe, () => OVERLAY_PRESETS[nextPreset]);
+  }, [updateChartStudyVisibility]);
 
-  const toggleOverlayVisibility = useCallback(
-    (timeframe: ChartTimeframe, key: keyof OverlayVisibility) => {
-      setOverlayPreset("runner");
-      setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: "runner" }));
-      updateChartStudyVisibility(timeframe, (current) => ({
-        ...current,
-        [key]: !current[key],
-      }));
-    },
-    [updateChartStudyVisibility],
-  );
+  const toggleOverlayVisibility = useCallback((timeframe: ChartTimeframe, key: keyof OverlayVisibility) => {
+    setOverlayPreset("runner");
+    setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: "runner" }));
+    updateChartStudyVisibility(timeframe, (current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  }, [updateChartStudyVisibility]);
 
-  const showAllStudies = useCallback(
-    (timeframe: ChartTimeframe) => {
-      setOverlayPreset("runner");
-      setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: "runner" }));
-      updateChartStudyVisibility(timeframe, () => ALL_STUDIES_ON);
-    },
-    [updateChartStudyVisibility],
-  );
+  const showAllStudies = useCallback((timeframe: ChartTimeframe) => {
+    setOverlayPreset("runner");
+    setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: "runner" }));
+    updateChartStudyVisibility(timeframe, () => ALL_STUDIES_ON);
+  }, [updateChartStudyVisibility]);
 
-  const clearAllStudies = useCallback(
-    (timeframe: ChartTimeframe) => {
-      setOverlayPreset("clean");
-      setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: "clean" }));
-      updateChartStudyVisibility(timeframe, () => ALL_STUDIES_OFF);
-    },
-    [updateChartStudyVisibility],
-  );
+  const clearAllStudies = useCallback((timeframe: ChartTimeframe) => {
+    setOverlayPreset("clean");
+    setChartOverlayPresets((prev) => ({ ...prev, [timeframe]: "clean" }));
+    updateChartStudyVisibility(timeframe, () => ALL_STUDIES_OFF);
+  }, [updateChartStudyVisibility]);
 
   const handleTrendlineActionHandled = useCallback(() => {
     setTrendlineAction({ type: "none" });
@@ -1319,7 +1113,7 @@ function AlpacaPage() {
         console.error("Failed to send push alert", err);
       }
     },
-    [],
+    []
   );
 
   const handleEscapeHotkey = useCallback(() => {
@@ -1331,8 +1125,7 @@ function AlpacaPage() {
   const activeOrderSymbol = normalizeSingleSymbol(orderForm.symbol ?? symbol);
   const cashAmountValue = parsePositiveNumber(cashAmount);
   const entryLimitPriceValue = parsePositiveNumber(orderForm.limit_price);
-  const marketReferencePrice =
-    stats1m.last ?? stats5m.last ?? stats15m.last ?? null;
+  const marketReferencePrice = stats1m.last ?? stats5m.last ?? stats15m.last ?? null;
 
   const entryPriceForCalc =
     orderForm.type === "limit"
@@ -1365,32 +1158,27 @@ function AlpacaPage() {
       : 0;
 
   const riskRewardRatio =
-    stopRisk > 0 && targetPnL > 0 ? targetPnL / stopRisk : null;
+    stopRisk > 0 && targetPnL > 0
+      ? targetPnL / stopRisk
+      : null;
 
   const ordersForChart = useMemo(() => {
-    const baseOrders = applyOrderPriceLocks(
-      Array.isArray(orders) ? orders : [],
-    );
+    const baseOrders = applyOrderPriceLocks(Array.isArray(orders) ? orders : []);
     const firstActiveOrderForSymbol = baseOrders.find((order: any) => {
-      const orderSymbol = normalizeSingleSymbol(
-        String(order?.symbol ?? activeOrderSymbol),
-      );
+      const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? activeOrderSymbol));
       const status = String(order?.status ?? "open").toLowerCase();
       return (
         activeOrderSymbol &&
         orderSymbol === activeOrderSymbol &&
-        !["filled", "canceled", "cancelled", "expired", "rejected"].includes(
-          status,
-        )
+        !["filled", "canceled", "cancelled", "expired", "rejected"].includes(status)
       );
     });
     const activeOrderEntryPrice = parsePositiveNumber(
       firstActiveOrderForSymbol?.limit_price ??
         firstActiveOrderForSymbol?.limitPrice ??
-        firstActiveOrderForSymbol?.price,
+        firstActiveOrderForSymbol?.price
     );
-    const bracketEntryPrice =
-      entryPriceForCalc > 0 ? entryPriceForCalc : activeOrderEntryPrice;
+    const bracketEntryPrice = entryPriceForCalc > 0 ? entryPriceForCalc : activeOrderEntryPrice;
     const hasPlanningBracket =
       activeOrderSymbol &&
       bracketEntryPrice > 0 &&
@@ -1401,68 +1189,47 @@ function AlpacaPage() {
 
     let patchedAnyActiveOrder = false;
     const nextOrders = baseOrders.map((order: any) => {
-      const orderSymbol = normalizeSingleSymbol(
-        String(order?.symbol ?? activeOrderSymbol),
-      );
+      const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? activeOrderSymbol));
       if (orderSymbol !== activeOrderSymbol) return order;
 
       const status = String(order?.status ?? "open").toLowerCase();
-      if (
-        ["filled", "canceled", "cancelled", "expired", "rejected"].includes(
-          status,
-        )
-      )
-        return order;
+      if (["filled", "canceled", "cancelled", "expired", "rejected"].includes(status)) return order;
 
-      const alreadyHasTarget =
-        parsePositiveNumber(
-          order?.take_profit?.limit_price ??
-            order?.take_profit?.price ??
-            order?.take_profit_price ??
-            order?.takeProfitPrice,
-        ) > 0;
-      const alreadyHasStop =
-        parsePositiveNumber(
-          order?.stop_loss?.stop_price ??
-            order?.stop_loss?.price ??
-            order?.stop_loss_price ??
-            order?.stopLossPrice ??
-            order?.stop_price ??
-            order?.stopPrice,
-        ) > 0;
+      const alreadyHasTarget = parsePositiveNumber(
+        order?.take_profit?.limit_price ??
+          order?.take_profit?.price ??
+          order?.take_profit_price ??
+          order?.takeProfitPrice
+      ) > 0;
+      const alreadyHasStop = parsePositiveNumber(
+        order?.stop_loss?.stop_price ??
+          order?.stop_loss?.price ??
+          order?.stop_loss_price ??
+          order?.stopLossPrice ??
+          order?.stop_price ??
+          order?.stopPrice
+      ) > 0;
 
       patchedAnyActiveOrder = true;
       return {
         ...order,
         order_class: order?.order_class ?? order?.orderClass ?? "bracket",
         orderClass: order?.orderClass ?? order?.order_class ?? "bracket",
-        limit_price:
-          parsePositiveNumber(
-            order?.limit_price ?? order?.limitPrice ?? order?.price,
-          ) > 0
-            ? (order?.limit_price ?? order?.limitPrice ?? order?.price)
-            : bracketEntryPrice,
-        limitPrice:
-          parsePositiveNumber(
-            order?.limitPrice ?? order?.limit_price ?? order?.price,
-          ) > 0
-            ? (order?.limitPrice ?? order?.limit_price ?? order?.price)
-            : bracketEntryPrice,
+        limit_price: parsePositiveNumber(order?.limit_price ?? order?.limitPrice ?? order?.price) > 0
+          ? order?.limit_price ?? order?.limitPrice ?? order?.price
+          : bracketEntryPrice,
+        limitPrice: parsePositiveNumber(order?.limitPrice ?? order?.limit_price ?? order?.price) > 0
+          ? order?.limitPrice ?? order?.limit_price ?? order?.price
+          : bracketEntryPrice,
         take_profit: alreadyHasTarget
           ? order?.take_profit
           : { ...(order?.take_profit ?? {}), limit_price: targetPriceValue },
-        take_profit_price: alreadyHasTarget
-          ? order?.take_profit_price
-          : targetPriceValue,
-        takeProfitPrice: alreadyHasTarget
-          ? order?.takeProfitPrice
-          : targetPriceValue,
+        take_profit_price: alreadyHasTarget ? order?.take_profit_price : targetPriceValue,
+        takeProfitPrice: alreadyHasTarget ? order?.takeProfitPrice : targetPriceValue,
         stop_loss: alreadyHasStop
           ? order?.stop_loss
           : { ...(order?.stop_loss ?? {}), stop_price: stopPriceValue },
-        stop_loss_price: alreadyHasStop
-          ? order?.stop_loss_price
-          : stopPriceValue,
+        stop_loss_price: alreadyHasStop ? order?.stop_loss_price : stopPriceValue,
         stopLossPrice: alreadyHasStop ? order?.stopLossPrice : stopPriceValue,
         stop_price: alreadyHasStop ? order?.stop_price : stopPriceValue,
         stopPrice: alreadyHasStop ? order?.stopPrice : stopPriceValue,
@@ -1497,22 +1264,10 @@ function AlpacaPage() {
         stopPrice: stopPriceValue,
       },
     ];
-  }, [
-    orders,
-    activeOrderSymbol,
-    entryPriceForCalc,
-    targetPriceValue,
-    stopPriceValue,
-    calculatedQty,
-    orderForm.type,
-    applyOrderPriceLocks,
-  ]);
+  }, [orders, activeOrderSymbol, entryPriceForCalc, targetPriceValue, stopPriceValue, calculatedQty, orderForm.type, applyOrderPriceLocks]);
 
   const activePosition =
-    positions.find(
-      (position) =>
-        normalizeSingleSymbol(position.symbol) === activeOrderSymbol,
-    ) ?? null;
+    positions.find((position) => normalizeSingleSymbol(position.symbol) === activeOrderSymbol) ?? null;
 
   const submitEntryOrder = async (side: "buy" | "sell") => {
     setSubmitMessage("");
@@ -1544,8 +1299,7 @@ function AlpacaPage() {
         type: orderForm.type,
         time_in_force: orderForm.time_in_force,
         extended_hours: orderForm.extended_hours ?? false,
-        limit_price:
-          orderForm.type === "limit" ? entryLimitPriceValue : undefined,
+        limit_price: orderForm.type === "limit" ? entryLimitPriceValue : undefined,
       };
 
       setOrderForm(payload);
@@ -1553,15 +1307,11 @@ function AlpacaPage() {
       await placeAlpacaOrder(payload);
       saveBracketPlan(mode, activeOrderSymbol, targetPrice, stopPrice);
 
-      const targetText =
-        targetPriceValue > 0
-          ? ` | Target ${formatNumber(targetPriceValue, 4)}`
-          : "";
-      const stopText =
-        stopPriceValue > 0 ? ` | Stop ${formatNumber(stopPriceValue, 4)}` : "";
+      const targetText = targetPriceValue > 0 ? ` | Target ${formatNumber(targetPriceValue, 4)}` : "";
+      const stopText = stopPriceValue > 0 ? ` | Stop ${formatNumber(stopPriceValue, 4)}` : "";
 
       setSubmitMessage(
-        `${side.toUpperCase()} order sent for ${payload.symbol} | ${calculatedQty} shares${targetText}${stopText}`,
+        `${side.toUpperCase()} order sent for ${payload.symbol} | ${calculatedQty} shares${targetText}${stopText}`
       );
 
       await loadBrokerData();
@@ -1585,14 +1335,11 @@ function AlpacaPage() {
 
       const positionQty = parsePositiveNumber(activePosition.qty);
       if (positionQty <= 0) {
-        throw new Error(
-          `Position quantity for ${activeOrderSymbol} is not valid`,
-        );
+        throw new Error(`Position quantity for ${activeOrderSymbol} is not valid`);
       }
 
       const positionSide = String(activePosition.side ?? "long").toLowerCase();
-      const closeSide: "buy" | "sell" =
-        positionSide === "short" ? "buy" : "sell";
+      const closeSide: "buy" | "sell" = positionSide === "short" ? "buy" : "sell";
 
       const payload: PlaceAlpacaOrderRequest = {
         mode,
@@ -1607,48 +1354,41 @@ function AlpacaPage() {
       await placeAlpacaOrder(payload);
 
       setSubmitMessage(
-        `FLATTEN order sent for ${activeOrderSymbol} | ${formatNumber(positionQty, 4)} shares`,
+        `FLATTEN order sent for ${activeOrderSymbol} | ${formatNumber(positionQty, 4)} shares`
       );
 
       await loadBrokerData();
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to flatten position",
-      );
+      setError(err instanceof Error ? err.message : "Failed to flatten position");
     }
   };
 
-  const cancelOpenOrder = useCallback(
-    async (orderId: string, orderSymbol: string) => {
-      setSubmitMessage("");
-      setError("");
+  const cancelOpenOrder = useCallback(async (orderId: string, orderSymbol: string) => {
+    setSubmitMessage("");
+    setError("");
 
-      const id = String(orderId || "").trim();
-      if (!id) return;
+    const id = String(orderId || "").trim();
+    if (!id) return;
 
-      const previousOrders = orders;
-      lockCanceledOrder(id, 20000);
-      setOrders((prev) => applyCancelOrderLocks(prev));
+    const previousOrders = orders;
+    lockCanceledOrder(id, 20000);
+    setOrders((prev) => applyCancelOrderLocks(prev));
 
-      try {
-        await cancelAlpacaOrder(id, mode);
-        setSubmitMessage(`Canceled order for ${orderSymbol}`);
-        await loadBrokerData(true);
-      } catch (err) {
-        delete cancelOrderLocksRef.current[id];
-        setOrders(previousOrders);
-        setError(err instanceof Error ? err.message : "Failed to cancel order");
-        throw err;
-      }
-    },
-    [orders, mode, loadBrokerData, lockCanceledOrder, applyCancelOrderLocks],
-  );
+    try {
+      await cancelAlpacaOrder(id, mode);
+      setSubmitMessage(`Canceled order for ${orderSymbol}`);
+      await loadBrokerData(true);
+    } catch (err) {
+      delete cancelOrderLocksRef.current[id];
+      setOrders(previousOrders);
+      setError(err instanceof Error ? err.message : "Failed to cancel order");
+      throw err;
+    }
+  }, [orders, mode, loadBrokerData, lockCanceledOrder, applyCancelOrderLocks]);
   const cancelChartOrderLine = useCallback(
     async (order: any, line?: any) => {
       const orderId = String(order?.id ?? "");
-      const orderSymbol = normalizeSingleSymbol(
-        String(order?.symbol ?? symbol),
-      );
+      const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? symbol));
 
       // Chart-only planning bracket: this is NOT an Alpaca order yet.
       // Clear the planning fields immediately and do not call the broker.
@@ -1670,7 +1410,7 @@ function AlpacaPage() {
 
       await cancelOpenOrder(orderId, orderSymbol || symbol);
     },
-    [mode, symbol, cancelOpenOrder],
+    [mode, symbol, cancelOpenOrder]
   );
 
   const replaceChartOrderLinePrice = useCallback(
@@ -1680,9 +1420,7 @@ function AlpacaPage() {
 
       const orderId = String(order?.id ?? "");
       const lineKind = String(line?.kind ?? "limit").toLowerCase();
-      const orderSymbol = normalizeSingleSymbol(
-        String(order?.symbol ?? symbol),
-      );
+      const orderSymbol = normalizeSingleSymbol(String(order?.symbol ?? symbol));
 
       try {
         if (!Number.isFinite(nextPrice) || nextPrice <= 0) {
@@ -1701,9 +1439,7 @@ function AlpacaPage() {
           } else {
             setOrderForm((prev) => ({ ...prev, limit_price: brokerPrice }));
           }
-          setSubmitMessage(
-            `Moved ${orderSymbol || symbol} ${String(line?.label ?? "order")} to ${formatMoney(brokerPrice)}`,
-          );
+          setSubmitMessage(`Moved ${orderSymbol || symbol} ${String(line?.label ?? "order")} to ${formatMoney(brokerPrice)}`);
           return;
         }
 
@@ -1714,9 +1450,9 @@ function AlpacaPage() {
             prev.map((existingOrder) =>
               String(existingOrder?.id ?? "") === orderId
                 ? patchOrderPrice(existingOrder, lineKind, brokerPrice)
-                : existingOrder,
-            ),
-          ),
+                : existingOrder
+            )
+          )
         );
 
         // Keep the bracket planning inputs aligned when those chart lines are moved.
@@ -1726,15 +1462,9 @@ function AlpacaPage() {
           setStopPrice(String(brokerPrice));
         }
 
-        const orderType = String(
-          order?.type ?? order?.order_type ?? "limit",
-        ).toLowerCase();
+        const orderType = String(order?.type ?? order?.order_type ?? "limit").toLowerCase();
         const patchPayload: any = {};
-        if (
-          lineKind === "stop_loss" ||
-          lineKind === "stop" ||
-          orderType.includes("stop")
-        ) {
+        if (lineKind === "stop_loss" || lineKind === "stop" || orderType.includes("stop")) {
           patchPayload.stop_price = brokerPrice;
         } else {
           patchPayload.limit_price = brokerPrice;
@@ -1742,24 +1472,13 @@ function AlpacaPage() {
 
         try {
           await updateAlpacaOrder(orderId, patchPayload, mode);
-          setSubmitMessage(
-            `Moved ${orderSymbol || symbol} order to ${formatMoney(brokerPrice)}`,
-          );
+          setSubmitMessage(`Moved ${orderSymbol || symbol} order to ${formatMoney(brokerPrice)}`);
         } catch (patchErr) {
           // Last resort for plain entry/limit orders only: cancel first, then recreate.
           // Do NOT submit-new first; that was the duplicate-order bug.
-          const isSimpleEntryLine = !(
-            lineKind === "take_profit" ||
-            lineKind === "stop_loss" ||
-            lineKind === "stop"
-          );
-          const qty = parsePositiveNumber(
-            order?.qty ?? order?.quantity ?? line?.qty,
-          );
-          const side: "buy" | "sell" =
-            String(order?.side ?? "buy").toLowerCase() === "sell"
-              ? "sell"
-              : "buy";
+          const isSimpleEntryLine = !(lineKind === "take_profit" || lineKind === "stop_loss" || lineKind === "stop");
+          const qty = parsePositiveNumber(order?.qty ?? order?.quantity ?? line?.qty);
+          const side: "buy" | "sell" = String(order?.side ?? "buy").toLowerCase() === "sell" ? "sell" : "buy";
           if (!isSimpleEntryLine || qty <= 0 || !orderSymbol) {
             throw patchErr;
           }
@@ -1771,19 +1490,11 @@ function AlpacaPage() {
             side,
             qty,
             type: "limit",
-            time_in_force: String(
-              order?.time_in_force ?? order?.timeInForce ?? "day",
-            ),
+            time_in_force: String(order?.time_in_force ?? order?.timeInForce ?? "day"),
             limit_price: brokerPrice,
-            extended_hours: Boolean(
-              order?.extended_hours ??
-              order?.extendedHours ??
-              orderForm.extended_hours,
-            ),
+            extended_hours: Boolean(order?.extended_hours ?? order?.extendedHours ?? orderForm.extended_hours),
           });
-          setSubmitMessage(
-            `Moved ${orderSymbol} order to ${formatMoney(brokerPrice)}`,
-          );
+          setSubmitMessage(`Moved ${orderSymbol} order to ${formatMoney(brokerPrice)}`);
         }
 
         // Let Alpaca catch up, but keep the local lock active during stale poll responses.
@@ -1791,9 +1502,7 @@ function AlpacaPage() {
           void loadBrokerData(true);
         }, 900);
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to move order price",
-        );
+        setError(err instanceof Error ? err.message : "Failed to move order price");
         throw err;
       }
     },
@@ -1805,12 +1514,10 @@ function AlpacaPage() {
       lockChartOrderPrice,
       applyOrderPriceLocks,
       patchOrderPrice,
-    ],
+    ]
   );
 
-  const renderChartControls = (
-    activeTimeframe: Exclude<ExpandedChartKey, null>,
-  ) => (
+  const renderChartControls = (activeTimeframe: Exclude<ExpandedChartKey, null>) => (
     <div
       style={{
         display: "flex",
@@ -1851,9 +1558,7 @@ function AlpacaPage() {
       >
         <select
           value={chartOverlayPresets[activeTimeframe] ?? overlayPreset}
-          onChange={(e) =>
-            applyOverlayPreset(activeTimeframe, e.target.value as OverlayPreset)
-          }
+          onChange={(e) => applyOverlayPreset(activeTimeframe, e.target.value as OverlayPreset)}
           style={{
             padding: "5px 8px",
             borderRadius: 6,
@@ -1874,9 +1579,7 @@ function AlpacaPage() {
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              setOpenStudiesMenu((prev) =>
-                prev === activeTimeframe ? null : activeTimeframe,
-              );
+              setOpenStudiesMenu((prev) => (prev === activeTimeframe ? null : activeTimeframe));
             }}
             style={{
               ...topControlButtonStyle,
@@ -1886,15 +1589,10 @@ function AlpacaPage() {
                 openStudiesMenu === activeTimeframe
                   ? "1px solid rgba(0,229,255,0.75)"
                   : "1px solid rgba(255,255,255,0.12)",
-              background:
-                openStudiesMenu === activeTimeframe ? "#0d2a55" : "#0a1f44",
+              background: openStudiesMenu === activeTimeframe ? "#0d2a55" : "#0a1f44",
             }}
           >
-            Studies{" "}
-            {countVisibleStudies(
-              chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON,
-            )}
-            /{STUDY_OPTIONS.length} ▾
+            Studies {countVisibleStudies(chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)}/{STUDY_OPTIONS.length} ▾
           </button>
 
           {openStudiesMenu === activeTimeframe ? (
@@ -1917,23 +1615,9 @@ function AlpacaPage() {
                 pointerEvents: "auto",
               }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginBottom: 10,
-                }}
-              >
-                <div style={{ fontSize: 13, fontWeight: 900 }}>
-                  Chart Studies
-                </div>
-                <div style={{ fontSize: 11, opacity: 0.75 }}>
-                  {countVisibleStudies(
-                    chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON,
-                  )}{" "}
-                  / {STUDY_OPTIONS.length} on
-                </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 900 }}>Chart Studies</div>
+                <div style={{ fontSize: 11, opacity: 0.75 }}>{countVisibleStudies(chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)} / {STUDY_OPTIONS.length} on</div>
               </div>
 
               <div style={{ display: "grid", gap: 8, paddingBottom: 8 }}>
@@ -1947,10 +1631,7 @@ function AlpacaPage() {
                       gap: 10,
                       padding: "7px 8px",
                       borderRadius: 8,
-                      background: (chartStudyVisibility[activeTimeframe] ??
-                        ALL_STUDIES_ON)[study.key]
-                        ? "rgba(14,165,233,0.14)"
-                        : "rgba(15,23,42,0.82)",
+                      background: (chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)[study.key] ? "rgba(14,165,233,0.14)" : "rgba(15,23,42,0.82)",
                       border: "1px solid rgba(255,255,255,0.08)",
                       cursor: "pointer",
                       fontSize: 13,
@@ -1960,43 +1641,27 @@ function AlpacaPage() {
                     <span>{study.label}</span>
                     <input
                       type="checkbox"
-                      checked={Boolean(
-                        (chartStudyVisibility[activeTimeframe] ??
-                          ALL_STUDIES_ON)[study.key],
-                      )}
-                      onChange={() =>
-                        toggleOverlayVisibility(activeTimeframe, study.key)
-                      }
+                      checked={Boolean((chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)[study.key])}
+                      onChange={() => toggleOverlayVisibility(activeTimeframe, study.key)}
                     />
                   </label>
                 ))}
               </div>
 
-              <div
-                style={{
-                  position: "sticky",
-                  bottom: -12,
-                  display: "flex",
-                  gap: 8,
-                  marginTop: 12,
-                  paddingTop: 10,
-                  paddingBottom: 2,
-                  background:
-                    "linear-gradient(180deg, rgba(6,25,54,0.70), #061936 35%)",
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={() => showAllStudies(activeTimeframe)}
-                  style={{ ...topControlButtonStyle, flex: 1 }}
-                >
+              <div style={{
+                position: "sticky",
+                bottom: -12,
+                display: "flex",
+                gap: 8,
+                marginTop: 12,
+                paddingTop: 10,
+                paddingBottom: 2,
+                background: "linear-gradient(180deg, rgba(6,25,54,0.70), #061936 35%)",
+              }}>
+                <button type="button" onClick={() => showAllStudies(activeTimeframe)} style={{ ...topControlButtonStyle, flex: 1 }}>
                   Show All
                 </button>
-                <button
-                  type="button"
-                  onClick={() => clearAllStudies(activeTimeframe)}
-                  style={{ ...topControlButtonStyle, flex: 1 }}
-                >
+                <button type="button" onClick={() => clearAllStudies(activeTimeframe)} style={{ ...topControlButtonStyle, flex: 1 }}>
                   Clear All
                 </button>
               </div>
@@ -2024,37 +1689,26 @@ function AlpacaPage() {
             border: trendlineUiState.drawMode
               ? "1px solid rgba(34,197,94,0.6)"
               : "1px solid rgba(0,229,255,0.35)",
-            background: trendlineUiState.drawMode
-              ? "rgba(34,197,94,0.18)"
-              : "#0a1f44",
+            background: trendlineUiState.drawMode ? "rgba(34,197,94,0.18)" : "#0a1f44",
           }}
         >
           {trendlineUiState.drawMode ? "Drawing..." : "Trendline"}
         </button>
 
-        {trendlineUiState.drawMode || trendlineUiState.pendingPoint ? (
-          <button
-            onClick={() => pulseTrendlineAction({ type: "cancel_draw" })}
-            style={topControlButtonStyle}
-          >
+        {(trendlineUiState.drawMode || trendlineUiState.pendingPoint) ? (
+          <button onClick={() => pulseTrendlineAction({ type: "cancel_draw" })} style={topControlButtonStyle}>
             Cancel
           </button>
         ) : null}
 
         {trendlineUiState.count > 0 ? (
-          <button
-            onClick={() => pulseTrendlineAction({ type: "delete_last" })}
-            style={topControlButtonStyle}
-          >
+          <button onClick={() => pulseTrendlineAction({ type: "delete_last" })} style={topControlButtonStyle}>
             Delete Last
           </button>
         ) : null}
 
         {trendlineUiState.count > 0 ? (
-          <button
-            onClick={() => pulseTrendlineAction({ type: "clear_all" })}
-            style={topControlButtonStyle}
-          >
+          <button onClick={() => pulseTrendlineAction({ type: "clear_all" })} style={topControlButtonStyle}>
             Clear All
           </button>
         ) : null}
@@ -2079,24 +1733,20 @@ function AlpacaPage() {
       >
         <input
           value={symbolInput}
-          onChange={(e) =>
-            setSymbolInput(normalizeSingleSymbol(e.target.value))
-          }
+          onChange={(e) => setSymbolInput(normalizeSingleSymbol(e.target.value))}
           onKeyDown={(e) => {
             if (e.key === "Enter") handleAddSymbolToWatchlist(symbolInput);
           }}
           placeholder="Symbol"
           style={{ ...inputStyle, width: 96, padding: "5px 8px", height: 32 }}
         />
-        <button
-          onClick={() => handleAddSymbolToWatchlist(symbolInput)}
-          style={{ ...primaryButtonStyle, padding: "5px 10px", height: 32 }}
-        >
+        <button onClick={() => handleAddSymbolToWatchlist(symbolInput)} style={{ ...primaryButtonStyle, padding: "5px 10px", height: 32 }}>
           Add WL
         </button>
       </div>
     </div>
   );
+
 
   const renderAlpacaChartCard = ({
     chartId,
@@ -2141,22 +1791,14 @@ function AlpacaPage() {
             key={`${chartId}-${symbol}-${timeframe}-${expandedChart === timeframe ? "expanded" : "normal"}-${chartResetNonce}`}
             symbol={symbol}
             timeframe={timeframe}
-            initialVisibleLogicalRange={
-              chartRanges[chartRangeKey(symbol, timeframe)] ?? null
-            }
-            onVisibleLogicalRangeChange={(range) =>
-              handleVisibleRangeChange(timeframe, range)
-            }
+            initialVisibleLogicalRange={chartRanges[chartRangeKey(symbol, timeframe)] ?? null}
+            onVisibleLogicalRangeChange={(range) => handleVisibleRangeChange(timeframe, range)}
             lookback={lookback}
             loadDelayMs={loadDelayMs}
-            enableLiveStream={
-              isExpanded || (expandedChart === null && chartId === "main-15m")
-            }
+            enableLiveStream={isExpanded || (expandedChart === null && chartId === "main-15m")}
             legendDensity={isExpanded ? "full" : legendDensity}
             compactTools={!isExpanded && chartId.startsWith("bottom-")}
-            visibility={
-              deferredChartStudyVisibility[timeframe] ?? ALL_STUDIES_ON
-            }
+            visibility={deferredChartStudyVisibility[timeframe] ?? ALL_STUDIES_ON}
             onStatsUpdate={statsSetter}
             trendlineAction={trendlineAction}
             onRequestAddSymbolToWatchlist={handleAddSymbolToWatchlist}
@@ -2202,28 +1844,17 @@ function AlpacaPage() {
         }}
       >
         <div>
-          <div style={{ fontSize: 34, fontWeight: 700 }}>
-            Alpaca Trading Module
-          </div>
+          <div style={{ fontSize: 34, fontWeight: 700 }}>Alpaca Trading Module</div>
           <div style={{ fontSize: 13, opacity: 0.78 }}>
             1m, 5m, 15m charts with watchlist, account, orders, and positions
           </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               value={symbolInput}
-              onChange={(e) =>
-                setSymbolInput(normalizeSingleSymbol(e.target.value))
-              }
+              onChange={(e) => setSymbolInput(normalizeSingleSymbol(e.target.value))}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   loadTypedSymbol();
@@ -2240,54 +1871,34 @@ function AlpacaPage() {
             </button>
           </div>
 
-          <button
-            onClick={() => navigate("/alpaca")}
-            style={secondaryButtonStyle}
-          >
+          <button onClick={() => navigate("/alpaca")} style={secondaryButtonStyle}>
             Alpaca
           </button>
 
-          <button
-            onClick={() => navigate("/scanner")}
-            style={secondaryButtonStyle}
-          >
+          <button onClick={() => navigate("/scanner")} style={secondaryButtonStyle}>
             Scanner
           </button>
 
           <button
-            onClick={() =>
-              navigate(`/chart?symbol=${encodeURIComponent(symbol)}&tf=1m`)
-            }
+            onClick={() => navigate(`/chart?symbol=${encodeURIComponent(symbol)}&tf=1m`)}
             style={secondaryButtonStyle}
           >
             Expand Chart
           </button>
 
-          <button
-            onClick={() => navigate("/terminal")}
-            style={secondaryButtonStyle}
-          >
+          <button onClick={() => navigate("/terminal")} style={secondaryButtonStyle}>
             Terminal
           </button>
 
-          <button
-            onClick={() => setMode("paper")}
-            style={getModeButtonStyle("paper")}
-          >
+          <button onClick={() => setMode("paper")} style={getModeButtonStyle("paper")}>
             Paper
           </button>
 
-          <button
-            onClick={() => setMode("live")}
-            style={getModeButtonStyle("live")}
-          >
+          <button onClick={() => setMode("live")} style={getModeButtonStyle("live")}>
             Live
           </button>
 
-          <button
-            onClick={() => void loadBrokerData()}
-            style={secondaryButtonStyle}
-          >
+          <button onClick={() => void loadBrokerData()} style={secondaryButtonStyle}>
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
@@ -2308,39 +1919,31 @@ function AlpacaPage() {
         }}
       >
         <aside style={panelStyle}>
-          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>
-            Auto Scanner Watchlist
-          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>Auto Scanner Watchlist</div>
           <div style={{ height: 430, minHeight: 0, marginBottom: 18 }}>
             <ScannerPanel
               selectedSymbol={symbol}
               onSelectSymbol={handleScannerSelectSymbol}
-              onWatchlistChange={handleScannerWatchlistChange}
+              onWatchlistChange={(symbols) => {
+                const cleaned = uniqueSymbols(symbols).slice(0, MAX_ALPACA_SCANNER_SYMBOLS);
+                lastScannerSymbolsRef.current = cleaned;
+                setWatchlist(cleaned);
+                setWatchlistInput(cleaned.join(", "));
+                saveScannerWatchlistLocal(cleaned);
+              }}
             />
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
               <div style={{ fontSize: 13, opacity: 0.8 }}>Manual Watchlist</div>
-              <div style={{ fontSize: 11, opacity: 0.55 }}>
-                Not scanner controlled
-              </div>
+              <div style={{ fontSize: 11, opacity: 0.55 }}>Not scanner controlled</div>
             </div>
 
             <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
               <input
                 value={manualWatchlistInput}
-                onChange={(e) =>
-                  setManualWatchlistInput(normalizeSingleSymbol(e.target.value))
-                }
+                onChange={(e) => setManualWatchlistInput(normalizeSingleSymbol(e.target.value))}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") submitManualWatchlistAdd();
                 }}
@@ -2389,22 +1992,13 @@ function AlpacaPage() {
                     fontSize: 12,
                   }}
                 >
-                  Add symbols here to keep them separate from your main
-                  watchlist.
+                  Add symbols here to keep them separate from your main watchlist.
                 </div>
               ) : (
                 manualWatchlist.map((item) => {
                   const active = item === symbol;
                   return (
-                    <div
-                      key={item}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr auto",
-                        gap: 8,
-                        alignItems: "center",
-                      }}
-                    >
+                    <div key={item} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
                       <button
                         type="button"
                         onClick={() => handleManualSelectSymbol(item)}
@@ -2412,9 +2006,7 @@ function AlpacaPage() {
                           textAlign: "left",
                           padding: "10px 12px",
                           borderRadius: 8,
-                          border: active
-                            ? "1px solid #4ea1ff"
-                            : "1px solid rgba(255,255,255,0.08)",
+                          border: active ? "1px solid #4ea1ff" : "1px solid rgba(255,255,255,0.08)",
                           background: active ? "#12396b" : "#071731",
                           color: "white",
                           cursor: "pointer",
@@ -2448,16 +2040,7 @@ function AlpacaPage() {
           </div>
         </aside>
 
-        <main
-          style={{
-            display: "grid",
-            gap: 16,
-            minWidth: 0,
-            width: "100%",
-            maxWidth: "100%",
-            overflow: "visible",
-          }}
-        >
+        <main style={{ display: "grid", gap: 16, minWidth: 0, width: "100%", maxWidth: "100%", overflow: "visible" }}>
           <div
             style={{
               ...panelStyle,
@@ -2470,19 +2053,11 @@ function AlpacaPage() {
             <InfoCard label="Symbol" value={symbol} />
             <InfoCard
               label="1m Last"
-              value={
-                stats1m.last != null
-                  ? formatNumber(stats1m.last, stats1m.last >= 10 ? 2 : 4)
-                  : "N/A"
-              }
+              value={stats1m.last != null ? formatNumber(stats1m.last, stats1m.last >= 10 ? 2 : 4) : "N/A"}
             />
             <InfoCard
               label="15m VWAP"
-              value={
-                stats15m.vwap != null
-                  ? formatNumber(stats15m.vwap, stats15m.vwap >= 10 ? 2 : 4)
-                  : "N/A"
-              }
+              value={stats15m.vwap != null ? formatNumber(stats15m.vwap, stats15m.vwap >= 10 ? 2 : 4) : "N/A"}
             />
           </div>
 
@@ -2495,20 +2070,18 @@ function AlpacaPage() {
               alignItems: "start",
             }}
           >
-            {(expandedChart === null || expandedChart === "15m") &&
-              renderAlpacaChartCard({
-                chartId: "main-15m",
-                timeframe: "15m",
-                title: `${symbol} · Main 15 Minute`,
-                subtitle: `Large top chart · Bars: ${stats15m.barsCount} · Last ${stats15m.last != null ? formatNumber(stats15m.last) : "N/A"}`,
-                lookback: "5d",
-                loadDelayMs: 0,
-                statsSetter: setStats15m,
-                cardHeight:
-                  expandedChart === "15m" ? "calc(100vh - 220px)" : "560px",
-                chartBodyHeight: expandedChart === "15m" ? "100%" : "455px",
-                legendDensity: expandedChart === "15m" ? "full" : "compact",
-              })}
+            {(expandedChart === null || expandedChart === "15m") && renderAlpacaChartCard({
+              chartId: "main-15m",
+              timeframe: "15m",
+              title: `${symbol} · Main 15 Minute`,
+              subtitle: `Large top chart · Bars: ${stats15m.barsCount} · Last ${stats15m.last != null ? formatNumber(stats15m.last) : "N/A"}`,
+              lookback: "5d",
+              loadDelayMs: 0,
+              statsSetter: setStats15m,
+              cardHeight: expandedChart === "15m" ? "calc(100vh - 220px)" : "560px",
+              chartBodyHeight: expandedChart === "15m" ? "100%" : "455px",
+              legendDensity: expandedChart === "15m" ? "full" : "compact",
+            })}
 
             {expandedChart === null ? (
               <div
@@ -2549,84 +2122,52 @@ function AlpacaPage() {
               </div>
             ) : null}
 
-            {expandedChart === "1m" &&
-              renderAlpacaChartCard({
-                chartId: "expanded-1m",
-                timeframe: "1m",
-                title: `${symbol} · Expanded 1 Minute`,
-                subtitle: `Expanded bottom chart · Bars: ${stats1m.barsCount} · PMH ${stats1m.pmh != null ? formatNumber(stats1m.pmh) : "N/A"}`,
-                lookback: "1d",
-                loadDelayMs: 0,
-                statsSetter: setStats1m,
-                cardHeight: "calc(100vh - 220px)",
-                chartBodyHeight: "100%",
-                legendDensity: "full",
-              })}
+            {expandedChart === "1m" && renderAlpacaChartCard({
+              chartId: "expanded-1m",
+              timeframe: "1m",
+              title: `${symbol} · Expanded 1 Minute`,
+              subtitle: `Expanded bottom chart · Bars: ${stats1m.barsCount} · PMH ${stats1m.pmh != null ? formatNumber(stats1m.pmh) : "N/A"}`,
+              lookback: "1d",
+              loadDelayMs: 0,
+              statsSetter: setStats1m,
+              cardHeight: "calc(100vh - 220px)",
+              chartBodyHeight: "100%",
+              legendDensity: "full",
+            })}
 
-            {expandedChart === "5m" &&
-              renderAlpacaChartCard({
-                chartId: "expanded-5m",
-                timeframe: "5m",
-                title: `${symbol} · Expanded 5 Minute`,
-                subtitle: `Expanded bottom chart · Bars: ${stats5m.barsCount} · VWAP ${stats5m.vwap != null ? formatNumber(stats5m.vwap) : "N/A"}`,
-                lookback: "2d",
-                loadDelayMs: 0,
-                statsSetter: setStats5m,
-                cardHeight: "calc(100vh - 220px)",
-                chartBodyHeight: "100%",
-                legendDensity: "full",
-              })}
+            {expandedChart === "5m" && renderAlpacaChartCard({
+              chartId: "expanded-5m",
+              timeframe: "5m",
+              title: `${symbol} · Expanded 5 Minute`,
+              subtitle: `Expanded bottom chart · Bars: ${stats5m.barsCount} · VWAP ${stats5m.vwap != null ? formatNumber(stats5m.vwap) : "N/A"}`,
+              lookback: "2d",
+              loadDelayMs: 0,
+              statsSetter: setStats5m,
+              cardHeight: "calc(100vh - 220px)",
+              chartBodyHeight: "100%",
+              legendDensity: "full",
+            })}
           </div>
         </main>
 
-        <aside
-          style={{
-            ...panelStyle,
-            display: "grid",
-            gridTemplateRows: "auto auto auto 1fr 1fr",
-            gap: 12,
-          }}
-        >
+        <aside style={{ ...panelStyle, display: "grid", gridTemplateRows: "auto auto auto 1fr 1fr", gap: 12 }}>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
-              Broker
-            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Broker</div>
             <div style={{ fontSize: 13, opacity: 0.75, marginBottom: 8 }}>
               Current mode: <strong>{mode.toUpperCase()}</strong>
             </div>
-            {loading ? (
-              <div style={{ fontSize: 13, opacity: 0.8 }}>
-                Loading account...
-              </div>
-            ) : null}
+            {loading ? <div style={{ fontSize: 13, opacity: 0.8 }}>Loading account...</div> : null}
             {error ? <div style={errorBoxStyle}>{error}</div> : null}
-            {submitMessage ? (
-              <div style={successBoxStyle}>{submitMessage}</div>
-            ) : null}
+            {submitMessage ? <div style={successBoxStyle}>{submitMessage}</div> : null}
           </div>
 
           <section style={subPanelStyle}>
             <div style={sectionTitleStyle}>Account</div>
-            <div style={kvRowStyle}>
-              <span>Status</span>
-              <strong>{account?.status ?? "N/A"}</strong>
-            </div>
-            <div style={kvRowStyle}>
-              <span>Equity</span>
-              <strong>{formatMoney(account?.equity)}</strong>
-            </div>
-            <div style={kvRowStyle}>
-              <span>Buying Power</span>
-              <strong>{formatMoney(account?.buying_power)}</strong>
-            </div>
-            <div style={kvRowStyle}>
-              <span>Cash</span>
-              <strong>{formatMoney(account?.cash)}</strong>
-            </div>
-            <div style={kvRowStyle}>
-              <span>PDT Count</span>
-              <strong>{account?.daytrade_count ?? "N/A"}</strong>
-            </div>
+            <div style={kvRowStyle}><span>Status</span><strong>{account?.status ?? "N/A"}</strong></div>
+            <div style={kvRowStyle}><span>Equity</span><strong>{formatMoney(account?.equity)}</strong></div>
+            <div style={kvRowStyle}><span>Buying Power</span><strong>{formatMoney(account?.buying_power)}</strong></div>
+            <div style={kvRowStyle}><span>Cash</span><strong>{formatMoney(account?.cash)}</strong></div>
+            <div style={kvRowStyle}><span>PDT Count</span><strong>{account?.daytrade_count ?? "N/A"}</strong></div>
           </section>
 
           <section style={subPanelStyle}>
@@ -2644,13 +2185,7 @@ function AlpacaPage() {
               style={inputStyle}
             />
 
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 8,
-              }}
-            >
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <div>
                 <label style={labelStyle}>Cash Amount</label>
                 <input
@@ -2681,13 +2216,7 @@ function AlpacaPage() {
               </div>
             </div>
 
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 8,
-              }}
-            >
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <div>
                 <label style={labelStyle}>
                   {orderForm.type === "limit" ? "Entry Limit" : "Market Ref"}
@@ -2696,18 +2225,12 @@ function AlpacaPage() {
                   type="number"
                   min="0"
                   step="0.0001"
-                  value={
-                    orderForm.type === "limit"
-                      ? (orderForm.limit_price ?? "")
-                      : (marketReferencePrice ?? "")
-                  }
+                  value={orderForm.type === "limit" ? orderForm.limit_price ?? "" : marketReferencePrice ?? ""}
                   onChange={(e) => {
                     if (orderForm.type !== "limit") return;
                     setOrderForm((prev: PlaceAlpacaOrderRequest) => ({
                       ...prev,
-                      limit_price: e.target.value
-                        ? Number(e.target.value)
-                        : undefined,
+                      limit_price: e.target.value ? Number(e.target.value) : undefined,
                     }));
                   }}
                   style={{
@@ -2740,13 +2263,7 @@ function AlpacaPage() {
               </div>
             </div>
 
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 8,
-              }}
-            >
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <div>
                 <label style={labelStyle}>Target Price</label>
                 <input
@@ -2772,14 +2289,7 @@ function AlpacaPage() {
               </div>
             </div>
 
-            <label
-              style={{
-                ...labelStyle,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-              }}
-            >
+            <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8 }}>
               <input
                 type="checkbox"
                 checked={orderForm.extended_hours ?? false}
@@ -2794,62 +2304,19 @@ function AlpacaPage() {
             </label>
 
             <div style={{ ...subPanelStyle, marginTop: 10, padding: 10 }}>
-              <div style={kvRowStyle}>
-                <span>Calc Qty</span>
-                <strong>
-                  {calculatedQty > 0 ? formatNumber(calculatedQty, 0) : "N/A"}
-                </strong>
-              </div>
-              <div style={kvRowStyle}>
-                <span>Entry Price</span>
-                <strong>
-                  {entryPriceForCalc > 0
-                    ? formatMoney(entryPriceForCalc)
-                    : "N/A"}
-                </strong>
-              </div>
-              <div style={kvRowStyle}>
-                <span>Estimated Cost</span>
-                <strong>
-                  {estimatedCost > 0 ? formatMoney(estimatedCost) : "N/A"}
-                </strong>
-              </div>
-              <div style={kvRowStyle}>
-                <span>Target PnL</span>
-                <strong
-                  style={{ color: targetPnL >= 0 ? "#86efac" : "#fca5a5" }}
-                >
-                  {targetPriceValue > 0 ? formatMoney(targetPnL) : "N/A"}
-                </strong>
-              </div>
-              <div style={kvRowStyle}>
-                <span>Stop Risk</span>
-                <strong style={{ color: stopRisk > 0 ? "#fca5a5" : "#dbeafe" }}>
-                  {stopPriceValue > 0 ? formatMoney(stopRisk) : "N/A"}
-                </strong>
-              </div>
-              <div style={kvRowStyle}>
-                <span>Risk / Reward</span>
-                <strong>
-                  {riskRewardRatio != null
-                    ? `1 : ${formatNumber(riskRewardRatio, 2)}`
-                    : "N/A"}
-                </strong>
-              </div>
+              <div style={kvRowStyle}><span>Calc Qty</span><strong>{calculatedQty > 0 ? formatNumber(calculatedQty, 0) : "N/A"}</strong></div>
+              <div style={kvRowStyle}><span>Entry Price</span><strong>{entryPriceForCalc > 0 ? formatMoney(entryPriceForCalc) : "N/A"}</strong></div>
+              <div style={kvRowStyle}><span>Estimated Cost</span><strong>{estimatedCost > 0 ? formatMoney(estimatedCost) : "N/A"}</strong></div>
+              <div style={kvRowStyle}><span>Target PnL</span><strong style={{ color: targetPnL >= 0 ? "#86efac" : "#fca5a5" }}>{targetPriceValue > 0 ? formatMoney(targetPnL) : "N/A"}</strong></div>
+              <div style={kvRowStyle}><span>Stop Risk</span><strong style={{ color: stopRisk > 0 ? "#fca5a5" : "#dbeafe" }}>{stopPriceValue > 0 ? formatMoney(stopRisk) : "N/A"}</strong></div>
+              <div style={kvRowStyle}><span>Risk / Reward</span><strong>{riskRewardRatio != null ? `1 : ${formatNumber(riskRewardRatio, 2)}` : "N/A"}</strong></div>
             </div>
 
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 10 }}>
               Target and stop are planning values only for now.
             </div>
 
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 8,
-                marginTop: 10,
-              }}
-            >
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
               <button
                 onClick={async () => {
                   await submitEntryOrder("buy");
@@ -2886,47 +2353,23 @@ function AlpacaPage() {
             </button>
           </section>
 
-          <section
-            style={{ ...subPanelStyle, overflow: "auto", minHeight: 180 }}
-          >
+          <section style={{ ...subPanelStyle, overflow: "auto", minHeight: 180 }}>
             <div style={sectionTitleStyle}>Positions</div>
             {positions.length === 0 ? (
-              <div style={{ fontSize: 13, opacity: 0.75 }}>
-                No open positions
-              </div>
+              <div style={{ fontSize: 13, opacity: 0.75 }}>No open positions</div>
             ) : (
               <div style={{ display: "grid", gap: 8 }}>
                 {positions.map((position) => (
-                  <div
-                    key={position.asset_id ?? position.symbol}
-                    style={listCardStyle}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        gap: 8,
-                      }}
-                    >
+                  <div key={position.asset_id ?? position.symbol} style={listCardStyle}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                       <strong>{position.symbol}</strong>
                       <span>{position.side ?? "long"}</span>
                     </div>
+                    <div style={{ fontSize: 13, opacity: 0.8 }}>Qty: {formatNumber(position.qty, 4)}</div>
+                    <div style={{ fontSize: 13, opacity: 0.8 }}>Market Value: {formatMoney(position.market_value)}</div>
+                    <div style={{ fontSize: 13, opacity: 0.8 }}>Unrealized: {formatMoney(position.unrealized_pl)}</div>
                     <div style={{ fontSize: 13, opacity: 0.8 }}>
-                      Qty: {formatNumber(position.qty, 4)}
-                    </div>
-                    <div style={{ fontSize: 13, opacity: 0.8 }}>
-                      Market Value: {formatMoney(position.market_value)}
-                    </div>
-                    <div style={{ fontSize: 13, opacity: 0.8 }}>
-                      Unrealized: {formatMoney(position.unrealized_pl)}
-                    </div>
-                    <div style={{ fontSize: 13, opacity: 0.8 }}>
-                      Unrealized %:{" "}
-                      {formatSignedPercent(
-                        position.unrealized_plpc != null
-                          ? Number(position.unrealized_plpc) * 100
-                          : null,
-                      )}
+                      Unrealized %: {formatSignedPercent(position.unrealized_plpc != null ? Number(position.unrealized_plpc) * 100 : null)}
                     </div>
                   </div>
                 ))}
@@ -2934,9 +2377,7 @@ function AlpacaPage() {
             )}
           </section>
 
-          <section
-            style={{ ...subPanelStyle, overflow: "auto", minHeight: 180 }}
-          >
+          <section style={{ ...subPanelStyle, overflow: "auto", minHeight: 180 }}>
             <div style={sectionTitleStyle}>Open Orders</div>
             {orders.length === 0 ? (
               <div style={{ fontSize: 13, opacity: 0.75 }}>No open orders</div>
@@ -2944,13 +2385,7 @@ function AlpacaPage() {
               <div style={{ display: "grid", gap: 8 }}>
                 {orders.map((order) => (
                   <div key={order.id} style={listCardStyle}>
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        gap: 8,
-                      }}
-                    >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                       <strong>{order.symbol}</strong>
                       <span>{order.side}</span>
                     </div>
@@ -2961,10 +2396,7 @@ function AlpacaPage() {
                       Qty: {formatNumber(order.qty, 4)}
                     </div>
                     <div style={{ fontSize: 13, opacity: 0.8 }}>
-                      Limit:{" "}
-                      {order.limit_price
-                        ? formatMoney(order.limit_price)
-                        : "N/A"}
+                      Limit: {order.limit_price ? formatMoney(order.limit_price) : "N/A"}
                     </div>
 
                     <button
@@ -3036,12 +2468,8 @@ function ChartCard({
   cardHeight?: string;
   chartBodyHeight?: string;
 }) {
-  const cardHeight =
-    cardHeightOverride ??
-    (expanded ? "calc(100vh - 220px)" : compact ? "390px" : "420px");
-  const chartBodyHeight =
-    chartBodyHeightOverride ??
-    (expanded ? "100%" : compact ? "290px" : "320px");
+  const cardHeight = cardHeightOverride ?? (expanded ? "calc(100vh - 220px)" : compact ? "390px" : "420px");
+  const chartBodyHeight = chartBodyHeightOverride ?? (expanded ? "100%" : compact ? "290px" : "320px");
   const minimized = compact && !expanded;
   const controlScale = minimized ? 0.64 : 1;
 
@@ -3178,15 +2606,7 @@ function ChartCard({
           overflow: "hidden",
         }}
       >
-        <div
-          style={{
-            width: "100%",
-            minWidth: 0,
-            maxWidth: "100%",
-            height: "100%",
-            overflow: "hidden",
-          }}
-        >
+        <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", height: "100%", overflow: "hidden" }}>
           {children}
         </div>
       </div>

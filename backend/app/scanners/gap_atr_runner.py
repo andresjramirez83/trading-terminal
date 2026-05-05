@@ -126,6 +126,7 @@ async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "Order
     await asyncio.gather(
         add_rows(polygon.get_snapshot_gainers(limit=limit)),
         add_rows(polygon.get_snapshot_actives(limit=limit)),
+        add_rows(polygon.get_snapshot_losers(limit=limit)),
     )
     return merged
 
@@ -133,7 +134,7 @@ async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "Order
 class GapAtrRunnerScanner(ScannerBase):
     id = "gap_atr_runner"
     name = "15m Gap ATR Runner"
-    description = "Scans the last 3 trading days for clean gap-up 15m ATR expansion candles."
+    description = "Scans the last 5 trading days for clean gap-up 15m ATR expansion candles."
 
     async def run(
         self,
@@ -151,7 +152,7 @@ class GapAtrRunnerScanner(ScannerBase):
         max_upper_wick_pct = float(kwargs.get("max_upper_wick_pct", 0.28))
         min_close_position_pct = float(kwargs.get("min_close_position_pct", 0.68))
         min_volume_mult = float(kwargs.get("min_volume_mult", 1.25))
-        lookback_days = int(kwargs.get("lookback_days", 3))
+        lookback_days = int(kwargs.get("lookback_days", 5))
 
         universe = await build_snapshot_universe(polygon, limit=max(80, max_symbols * 6))
         rows: List[Dict[str, Any]] = []
@@ -331,6 +332,9 @@ class GapAtrRunnerScanner(ScannerBase):
                     "timeframe": "15m",
                     "runner_type": "gap_atr",
                     "source": "gap_atr_runner",
+                    "scanner_id": self.id,
+                    "scanner_name": self.name,
+                    "type": "gap_atr",
                     "scan_date": day_key,
                     "trigger_time": int(bar["time"]),
                     "trigger_time_et": f"{day_key} {et_time(int(bar['time']))} ET",
