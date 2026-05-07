@@ -129,6 +129,7 @@ ALPACA_APP_STATE_FILE = APP_STATE_DIR / "alpaca_state.json"
 BACKGROUND_LOCK_FILE = APP_STATE_DIR / "background_worker.lock"
 BACKGROUND_LOCK_HANDLE: Optional[Any] = None
 BACKGROUND_LOCK_HELD = False
+BACKGROUND_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
 def acquire_background_worker_lock() -> bool:
@@ -1591,12 +1592,42 @@ async def run_backend_alerts_loop() -> None:
 
 
 def start_backend_alert_task_if_needed() -> None:
+    """Start the backend alert loop only from an active asyncio event loop.
+
+    Gunicorn/FastAPI can execute normal def routes inside a worker thread. Those
+    threads do not have a running event loop, so calling asyncio.create_task()
+    from a bell-toggle route can raise: RuntimeError: no running event loop.
+
+    We capture the startup event loop in BACKGROUND_EVENT_LOOP and schedule the
+    task thread-safely when this function is called from a sync route.
+    """
     global backend_alert_task
 
     if backend_alert_task and not backend_alert_task.done():
         return
 
-    backend_alert_task = asyncio.create_task(run_backend_alerts_loop())
+    try:
+        loop = asyncio.get_running_loop()
+        backend_alert_task = loop.create_task(run_backend_alerts_loop())
+        return
+    except RuntimeError:
+        pass
+
+    loop = BACKGROUND_EVENT_LOOP
+    if loop is not None and loop.is_running():
+        def _start_on_loop() -> None:
+            global backend_alert_task
+            if backend_alert_task and not backend_alert_task.done():
+                return
+            backend_alert_task = loop.create_task(run_backend_alerts_loop())
+
+        loop.call_soon_threadsafe(_start_on_loop)
+        return
+
+    # No running loop is available in this process/thread. This can happen if a
+    # non-background Gunicorn worker receives the API request. The locked
+    # background worker will start/continue the loop from startup.
+    print("[backend-alert-loop] start skipped: no running event loop in this worker", flush=True)
 
 
 async def stop_backend_alert_task() -> None:
@@ -1715,12 +1746,31 @@ async def run_background_scanner_loop() -> None:
 
 
 def start_scanner_task_if_needed() -> None:
+    """Start the scanner loop only from an active asyncio event loop."""
     global scanner_task
 
     if scanner_task and not scanner_task.done():
         return
 
-    scanner_task = asyncio.create_task(run_background_scanner_loop())
+    try:
+        loop = asyncio.get_running_loop()
+        scanner_task = loop.create_task(run_background_scanner_loop())
+        return
+    except RuntimeError:
+        pass
+
+    loop = BACKGROUND_EVENT_LOOP
+    if loop is not None and loop.is_running():
+        def _start_on_loop() -> None:
+            global scanner_task
+            if scanner_task and not scanner_task.done():
+                return
+            scanner_task = loop.create_task(run_background_scanner_loop())
+
+        loop.call_soon_threadsafe(_start_on_loop)
+        return
+
+    print("[scanner-loop] start skipped: no running event loop in this worker", flush=True)
 
 
 async def stop_scanner_task() -> None:
@@ -1767,6 +1817,9 @@ def scanner_cache_status() -> Dict[str, Any]:
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    global BACKGROUND_EVENT_LOOP
+
+    BACKGROUND_EVENT_LOOP = asyncio.get_running_loop()
     get_polygon_http_client()
 
     if acquire_background_worker_lock():
