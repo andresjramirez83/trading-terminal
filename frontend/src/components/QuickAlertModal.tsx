@@ -73,6 +73,13 @@ function normalizeSymbols(input: string): string[] {
   );
 }
 
+function syncSelectedAlertSymbolsLocal(symbols: string[]) {
+  if (typeof window === "undefined") return;
+  const clean = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
+  window.localStorage.setItem("backendAlertSelectedSymbols", JSON.stringify(clean));
+  window.dispatchEvent(new CustomEvent<string[]>("backend-alert-symbols-change", { detail: clean }));
+}
+
 function normalizeTimeframes(value: unknown, fallback = ["1m"]): string[] {
   const raw = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
   const out = raw.map(String).map((x) => x.toLowerCase().trim()).filter((x) => TF_OPTIONS.includes(x));
@@ -259,7 +266,10 @@ export default function QuickAlertModal({ open, initialSymbol = "", onClose }: P
   const handleSave = async () => {
     setWorking(true); setMessage(""); setError("");
     try {
-      await updateBackendAlertsConfig(buildPayload());
+      const payload = buildPayload();
+      await saveSelectedAlertSymbols(payload.symbols);
+      await updateBackendAlertsConfig(payload);
+      syncSelectedAlertSymbolsLocal(payload.symbols);
       setMessage("Alert config saved.");
       await loadStatus();
     } catch (err) { setError(err instanceof Error ? err.message : "Failed to save alert config."); }
@@ -273,7 +283,9 @@ export default function QuickAlertModal({ open, initialSymbol = "", onClose }: P
       if (payload.symbols.length === 0) throw new Error("Add at least one symbol first.");
       if (!payload.timeframes || payload.timeframes.length === 0) throw new Error("Select at least one timeframe.");
       if (!payload.alert_setups || payload.alert_setups.length === 0) throw new Error("Select at least one alert type.");
+      await saveSelectedAlertSymbols(payload.symbols);
       await startBackendAlerts(payload);
+      syncSelectedAlertSymbolsLocal(payload.symbols);
       setMessage("Backend alerts started.");
       await loadStatus();
     } catch (err) { setError(err instanceof Error ? err.message : "Failed to start backend alerts."); }

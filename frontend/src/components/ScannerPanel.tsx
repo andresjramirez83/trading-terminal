@@ -6,6 +6,7 @@ import {
   refreshScannerCache,
   saveAfterhoursSnapshot,
   fetchSelectedAlertSymbols,
+  saveSelectedAlertSymbols,
   toggleSelectedAlertSymbol,
   type ScannerCacheResponse,
 } from "../services/api";
@@ -138,6 +139,64 @@ function normalizeSnapshotInfo(raw: SnapshotResponse): { dates: string[]; latest
   return { dates, latest };
 }
 
+const SCANNER_AUTO_REFRESH_STORAGE_KEY = "scannerPanel.autoRefresh.v1";
+const SCANNER_REFRESH_SECONDS_STORAGE_KEY = "scannerPanel.refreshSeconds.v1";
+const SCANNER_SELECTED_ID_STORAGE_KEY = "scannerPanel.selectedScannerId.v1";
+const BACKEND_ALERT_SELECTED_SYMBOLS_STORAGE_KEY = "backendAlertSelectedSymbols";
+
+function readStoredBoolean(key: string, fallback: boolean): boolean {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return raw === "true" || raw === "1" || raw === "yes";
+  } catch {
+    return fallback;
+  }
+}
+
+function readStoredNumber(key: string, fallback: number, min: number, max: number): number {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+  } catch {
+    return fallback;
+  }
+}
+
+function readStoredString(key: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw && raw.trim() ? raw.trim() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readStoredAlertSymbols(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(BACKEND_ALERT_SELECTED_SYMBOLS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return Array.from(new Set(parsed.map((item) => normalizeSymbol(item)).filter(Boolean)));
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredAlertSymbols(symbols: string[]) {
+  if (typeof window === "undefined") return;
+  const clean = Array.from(new Set(symbols.map((item) => normalizeSymbol(item)).filter(Boolean)));
+  window.localStorage.setItem(BACKEND_ALERT_SELECTED_SYMBOLS_STORAGE_KEY, JSON.stringify(clean));
+  window.dispatchEvent(new CustomEvent<string[]>("backend-alert-symbols-change", { detail: clean }));
+}
+
 export default function ScannerPanel({
   selectedSymbol,
   onSelectSymbol,
@@ -147,7 +206,7 @@ export default function ScannerPanel({
   const isWorkspace = mode === "workspace";
 
   const [definitions, setDefinitions] = useState<ScannerDefinition[]>([]);
-  const [selectedScannerId, setSelectedScannerId] = useState("overnight_runner");
+  const [selectedScannerId, setSelectedScannerId] = useState(() => readStoredString(SCANNER_SELECTED_ID_STORAGE_KEY, "overnight_runner"));
   const [data, setData] = useState<ScannerResponse | null>(null);
   const [snapshotDates, setSnapshotDates] = useState<string[]>([]);
   const [latestSnapshot, setLatestSnapshot] = useState("");
@@ -157,11 +216,11 @@ export default function ScannerPanel({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [cacheStatus, setCacheStatus] = useState<ScannerCacheResponse | null>(null);
-  const [armedAlertSymbols, setArmedAlertSymbols] = useState<Set<string>>(() => new Set());
+  const [armedAlertSymbols, setArmedAlertSymbols] = useState<Set<string>>(() => new Set(readStoredAlertSymbols()));
   const [alertSymbolsLoading, setAlertSymbolsLoading] = useState(false);
 
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [refreshSeconds, setRefreshSeconds] = useState(20);
+  const [autoRefresh, setAutoRefresh] = useState(() => readStoredBoolean(SCANNER_AUTO_REFRESH_STORAGE_KEY, true));
+  const [refreshSeconds, setRefreshSeconds] = useState(() => readStoredNumber(SCANNER_REFRESH_SECONDS_STORAGE_KEY, 20, 5, 300));
 
   const [workflow, setWorkflow] = useState<Workflow>("auto");
   const [ahDate, setAhDate] = useState("");
@@ -191,6 +250,21 @@ export default function ScannerPanel({
     () => definitions.find((item) => item.id === selectedScannerId) ?? null,
     [definitions, selectedScannerId]
   );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SCANNER_AUTO_REFRESH_STORAGE_KEY, String(autoRefresh));
+  }, [autoRefresh]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SCANNER_REFRESH_SECONDS_STORAGE_KEY, String(refreshSeconds));
+  }, [refreshSeconds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SCANNER_SELECTED_ID_STORAGE_KEY, selectedScannerId);
+  }, [selectedScannerId]);
 
   async function loadDefinitions() {
     try {
@@ -223,9 +297,31 @@ export default function ScannerPanel({
     setAlertSymbolsLoading(true);
     try {
       const payload = await fetchSelectedAlertSymbols();
-      setArmedAlertSymbols(new Set((payload.symbols || []).map((item) => normalizeSymbol(item)).filter(Boolean)));
+      const remoteSymbols = Array.from(
+        new Set((payload.symbols || []).map((item) => normalizeSymbol(item)).filter(Boolean))
+      );
+      const localSymbols = readStoredAlertSymbols();
+
+      // Backend is the source of truth, but localStorage protects the UI from
+      // looking reset during reloads or after a local/dev backend restart.
+      // If the backend is empty and this browser has a saved alert list, restore
+      // that list back to the backend once on mount.
+      if (!remoteSymbols.length && localSymbols.length) {
+        const restored = await saveSelectedAlertSymbols(localSymbols);
+        const restoredSymbols = Array.from(
+          new Set((restored.symbols || localSymbols).map((item) => normalizeSymbol(item)).filter(Boolean))
+        );
+        setArmedAlertSymbols(new Set(restoredSymbols));
+        writeStoredAlertSymbols(restoredSymbols);
+        return;
+      }
+
+      setArmedAlertSymbols(new Set(remoteSymbols));
+      writeStoredAlertSymbols(remoteSymbols);
     } catch (exc) {
       console.error("Failed to fetch selected alert symbols", exc);
+      const localSymbols = readStoredAlertSymbols();
+      if (localSymbols.length) setArmedAlertSymbols(new Set(localSymbols));
     } finally {
       setAlertSymbolsLoading(false);
     }
@@ -235,7 +331,7 @@ export default function ScannerPanel({
     refreshArmedAlertSymbols();
 
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === "backendAlertSelectedSymbols") refreshArmedAlertSymbols();
+      if (event.key === BACKEND_ALERT_SELECTED_SYMBOLS_STORAGE_KEY) refreshArmedAlertSymbols();
     };
 
     const handleCustom = (event: Event) => {
@@ -272,8 +368,7 @@ export default function ScannerPanel({
       const nextSet = new Set(nextSymbols);
       setArmedAlertSymbols(nextSet);
       try {
-        window.localStorage.setItem("backendAlertSelectedSymbols", JSON.stringify(nextSymbols));
-        window.dispatchEvent(new CustomEvent<string[]>("backend-alert-symbols-change", { detail: nextSymbols }));
+        writeStoredAlertSymbols(nextSymbols);
       } catch {
         // localStorage is only for same-browser sync. Backend remains source of truth.
       }
