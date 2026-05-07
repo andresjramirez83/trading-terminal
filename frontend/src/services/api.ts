@@ -382,6 +382,9 @@ export type BackendAlertsStatus = {
   running?: boolean;
 
   symbols?: string[];
+  effective_symbols?: string[];
+  selected_symbols?: string[];
+  scanner_auto_arm?: boolean;
   timeframe?: string;
   timeframes?: string[];
   confluence_mode?: "any" | "all";
@@ -404,6 +407,47 @@ export type BackendAlertsStatus = {
 
   signal_config?: Record<string, any>;
 };
+
+
+export type SelectedAlertSymbolsResponse = {
+  ok?: boolean;
+  symbols: string[];
+  count?: number;
+  source?: string;
+  scanner_auto_arm?: boolean;
+  updated_at?: string;
+};
+
+export async function fetchSelectedAlertSymbols(): Promise<SelectedAlertSymbolsResponse> {
+  const res = await fetch(`${API_BASE}/backend-alerts/selected-symbols`);
+  return parseJson<SelectedAlertSymbolsResponse>(res);
+}
+
+export async function saveSelectedAlertSymbols(symbols: string[]): Promise<SelectedAlertSymbolsResponse> {
+  const clean = Array.from(new Set(symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean)));
+  const res = await fetch(`${API_BASE}/backend-alerts/selected-symbols`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ symbols: clean }),
+  });
+  return parseJson<SelectedAlertSymbolsResponse>(res);
+}
+
+export async function toggleSelectedAlertSymbol(symbol: string, enabled?: boolean): Promise<SelectedAlertSymbolsResponse> {
+  const payload: { symbol: string; enabled?: boolean } = { symbol: String(symbol).trim().toUpperCase() };
+  if (enabled !== undefined) payload.enabled = enabled;
+
+  const res = await fetch(`${API_BASE}/backend-alerts/selected-symbols/toggle`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseJson<SelectedAlertSymbolsResponse>(res);
+}
 
 export async function fetchBackendAlertsStatus(): Promise<BackendAlertsStatus> {
   const res = await fetch(`${API_BASE}/backend-alerts/status`);

@@ -185,8 +185,16 @@ const SCANNER_POLL_MS = 30000;
 const BROKER_POLL_MS = 30000;
 const MAX_ALPACA_SCANNER_SYMBOLS = 25;
 
-function uniqueSymbols(items: Array<string | null | undefined>): string[] {
-  return Array.from(new Set(items.map((item) => normalizeSingleSymbol(String(item ?? ""))).filter(Boolean)));
+function uniqueSymbols(items: Array<string | number | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const symbol = normalizeSingleSymbol(String(item ?? ""));
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    out.push(symbol);
+  }
+  return out;
 }
 
 
@@ -588,7 +596,7 @@ function AlpacaPage() {
 
     if (options?.addToScannerWatchlist) {
       setWatchlist((prev) => {
-        const updated = prev.includes(next) ? prev : [next, ...prev];
+        const updated = uniqueSymbols(prev.includes(next) ? prev : [next, ...prev]).slice(0, MAX_ALPACA_SCANNER_SYMBOLS);
         setWatchlistInput(updated.join(", "));
         saveScannerWatchlistLocal(updated);
         return updated;
@@ -596,7 +604,7 @@ function AlpacaPage() {
     }
 
     if (options?.addToManualWatchlist) {
-      setManualWatchlist((prev) => (prev.includes(next) ? prev : [next, ...prev]));
+      setManualWatchlist((prev) => uniqueSymbols(prev.includes(next) ? prev : [next, ...prev]));
     }
   }, []);
 
@@ -976,7 +984,7 @@ function AlpacaPage() {
     setError("");
     // Keep expanded chart open while switching symbols; Restore is the only exit.
     selectActiveSymbol(next);
-    setManualWatchlist((prev) => (prev.includes(next) ? prev : [next, ...prev]));
+    setManualWatchlist((prev) => uniqueSymbols(prev.includes(next) ? prev : [next, ...prev]));
     setManualWatchlistInput("");
   }, [manualWatchlistInput, symbol, selectActiveSymbol]);
 
@@ -1995,10 +2003,10 @@ function AlpacaPage() {
                   Add symbols here to keep them separate from your main watchlist.
                 </div>
               ) : (
-                manualWatchlist.map((item) => {
+                uniqueSymbols(manualWatchlist).map((item) => {
                   const active = item === symbol;
                   return (
-                    <div key={item} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+                    <div key={`manual-watchlist-${item}`} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
                       <button
                         type="button"
                         onClick={() => handleManualSelectSymbol(item)}
@@ -2360,7 +2368,7 @@ function AlpacaPage() {
             ) : (
               <div style={{ display: "grid", gap: 8 }}>
                 {positions.map((position) => (
-                  <div key={position.asset_id ?? position.symbol} style={listCardStyle}>
+                  <div key={`position-${position.asset_id ?? position.symbol}-${position.qty ?? ""}`} style={listCardStyle}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                       <strong>{position.symbol}</strong>
                       <span>{position.side ?? "long"}</span>

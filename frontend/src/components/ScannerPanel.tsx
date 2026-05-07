@@ -5,6 +5,8 @@ import {
   fetchScannerDefinitions,
   refreshScannerCache,
   saveAfterhoursSnapshot,
+  fetchSelectedAlertSymbols,
+  toggleSelectedAlertSymbol,
   type ScannerCacheResponse,
 } from "../services/api";
 
@@ -109,6 +111,24 @@ function arraysEqual(a: string[], b: string[]): boolean {
   return a.every((item, index) => item === b[index]);
 }
 
+function normalizeSymbol(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function dedupeScannerRows(items: ScannerRow[]): ScannerRow[] {
+  const seen = new Set<string>();
+  const unique: ScannerRow[] = [];
+
+  for (const item of items) {
+    const symbol = normalizeSymbol(item.symbol);
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    unique.push({ ...item, symbol });
+  }
+
+  return unique;
+}
+
 function normalizeSnapshotInfo(raw: SnapshotResponse): { dates: string[]; latest: string } {
   if (Array.isArray(raw)) {
     return { dates: raw, latest: raw[0] ?? "" };
@@ -137,6 +157,8 @@ export default function ScannerPanel({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [cacheStatus, setCacheStatus] = useState<ScannerCacheResponse | null>(null);
+  const [armedAlertSymbols, setArmedAlertSymbols] = useState<Set<string>>(() => new Set());
+  const [alertSymbolsLoading, setAlertSymbolsLoading] = useState(false);
 
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshSeconds, setRefreshSeconds] = useState(20);
@@ -195,6 +217,117 @@ export default function ScannerPanel({
       setLatestSnapshot("");
     }
   }
+
+
+  const refreshArmedAlertSymbols = async () => {
+    setAlertSymbolsLoading(true);
+    try {
+      const payload = await fetchSelectedAlertSymbols();
+      setArmedAlertSymbols(new Set((payload.symbols || []).map((item) => normalizeSymbol(item)).filter(Boolean)));
+    } catch (exc) {
+      console.error("Failed to fetch selected alert symbols", exc);
+    } finally {
+      setAlertSymbolsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshArmedAlertSymbols();
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === "backendAlertSelectedSymbols") refreshArmedAlertSymbols();
+    };
+
+    const handleCustom = (event: Event) => {
+      const detail = (event as CustomEvent<string[]>).detail;
+      if (Array.isArray(detail)) {
+        setArmedAlertSymbols(new Set(detail.map((item) => normalizeSymbol(item)).filter(Boolean)));
+      } else {
+        refreshArmedAlertSymbols();
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("backend-alert-symbols-change", handleCustom);
+
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("backend-alert-symbols-change", handleCustom);
+    };
+  }, []);
+
+  const toggleArmedAlertSymbol = async (symbol: string) => {
+    const clean = normalizeSymbol(symbol);
+    if (!clean) return;
+
+    const currentlyArmed = armedAlertSymbols.has(clean);
+    const optimistic = new Set(armedAlertSymbols);
+    if (currentlyArmed) optimistic.delete(clean);
+    else optimistic.add(clean);
+    setArmedAlertSymbols(optimistic);
+
+    try {
+      const payload = await toggleSelectedAlertSymbol(clean, !currentlyArmed);
+      const nextSymbols = (payload.symbols || []).map((item) => normalizeSymbol(item)).filter(Boolean);
+      const nextSet = new Set(nextSymbols);
+      setArmedAlertSymbols(nextSet);
+      try {
+        window.localStorage.setItem("backendAlertSelectedSymbols", JSON.stringify(nextSymbols));
+        window.dispatchEvent(new CustomEvent<string[]>("backend-alert-symbols-change", { detail: nextSymbols }));
+      } catch {
+        // localStorage is only for same-browser sync. Backend remains source of truth.
+      }
+    } catch (exc) {
+      console.error("Failed to toggle backend alert symbol", exc);
+      setArmedAlertSymbols(new Set(armedAlertSymbols));
+      setError(`Could not update alert symbol ${clean}.`);
+    }
+  };
+
+  const renderAlertArmButton = (symbol: string) => {
+    const clean = normalizeSymbol(symbol);
+    const isArmed = armedAlertSymbols.has(clean);
+    const title = isArmed
+      ? `Alerts armed for ${clean}. Click to disarm.`
+      : `Alerts off for ${clean}. Click to arm backend alerts.`;
+
+    return (
+      <span
+        role="button"
+        tabIndex={0}
+        title={title}
+        aria-label={title}
+        onClick={(event) => {
+          event.stopPropagation();
+          toggleArmedAlertSymbol(clean);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleArmedAlertSymbol(clean);
+          }
+        }}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minWidth: 28,
+          height: 24,
+          marginRight: 8,
+          borderRadius: 999,
+          border: isArmed ? "1px solid rgba(34,197,94,0.65)" : "1px solid rgba(148,163,184,0.25)",
+          background: isArmed ? "rgba(22,163,74,0.22)" : "rgba(15,23,42,0.65)",
+          color: isArmed ? "#86efac" : "#94a3b8",
+          fontSize: 13,
+          cursor: alertSymbolsLoading ? "wait" : "pointer",
+          userSelect: "none",
+        }}
+      >
+        {isArmed ? "🔔" : "🔕"}
+      </span>
+    );
+  };
 
   useEffect(() => {
     loadDefinitions();
@@ -397,7 +530,7 @@ export default function ScannerPanel({
     lowFloatOnly,
   ]);
 
-  const rows = useMemo(() => data?.rows ?? [], [data]);
+  const rows = useMemo(() => dedupeScannerRows(data?.rows ?? []), [data]);
 
   const filteredRows = useMemo(() => {
     const byRunner = rows.filter((row) => {
@@ -430,11 +563,9 @@ export default function ScannerPanel({
   }, [rows]);
 
   useEffect(() => {
-    const symbols = rows
-      .map((row) => row.symbol?.trim().toUpperCase())
+    const unique = rows
+      .map((row) => normalizeSymbol(row.symbol))
       .filter((value): value is string => Boolean(value));
-
-    const unique = Array.from(new Set(symbols));
 
     // Push empty lists too. This prevents stale/default symbols from staying in the
     // Terminal/Alpaca scanner watchlist when the scanner legitimately has no rows.
@@ -512,8 +643,8 @@ export default function ScannerPanel({
                 {definitions.length === 0 ? (
                   <option value={selectedScannerId}>{selectedDefinition?.name ?? selectedScannerId}</option>
                 ) : null}
-                {definitions.map((item) => (
-                  <option key={item.id} value={item.id}>
+                {definitions.map((item, index) => (
+                  <option key={`sidebar-scanner-${item.id}-${index}`} value={item.id}>
                     {item.name}
                   </option>
                 ))}
@@ -546,8 +677,8 @@ export default function ScannerPanel({
           <label style={labelStyle}>
             <div style={labelTextStyle}>Scanner Module</div>
             <select value={selectedScannerId} onChange={(e) => setSelectedScannerId(e.target.value)} style={inputStyle}>
-              {definitions.map((item) => (
-                <option key={item.id} value={item.id}>{item.name}</option>
+              {definitions.map((item, index) => (
+                <option key={`workspace-scanner-${item.id}-${index}`} value={item.id}>{item.name}</option>
               ))}
             </select>
           </label>
@@ -564,8 +695,8 @@ export default function ScannerPanel({
           <label style={labelStyle}>
             <div style={labelTextStyle}>Saved AH Date</div>
             <select value={ahDate} onChange={(e) => setAhDate(e.target.value)} style={inputStyle} disabled={workflow !== "combined"}>
-              {snapshotDates.length ? snapshotDates.map((dateValue) => (
-                <option key={dateValue} value={dateValue}>{dateValue}</option>
+              {snapshotDates.length ? snapshotDates.map((dateValue, index) => (
+                <option key={`snapshot-${dateValue}-${index}`} value={dateValue}>{dateValue}</option>
               )) : <option value="">No saved AH snapshot</option>}
             </select>
           </label>
@@ -630,8 +761,8 @@ export default function ScannerPanel({
           </div>
           {activeFilterChips.length ? (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-              {activeFilterChips.map((chip) => (
-                <div key={chip} style={{ padding: "6px 10px", borderRadius: 999, background: "#0b0f14", border: "1px solid #2a2f3a", fontSize: 12 }}>{chip}</div>
+              {activeFilterChips.map((chip, index) => (
+                <div key={`filter-chip-${chip}-${index}`} style={{ padding: "6px 10px", borderRadius: 999, background: "#0b0f14", border: "1px solid #2a2f3a", fontSize: 12 }}>{chip}</div>
               ))}
             </div>
           ) : null}
@@ -658,13 +789,14 @@ export default function ScannerPanel({
               </div>
             ) : null}
 
-            {filteredRows.map((row) => {
-              const isSelected = row.symbol === selectedSymbol;
+            {filteredRows.map((row, index) => {
+              const symbol = normalizeSymbol(row.symbol);
+              const isSelected = symbol === normalizeSymbol(selectedSymbol);
               return (
                 <button
-                  key={row.symbol}
+                  key={`scanner-card-${symbol}-${index}`}
                   type="button"
-                  onClick={() => onSelectSymbol(row.symbol)}
+                  onClick={() => onSelectSymbol(symbol)}
                   style={{
                     textAlign: "left",
                     padding: "10px 12px",
@@ -679,7 +811,10 @@ export default function ScannerPanel({
                     letterSpacing: 0.2,
                   }}
                 >
-                  {row.symbol}
+                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    {renderAlertArmButton(symbol)}
+                    <span>{symbol}</span>
+                  </span>
                 </button>
               );
             })}
@@ -689,6 +824,7 @@ export default function ScannerPanel({
             <thead style={{ position: "sticky", top: 0, background: "#161d29", zIndex: 1 }}>
               <tr>
                 {[
+                  ["alert", "Alert"],
                   ["symbol", "Symbol"],
                   ["runner_type", "Type"],
                   ["last_price", "Last"],
@@ -706,16 +842,16 @@ export default function ScannerPanel({
                   ["squeeze_rank", "Squeeze"],
                   ["runner_score", "Runner"],
                   ["notes", "Notes"],
-                ].map(([key, header]) => (
+                ].map(([key, header], index) => (
                   <th
-                    key={String(key)}
-                    onClick={() => key !== "notes" ? toggleSort(key as keyof ScannerRow) : undefined}
+                    key={`scanner-header-${String(key)}-${index}`}
+                    onClick={() => key !== "notes" && key !== "alert" ? toggleSort(key as keyof ScannerRow) : undefined}
                     style={{
-                      textAlign: header === "Symbol" || header === "Type" || header === "Notes" ? "left" : "right",
+                      textAlign: header === "Symbol" || header === "Type" || header === "Notes" || header === "Alert" ? "left" : "right",
                       padding: "10px 12px",
                       borderBottom: "1px solid #2a2f3a",
                       whiteSpace: "nowrap",
-                      cursor: key !== "notes" ? "pointer" : "default",
+                      cursor: key !== "notes" && key !== "alert" ? "pointer" : "default",
                     }}
                   >
                     {header}
@@ -724,17 +860,19 @@ export default function ScannerPanel({
               </tr>
             </thead>
             <tbody>
-              {filteredRows.map((row) => {
-                const isSelected = row.symbol === selectedSymbol;
+              {filteredRows.map((row, index) => {
+                const symbol = normalizeSymbol(row.symbol);
+                const isSelected = symbol === normalizeSymbol(selectedSymbol);
                 const squeezeValue = row.squeeze_rank ?? null;
                 const squeezeColor = squeezeValue != null && squeezeValue > 80 ? "#ff4d4f" : squeezeValue != null && squeezeValue > 60 ? "#fa8c16" : "#fff";
                 return (
                   <tr
-                    key={row.symbol}
-                    onClick={() => onSelectSymbol(row.symbol)}
+                    key={`scanner-row-${symbol}-${index}`}
+                    onClick={() => onSelectSymbol(symbol)}
                     style={{ cursor: "pointer", background: isSelected ? "rgba(120, 90, 255, 0.18)" : "transparent" }}
                   >
-                    <td style={cellLeft}><strong>{row.symbol}</strong></td>
+                    <td style={cellLeft}>{renderAlertArmButton(symbol)}</td>
+                    <td style={cellLeft}><strong>{symbol}</strong></td>
                     <td style={cellLeft}>{String(row.runner_type ?? row.source ?? "scanner")}</td>
                     <td style={cellRight}>{formatMaybe(row.last_price ?? row.price)}</td>
                     <td style={{ ...cellRight, color: (row.pm_gap_pct ?? row.gap_pct ?? row.change_pct ?? 0) >= 0 ? "#66d17a" : "#ff7b7b" }}>{formatMaybe(row.pm_gap_pct ?? row.gap_pct ?? row.change_pct)}%</td>
@@ -756,7 +894,7 @@ export default function ScannerPanel({
               })}
               {!loading && filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={17} style={{ padding: 16, opacity: 0.7 }}>No results for the current filter set.</td>
+                  <td colSpan={18} style={{ padding: 16, opacity: 0.7 }}>No results for the current filter set.</td>
                 </tr>
               ) : null}
             </tbody>

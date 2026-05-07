@@ -197,7 +197,7 @@ function saveSharedScannerWatchlist(nextWatchlist: string[]) {
   if (typeof window === "undefined") return;
   // Dispatch only. Do not persist scanner watchlist in localStorage.
   // The scanner list should repopulate only from live scanner/cache rows.
-  window.dispatchEvent(new CustomEvent<string[]>("scanner-watchlist-change", { detail: nextWatchlist }));
+  window.dispatchEvent(new CustomEvent<string[]>("scanner-watchlist-change", { detail: uniqueSymbols(nextWatchlist) }));
 }
 
 function saveSharedActiveSymbol(nextSymbol: string) {
@@ -213,7 +213,7 @@ function loadManualWatchlist(): string[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return Array.from(new Set(parsed.map((item) => normalizeSingleSymbol(String(item))).filter(Boolean)));
+    return uniqueSymbols(parsed);
   } catch {
     return [];
   }
@@ -233,6 +233,18 @@ type AlpacaMode = "paper" | "live";
 
 function normalizeSingleSymbol(input: string): string {
   return input.trim().toUpperCase().replace(/[^A-Z0-9.]/g, "");
+}
+
+function uniqueSymbols(items: Array<string | number | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const symbol = normalizeSingleSymbol(String(item ?? ""));
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    out.push(symbol);
+  }
+  return out;
 }
 
 function normalizeSymbolList(input: string): string[] {
@@ -354,7 +366,7 @@ export default function TerminalPage() {
         saveTerminalTimeframe(nextTimeframe);
 
         if (Array.isArray(remote.manualWatchlist)) {
-          setManualWatchlist(Array.from(new Set(remote.manualWatchlist.map((item) => normalizeSingleSymbol(String(item))).filter(Boolean))));
+          setManualWatchlist(uniqueSymbols(remote.manualWatchlist));
         }
 
         if (remote.studyVisibility && typeof remote.studyVisibility === "object") {
@@ -447,9 +459,7 @@ export default function TerminalPage() {
 
   useEffect(() => {
     const applySharedWatchlist = (nextWatchlist: string[]) => {
-      const cleaned = Array.from(
-        new Set(nextWatchlist.map((item) => normalizeSingleSymbol(String(item))).filter(Boolean))
-      );
+      const cleaned = uniqueSymbols(nextWatchlist);
       if (!cleaned.length) return;
 
       setWatchlist((prev) => {
@@ -534,13 +544,7 @@ export default function TerminalPage() {
   };
 
   const handleScannerWatchlistChange = useCallback((symbols: string[]) => {
-    const cleaned = Array.from(
-      new Set(
-        symbols
-          .map((item) => normalizeSingleSymbol(String(item)))
-          .filter(Boolean)
-      )
-    );
+    const cleaned = uniqueSymbols(symbols);
 
     if (!cleaned.length) return;
 
@@ -623,7 +627,7 @@ export default function TerminalPage() {
 
     setManualWatchlist((prev) => {
       const nextList = [...symbolsToAdd, ...prev];
-      return Array.from(new Set(nextList));
+      return uniqueSymbols(nextList);
     });
 
     const firstSymbol = symbolsToAdd[0];
@@ -632,7 +636,7 @@ export default function TerminalPage() {
 
   const handleRemoveManualSymbol = useCallback((nextSymbol: string) => {
     const next = normalizeSingleSymbol(nextSymbol);
-    setManualWatchlist((prev) => prev.filter((item) => item !== next));
+    setManualWatchlist((prev) => uniqueSymbols(prev).filter((item) => item !== next));
   }, []);
 
   const submitTopWatchlistAdd = useCallback(() => {
@@ -1351,10 +1355,10 @@ export default function TerminalPage() {
                   Add symbols here to keep them separate from your main watchlist.
                 </div>
               ) : (
-                manualWatchlist.map((item) => {
+                uniqueSymbols(manualWatchlist).map((item) => {
                   const active = item === symbolUpper;
                   return (
-                    <div key={item} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+                    <div key={`manual-watchlist-${item}`} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
                       <button
                         type="button"
                         onClick={() => handleManualSelectSymbol(item)}

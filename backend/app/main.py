@@ -351,10 +351,36 @@ def normalize_alert_setups(values: Optional[List[str]]) -> List[str]:
 # No default symbols. The alert list should be controlled only from the UI.
 # This prevents AAPL/NVDA/TSLA/AMD or env defaults from reappearing on fresh starts.
 DEFAULT_ALERT_SYMBOLS: List[str] = []
+ALERT_SYMBOLS_FILE = APP_STATE_DIR / "backend_alert_selected_symbols.json"
+
+
+def load_persisted_alert_symbols() -> List[str]:
+    try:
+        if not ALERT_SYMBOLS_FILE.exists():
+            return []
+        data = json.loads(ALERT_SYMBOLS_FILE.read_text(encoding="utf-8"))
+        raw = data.get("symbols") if isinstance(data, dict) else data
+        return _normalize_symbol_list(list(raw or []))
+    except Exception as exc:
+        print(f"[backend-alerts] failed to load selected symbols: {exc}", flush=True)
+        return []
+
+
+def save_persisted_alert_symbols(symbols: List[str]) -> None:
+    clean = _normalize_symbol_list(symbols)
+    payload = {
+        "symbols": clean,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "app_selected",
+    }
+    tmp_file = ALERT_SYMBOLS_FILE.with_suffix(".tmp")
+    tmp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_file.replace(ALERT_SYMBOLS_FILE)
+
 
 backend_alert_config = BackendAlertLoopConfig(
     enabled=os.getenv("BACKEND_ALERTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
-    symbols=DEFAULT_ALERT_SYMBOLS,
+    symbols=load_persisted_alert_symbols() or DEFAULT_ALERT_SYMBOLS,
     timeframe=os.getenv("BACKEND_ALERTS_TIMEFRAME", "1m").strip().lower() or "1m",
     timeframes=normalize_alert_timeframes(
         os.getenv("BACKEND_ALERTS_TIMEFRAMES", os.getenv("BACKEND_ALERTS_TIMEFRAME", "1m")).split(",")
@@ -375,7 +401,7 @@ backend_alert_config = BackendAlertLoopConfig(
     breakout_buffer_pct=float(os.getenv("BACKEND_ALERTS_BREAKOUT_BUFFER_PCT", "0.0005") or "0.0005"),
     structure_window=max(8, int(os.getenv("BACKEND_ALERTS_STRUCTURE_WINDOW", "12") or "12")),
     smart_scaling_enabled=os.getenv("BACKEND_ALERTS_SMART_SCALING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
-    use_scanner_symbols_when_empty=os.getenv("BACKEND_ALERTS_USE_SCANNER_SYMBOLS_WHEN_EMPTY", "true").strip().lower() in {"1", "true", "yes", "on"},
+    use_scanner_symbols_when_empty=os.getenv("BACKEND_ALERTS_USE_SCANNER_SYMBOLS_WHEN_EMPTY", "false").strip().lower() in {"1", "true", "yes", "on"},
     max_dynamic_symbols=max(1, int(os.getenv("BACKEND_ALERTS_MAX_DYNAMIC_SYMBOLS", "8") or "8")),
     min_poll_seconds=max(10, int(os.getenv("BACKEND_ALERTS_MIN_POLL_SECONDS", "10") or "10")),
     max_poll_seconds=max(10, int(os.getenv("BACKEND_ALERTS_MAX_POLL_SECONDS", "45") or "45")),
@@ -1380,37 +1406,21 @@ def _current_et_session_label() -> str:
 
 
 def get_dynamic_alert_symbols() -> List[str]:
-    """Return the alert symbols to scan without falling back to hardcoded defaults.
+    """Return app-selected symbols for backend alerts.
 
-    Manual backend-alert symbols win. If that list is empty, optionally use the
-    latest scanner cache rows. This lets alerts follow the scanner while staying
-    light enough for the DigitalOcean server.
+    Pro mode rule: alerts never auto-arm every scanner symbol. The scanner can
+    discover candidates, but the UI must explicitly arm each symbol. This keeps
+    the backend fast and stops phone/webhook spam when the scanner list changes.
     """
-    manual = _normalize_symbol_list(backend_alert_config.symbols)
-    if manual:
-        return manual[: max(1, int(backend_alert_config.max_dynamic_symbols))]
+    selected = _normalize_symbol_list(backend_alert_config.symbols)
+    return selected[: max(1, int(backend_alert_config.max_dynamic_symbols))]
 
-    if not backend_alert_config.use_scanner_symbols_when_empty:
-        return []
 
-    rows = []
-    try:
-        rows = list((scanner_cache or {}).get("rows") or [])
-    except Exception:
-        rows = []
-
-    symbols: List[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        raw_symbol = row.get("symbol") or row.get("ticker")
-        symbol = "".join(ch for ch in str(raw_symbol or "").upper().strip() if ch.isalpha() or ch == ".")
-        if symbol and symbol not in symbols:
-            symbols.append(symbol)
-        if len(symbols) >= max(1, int(backend_alert_config.max_dynamic_symbols)):
-            break
-    return symbols
-
+def selected_symbol_is_armed(symbol: str) -> bool:
+    clean = _normalize_symbol_list([symbol])
+    if not clean:
+        return False
+    return clean[0] in set(get_dynamic_alert_symbols())
 
 def get_effective_alert_poll_seconds(symbol_count: int) -> int:
     """Smart scaling: fast when it matters, slower when the market is quiet."""
@@ -1831,6 +1841,8 @@ def health():
             "running": bool(backend_alert_task and not backend_alert_task.done()),
             "symbols": backend_alert_config.symbols,
             "effective_symbols": get_dynamic_alert_symbols(),
+            "selected_symbols": get_dynamic_alert_symbols(),
+            "scanner_auto_arm": False,
             "smart_scaling_enabled": backend_alert_config.smart_scaling_enabled,
             "effective_poll_seconds": get_effective_alert_poll_seconds(len(get_dynamic_alert_symbols())),
             "timeframe": backend_alert_config.timeframe,
@@ -1882,6 +1894,61 @@ def push_alert(payload: AlertPayload):
     }
 
 
+@app.get("/backend-alerts/selected-symbols")
+def backend_alerts_selected_symbols():
+    symbols = get_dynamic_alert_symbols()
+    return {
+        "ok": True,
+        "symbols": symbols,
+        "count": len(symbols),
+        "source": "app_selected",
+        "scanner_auto_arm": False,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.put("/backend-alerts/selected-symbols")
+def backend_alerts_put_selected_symbols(payload: dict = Body(default={})):
+    raw_symbols = payload.get("symbols") if isinstance(payload, dict) else []
+    symbols = _normalize_symbol_list(list(raw_symbols or []))
+    backend_alert_config.symbols = symbols
+    backend_alert_config.use_scanner_symbols_when_empty = False
+    save_persisted_alert_symbols(symbols)
+    start_backend_alert_task_if_needed()
+    return {
+        "ok": True,
+        "symbols": symbols,
+        "count": len(symbols),
+        "source": "app_selected",
+        "scanner_auto_arm": False,
+    }
+
+
+@app.post("/backend-alerts/selected-symbols/toggle")
+def backend_alerts_toggle_selected_symbol(payload: dict = Body(default={})):
+    symbol = _normalize_symbol_list([payload.get("symbol") if isinstance(payload, dict) else ""])
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    target = symbol[0]
+    current = _normalize_symbol_list(backend_alert_config.symbols)
+    enabled = bool(payload.get("enabled")) if isinstance(payload, dict) and payload.get("enabled") is not None else target not in current
+    if enabled and target not in current:
+        current.append(target)
+    if not enabled:
+        current = [item for item in current if item != target]
+    backend_alert_config.symbols = current
+    backend_alert_config.use_scanner_symbols_when_empty = False
+    save_persisted_alert_symbols(current)
+    start_backend_alert_task_if_needed()
+    return {
+        "ok": True,
+        "symbol": target,
+        "enabled": target in current,
+        "symbols": current,
+        "count": len(current),
+    }
+
+
 @app.get("/backend-alerts/status")
 def backend_alerts_status():
     return {
@@ -1889,6 +1956,8 @@ def backend_alerts_status():
         "running": bool(backend_alert_task and not backend_alert_task.done()),
         "symbols": backend_alert_config.symbols,
         "effective_symbols": get_dynamic_alert_symbols(),
+        "selected_symbols": get_dynamic_alert_symbols(),
+        "scanner_auto_arm": False,
         "smart_scaling_enabled": backend_alert_config.smart_scaling_enabled,
         "effective_poll_seconds": get_effective_alert_poll_seconds(len(get_dynamic_alert_symbols())),
         "timeframe": backend_alert_config.timeframe,
@@ -1899,6 +1968,8 @@ def backend_alerts_status():
             "enabled": backend_alert_config.enabled,
             "symbols": backend_alert_config.symbols,
             "effective_symbols": get_dynamic_alert_symbols(),
+            "selected_symbols": get_dynamic_alert_symbols(),
+            "scanner_auto_arm": False,
             "smart_scaling_enabled": backend_alert_config.smart_scaling_enabled,
             "use_scanner_symbols_when_empty": backend_alert_config.use_scanner_symbols_when_empty,
             "max_dynamic_symbols": backend_alert_config.max_dynamic_symbols,
@@ -1993,6 +2064,8 @@ async def backend_alerts_instant_chart(payload: InstantChartAlertPayload):
 
     if not backend_alert_config.enabled:
         return {"ok": True, "delivered": False, "reason": "backend alerts disabled", "signal": result_row}
+    if not selected_symbol_is_armed(symbol):
+        return {"ok": True, "delivered": False, "reason": "symbol not armed from app", "signal": result_row}
     if not setup_allowed(signal):
         return {"ok": True, "delivered": False, "reason": "setup not enabled", "signal": result_row}
     if not signal_is_deliverable(signal):
@@ -2038,7 +2111,9 @@ async def backend_alerts_config(update: BackendAlertLoopUpdate):
     if update.enabled is not None:
         backend_alert_config.enabled = update.enabled
     if update.symbols is not None:
-        backend_alert_config.symbols = [item.strip().upper() for item in update.symbols if item.strip()]
+        backend_alert_config.symbols = _normalize_symbol_list(update.symbols)
+        backend_alert_config.use_scanner_symbols_when_empty = False
+        save_persisted_alert_symbols(backend_alert_config.symbols)
     if update.timeframe is not None:
         backend_alert_config.timeframe = update.timeframe.strip().lower()
         backend_alert_config.timeframes = normalize_alert_timeframes([backend_alert_config.timeframe], backend_alert_config.timeframe)
@@ -2079,7 +2154,8 @@ async def backend_alerts_config(update: BackendAlertLoopUpdate):
     if update.smart_scaling_enabled is not None:
         backend_alert_config.smart_scaling_enabled = bool(update.smart_scaling_enabled)
     if update.use_scanner_symbols_when_empty is not None:
-        backend_alert_config.use_scanner_symbols_when_empty = bool(update.use_scanner_symbols_when_empty)
+        # Pro alert mode: scanner rows are candidates only, never auto-armed.
+        backend_alert_config.use_scanner_symbols_when_empty = False
     if update.max_dynamic_symbols is not None:
         backend_alert_config.max_dynamic_symbols = max(1, min(50, int(update.max_dynamic_symbols)))
     if update.min_poll_seconds is not None:

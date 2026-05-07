@@ -5,6 +5,8 @@ import {
   startBackendAlerts,
   stopBackendAlerts,
   updateBackendAlertsConfig,
+  fetchSelectedAlertSymbols,
+  saveSelectedAlertSymbols,
   type BackendAlertsConfig,
   type BackendAlertsStatus,
   type BackendAlertResult,
@@ -152,14 +154,21 @@ export default function QuickAlertModal({ open, initialSymbol = "", onClose }: P
     setLoading(true);
     setError("");
     try {
-      const next = await fetchBackendAlertsStatus();
+      const [next, selectedSymbolsPayload] = await Promise.all([
+        fetchBackendAlertsStatus(),
+        fetchSelectedAlertSymbols().catch(() => ({ symbols: [] as string[] })),
+      ]);
       setStatus(next);
       const cfg = next.config ?? next;
       const restoredTimeframes = normalizeTimeframes(
         cfg.timeframes ?? cfg.timeframe ?? next.timeframes ?? next.timeframe,
         DEFAULT_CONFIG.timeframes
       );
-      const restoredSymbols = stripLegacyDefaultSymbols(cfg.symbols ?? next.symbols ?? DEFAULT_CONFIG.symbols);
+      const restoredSymbols = stripLegacyDefaultSymbols(
+        selectedSymbolsPayload.symbols?.length
+          ? selectedSymbolsPayload.symbols
+          : cfg.symbols ?? next.symbols ?? DEFAULT_CONFIG.symbols
+      );
       setSymbolsInput(restoredSymbols.join(", "));
       setTimeframes(restoredTimeframes);
       setConfluenceMode((cfg.confluence_mode ?? next.confluence_mode) === "all" ? "all" : "any");

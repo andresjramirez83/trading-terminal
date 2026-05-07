@@ -5,6 +5,8 @@ import {
   stopBackendAlerts,
   updateBackendAlertsConfig,
   sendBackendTestAlert,
+  fetchSelectedAlertSymbols,
+  saveSelectedAlertSymbols,
   type BackendAlertsConfig,
   type BackendAlertsStatus,
   type BackendAlertResult,
@@ -102,11 +104,16 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
     setLoading(true);
     setError("");
     try {
-      const next = await fetchBackendAlertsStatus();
+      const [next, selectedSymbolsPayload] = await Promise.all([
+        fetchBackendAlertsStatus(),
+        fetchSelectedAlertSymbols().catch(() => ({ symbols: [] as string[] })),
+      ]);
       setStatus(next);
 
       const cfg: BackendAlertsConfig = {
-        symbols: next.config?.symbols ?? next.symbols ?? DEFAULT_CONFIG.symbols,
+        symbols: selectedSymbolsPayload.symbols?.length
+          ? selectedSymbolsPayload.symbols
+          : next.config?.symbols ?? next.symbols ?? DEFAULT_CONFIG.symbols,
         timeframe: next.config?.timeframe ?? next.timeframe ?? DEFAULT_CONFIG.timeframe,
         timeframes: next.config?.timeframes ?? next.timeframes ?? DEFAULT_CONFIG.timeframes,
         confluence_mode: next.config?.confluence_mode ?? next.confluence_mode ?? DEFAULT_CONFIG.confluence_mode,
@@ -190,7 +197,15 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
     setError("");
 
     try {
-      await updateBackendAlertsConfig(buildPayload());
+      const payload = buildPayload();
+      await saveSelectedAlertSymbols(payload.symbols);
+      await updateBackendAlertsConfig(payload);
+      try {
+        window.localStorage.setItem("backendAlertSelectedSymbols", JSON.stringify(payload.symbols));
+        window.dispatchEvent(new CustomEvent<string[]>("backend-alert-symbols-change", { detail: payload.symbols }));
+      } catch {
+        // Backend is source of truth; localStorage only syncs open tabs.
+      }
       setMessage("Alert config saved.");
       await loadStatus();
     } catch (err) {
@@ -212,7 +227,14 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
         throw new Error("Add at least one alert symbol before starting.");
       }
 
+      await saveSelectedAlertSymbols(payload.symbols);
       await startBackendAlerts(payload);
+      try {
+        window.localStorage.setItem("backendAlertSelectedSymbols", JSON.stringify(payload.symbols));
+        window.dispatchEvent(new CustomEvent<string[]>("backend-alert-symbols-change", { detail: payload.symbols }));
+      } catch {
+        // Backend is source of truth; localStorage only syncs open tabs.
+      }
       setMessage("Backend alerts started.");
       await loadStatus();
     } catch (err) {
