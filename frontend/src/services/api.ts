@@ -542,6 +542,16 @@ export async function sendBackendTestAlert(
 export type AlpacaMode = "paper" | "live";
 export type AlpacaSide = "buy" | "sell";
 export type AlpacaOrderType = "market" | "limit";
+export type AlpacaOrderClass = "simple" | "bracket" | "oco" | "oto";
+
+export type AlpacaTakeProfit = {
+  limit_price: number;
+};
+
+export type AlpacaStopLoss = {
+  stop_price: number;
+  limit_price?: number;
+};
 
 export type PlaceAlpacaOrderRequest = {
   symbol: string;
@@ -552,6 +562,9 @@ export type PlaceAlpacaOrderRequest = {
   limit_price?: number;
   mode?: AlpacaMode;
   extended_hours?: boolean;
+  order_class?: AlpacaOrderClass;
+  take_profit?: AlpacaTakeProfit;
+  stop_loss?: AlpacaStopLoss;
 };
 
 export async function fetchAlpacaAccount(mode: AlpacaMode = "paper") {

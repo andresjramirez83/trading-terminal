@@ -90,6 +90,15 @@ class LastTradeResponse(BaseModel):
     price: Optional[float]
 
 
+class AlpacaTakeProfitRequest(BaseModel):
+    limit_price: Optional[float] = None
+
+
+class AlpacaStopLossRequest(BaseModel):
+    stop_price: Optional[float] = None
+    limit_price: Optional[float] = None
+
+
 class AlpacaOrderRequest(BaseModel):
     mode: str = "paper"
     symbol: str
@@ -100,6 +109,9 @@ class AlpacaOrderRequest(BaseModel):
     time_in_force: str = "day"
     limit_price: Optional[float] = None
     extended_hours: bool = False
+    order_class: Optional[str] = None
+    take_profit: Optional[AlpacaTakeProfitRequest] = None
+    stop_loss: Optional[AlpacaStopLossRequest] = None
 
 
 class AlertPayload(BaseModel):
@@ -2778,6 +2790,22 @@ def alpaca_order(request: AlpacaOrderRequest):
     if request.type == "limit" and (request.limit_price is None or request.limit_price <= 0):
         raise HTTPException(status_code=400, detail="limit_price must be provided for limit orders")
 
+    order_class = (request.order_class or "").strip().lower() or None
+    if order_class and order_class not in {"bracket", "oco", "oto"}:
+        raise HTTPException(status_code=400, detail="order_class must be bracket, oco, or oto")
+
+    take_profit = request.take_profit.dict(exclude_none=True) if request.take_profit else None
+    stop_loss = request.stop_loss.dict(exclude_none=True) if request.stop_loss else None
+
+    if order_class in {"bracket", "oco", "oto"} and not take_profit and not stop_loss:
+        raise HTTPException(status_code=400, detail="attached order requires take_profit or stop_loss")
+
+    if take_profit and float(take_profit.get("limit_price") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="take_profit.limit_price must be greater than 0")
+
+    if stop_loss and float(stop_loss.get("stop_price") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="stop_loss.stop_price must be greater than 0")
+
     try:
         service = get_alpaca_service(request.mode)
         order = service.place_order(
@@ -2789,6 +2817,9 @@ def alpaca_order(request: AlpacaOrderRequest):
             notional=request.notional,
             limit_price=request.limit_price,
             extended_hours=request.extended_hours,
+            order_class=order_class,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
         )
         print("ALPACA ORDER SUCCESS", flush=True)
         return order

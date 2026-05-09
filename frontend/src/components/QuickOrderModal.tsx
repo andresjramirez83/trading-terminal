@@ -9,6 +9,7 @@ import {
   fetchAlpacaPositions,
   placeAlpacaOrder,
   type AlpacaMode,
+  type AlpacaOrderClass,
   type AlpacaOrderType,
   type AlpacaSide,
 } from "../services/api";
@@ -283,6 +284,9 @@ export default function QuickOrderModal({
     side: AlpacaSide;
     type: AlpacaOrderType;
     limitPrice?: number;
+    orderClass?: AlpacaOrderClass;
+    takeProfitPrice?: number;
+    stopLossPrice?: number;
   }) {
     await placeAlpacaOrder({
       symbol: cleanedSymbol,
@@ -293,6 +297,15 @@ export default function QuickOrderModal({
       limit_price: request.type === "limit" ? request.limitPrice : undefined,
       time_in_force: "day",
       extended_hours: false,
+      order_class: request.orderClass,
+      take_profit:
+        request.takeProfitPrice && request.takeProfitPrice > 0
+          ? { limit_price: request.takeProfitPrice }
+          : undefined,
+      stop_loss:
+        request.stopLossPrice && request.stopLossPrice > 0
+          ? { stop_price: request.stopLossPrice }
+          : undefined,
     });
 
     localStorage.setItem("activeSymbol", cleanedSymbol);
@@ -358,11 +371,44 @@ export default function QuickOrderModal({
           return;
         }
 
+        const wantsTarget = showTarget && target > 0;
+        const wantsStop = showStop && stop > 0;
+
+        if (showTarget && !wantsTarget) {
+          setError("Enter a valid target price.");
+          return;
+        }
+
+        if (showStop && !wantsStop) {
+          setError("Enter a valid stop price.");
+          return;
+        }
+
+        if (wantsTarget && orderType === "limit" && target <= entry) {
+          setError("Target price must be above your entry price for a long order.");
+          return;
+        }
+
+        if (wantsStop && orderType === "limit" && stop >= entry) {
+          setError("Stop price must be below your entry price for a long order.");
+          return;
+        }
+
+        const orderClass: AlpacaOrderClass | undefined =
+          wantsTarget && wantsStop
+            ? "bracket"
+            : wantsTarget || wantsStop
+            ? "oto"
+            : undefined;
+
         await submitOrder({
           qty: calculatedBuyShares,
           side: "buy",
           type: orderType,
           limitPrice: entry,
+          orderClass,
+          takeProfitPrice: wantsTarget ? target : undefined,
+          stopLossPrice: wantsStop ? stop : undefined,
         });
 
         onClose();
@@ -762,9 +808,9 @@ export default function QuickOrderModal({
                   template === "buy_stop" ||
                   template === "bracket") ? (
                   <div style={noteStyle}>
-                    Current backend still submits the entry order only. Target and
-                    stop values are shown here for planning until true bracket
-                    order support is added.
+                    This will submit a linked Alpaca order: target-only and
+                    stop-only use OTO, while target + stop uses a true bracket.
+                    After the entry fills, Alpaca manages the attached exit order(s).
                   </div>
                 ) : null}
               </div>

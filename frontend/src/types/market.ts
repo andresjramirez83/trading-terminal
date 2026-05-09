@@ -125,6 +125,17 @@ export type AlpacaSide = "buy" | "sell";
 
 export type AlpacaOrderType = "market" | "limit";
 
+export type AlpacaOrderClass = "simple" | "bracket" | "oco" | "oto";
+
+export type AlpacaTakeProfit = {
+  limit_price: number;
+};
+
+export type AlpacaStopLoss = {
+  stop_price: number;
+  limit_price?: number;
+};
+
 export type AlpacaTimeInForce = "day" | "gtc" | "ioc" | "fok" | "opg" | "cls";
 
 export type AlpacaAccount = {
@@ -201,4 +212,7 @@ export type PlaceAlpacaOrderRequest = {
   limit_price?: number;
   mode?: AlpacaMode;
   extended_hours?: boolean;
+  order_class?: AlpacaOrderClass;
+  take_profit?: AlpacaTakeProfit;
+  stop_loss?: AlpacaStopLoss;
 };

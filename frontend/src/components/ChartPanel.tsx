@@ -603,7 +603,9 @@ type ChartFunctionId =
   | "price_projection_high_low_wicks"
   | "price_projection_anchor_range"
   | "support_prediction_wick_range"
-  | "resistance_prediction_wick_range";
+  | "resistance_prediction_wick_range"
+  | "vwap_zscore_projection"
+  | "vwap_zscore_fixed_projection";
 
 type ChartFunctionCategory = "projection" | "structure" | "volatility" | "orderflow";
 
@@ -612,7 +614,7 @@ type ChartFunctionDefinition = {
   label: string;
   description: string;
   category: ChartFunctionCategory;
-  buildSelection: (bar: Candle) => ProjectionSelection;
+  buildSelection: (bar: Candle, bars?: Candle[]) => ProjectionSelection;
 };
 
 type TrendlineAnchorKey = "p1" | "p2";
@@ -763,9 +765,30 @@ function calcVWAP(bars: Candle[]): number[] {
 
   return bars.map((bar) => {
     const typical = (bar.high + bar.low + bar.close) / 3;
-    cumulativePV += typical * bar.volume;
-    cumulativeV += bar.volume;
+    const volume = Math.max(Number(bar.volume) || 0, 0);
+    cumulativePV += typical * volume;
+    cumulativeV += volume;
     return cumulativeV > 0 ? cumulativePV / cumulativeV : 0;
+  });
+}
+
+function calcVWAPStdDev(bars: Candle[], vwapValues: number[]): number[] {
+  let cumulativeVolume = 0;
+  let cumulativeWeightedVariance = 0;
+
+  return bars.map((bar, index) => {
+    const vwap = Number(vwapValues[index]);
+    const typical = (Number(bar.high) + Number(bar.low) + Number(bar.close)) / 3;
+    const volume = Math.max(Number(bar.volume) || 0, 0);
+
+    if (!Number.isFinite(vwap) || !Number.isFinite(typical) || volume <= 0) {
+      return cumulativeVolume > 0 ? Math.sqrt(Math.max(cumulativeWeightedVariance / cumulativeVolume, 0)) : 0;
+    }
+
+    cumulativeVolume += volume;
+    cumulativeWeightedVariance += volume * Math.pow(typical - vwap, 2);
+
+    return cumulativeVolume > 0 ? Math.sqrt(Math.max(cumulativeWeightedVariance / cumulativeVolume, 0)) : 0;
   });
 }
 
@@ -3408,6 +3431,201 @@ function buildResistancePredictionWickRangeSelection(bar: Candle): ProjectionSel
   };
 }
 
+function buildVWAPZScoreProjectionSelection(bar: Candle, bars: Candle[] = []): ProjectionSelection {
+  const math = getProjectionMath(bar);
+  const sourceBars = bars.length ? bars : [bar];
+  const anchorTime = toChartTime(bar.time);
+  const anchorIndex = sourceBars.findIndex((item) => toChartTime(item.time) === anchorTime);
+
+  if (anchorIndex < 0) {
+    return buildEmptyProjectionSelection(bar);
+  }
+
+  const vwapValues = calcVWAP(sourceBars);
+  const stdDevValues = calcVWAPStdDev(sourceBars, vwapValues);
+
+  const selectedVWAP = Number(vwapValues[anchorIndex]);
+  const selectedStdDev = Number(stdDevValues[anchorIndex]);
+  const currentVWAP = Number(vwapValues[vwapValues.length - 1]);
+  const currentStdDev = Number(stdDevValues[stdDevValues.length - 1]);
+
+  if (
+    !Number.isFinite(selectedVWAP) ||
+    !Number.isFinite(selectedStdDev) ||
+    selectedStdDev <= 0 ||
+    !Number.isFinite(currentVWAP) ||
+    !Number.isFinite(currentStdDev) ||
+    currentStdDev <= 0
+  ) {
+    return {
+      candleTime: math.candleTime,
+      bodyRange: math.bodyRange,
+      fullRange: math.fullRange,
+      levels: [],
+      anchorOpen: bar.open,
+      anchorClose: bar.close,
+      anchorHigh: bar.high,
+      anchorLow: bar.low,
+    };
+  }
+
+  const highZ = (Number(bar.high) - selectedVWAP) / selectedStdDev;
+  const lowZ = (Number(bar.low) - selectedVWAP) / selectedStdDev;
+  const resistancePrice = currentVWAP + highZ * currentStdDev;
+  const supportPrice = currentVWAP + lowZ * currentStdDev;
+
+  const stdLadderLevels: ProjectionLevel[] = [2, 3].flatMap((stdMultiple) => {
+    const upperPrice = currentVWAP + stdMultiple * currentStdDev;
+    const lowerPrice = currentVWAP - stdMultiple * currentStdDev;
+
+    return [
+      {
+        id: `vwap-z-upper-${stdMultiple}-${math.candleTime}`,
+        kind: "resistance_prediction" as ProjectionLineKind,
+        price: upperPrice,
+        color: stdMultiple === 2 ? "#facc15" : "#fb923c",
+        lineStyle: LineStyle.Dashed,
+        lineWidth: 2,
+        title: `VWAP +${stdMultiple}STD ${formatPrice(upperPrice)}`,
+      },
+      {
+        id: `vwap-z-lower-${stdMultiple}-${math.candleTime}`,
+        kind: "support_prediction" as ProjectionLineKind,
+        price: lowerPrice,
+        color: stdMultiple === 2 ? "#60a5fa" : "#38bdf8",
+        lineStyle: LineStyle.Dashed,
+        lineWidth: 2,
+        title: `VWAP -${stdMultiple}STD ${formatPrice(lowerPrice)}`,
+      },
+    ];
+  });
+
+  const levels: ProjectionLevel[] = [
+    ...stdLadderLevels,
+    {
+      id: `vwap-z-resistance-${math.candleTime}`,
+      kind: "resistance_prediction" as ProjectionLineKind,
+      price: resistancePrice,
+      color: "#f97316",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 3,
+      title: `VWAP Z R ${formatPrice(resistancePrice)} | Z ${highZ.toFixed(2)}`,
+    },
+    {
+      id: `vwap-z-support-${math.candleTime}`,
+      kind: "support_prediction" as ProjectionLineKind,
+      price: supportPrice,
+      color: "#22c55e",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 3,
+      title: `VWAP Z S ${formatPrice(supportPrice)} | Z ${lowZ.toFixed(2)}`,
+    },
+  ].filter((level) => Number.isFinite(level.price) && level.price > 0);
+
+  return {
+    candleTime: math.candleTime,
+    bodyRange: math.bodyRange,
+    fullRange: math.fullRange,
+    levels,
+    anchorOpen: bar.open,
+    anchorClose: bar.close,
+    anchorHigh: bar.high,
+    anchorLow: bar.low,
+  };
+}
+
+function buildVWAPZScoreFixedProjectionSelection(bar: Candle, bars: Candle[] = []): ProjectionSelection {
+  const math = getProjectionMath(bar);
+  const sourceBars = bars.length ? bars : [bar];
+  const anchorTime = toChartTime(bar.time);
+  const anchorIndex = sourceBars.findIndex((item) => toChartTime(item.time) === anchorTime);
+
+  if (anchorIndex < 0) {
+    return buildEmptyProjectionSelection(bar);
+  }
+
+  const vwapValues = calcVWAP(sourceBars);
+  const stdDevValues = calcVWAPStdDev(sourceBars, vwapValues);
+
+  const anchorVWAP = Number(vwapValues[anchorIndex]);
+  const anchorStdDev = Number(stdDevValues[anchorIndex]);
+
+  if (!Number.isFinite(anchorVWAP) || !Number.isFinite(anchorStdDev) || anchorStdDev <= 0) {
+    return {
+      candleTime: math.candleTime,
+      bodyRange: math.bodyRange,
+      fullRange: math.fullRange,
+      levels: [],
+      anchorOpen: bar.open,
+      anchorClose: bar.close,
+      anchorHigh: bar.high,
+      anchorLow: bar.low,
+    };
+  }
+
+  const highZ = (Number(bar.high) - anchorVWAP) / anchorStdDev;
+  const lowZ = (Number(bar.low) - anchorVWAP) / anchorStdDev;
+
+  const stdLadderLevels: ProjectionLevel[] = [1, 2, 3, 4].flatMap((stdMultiple) => {
+    const upperPrice = anchorVWAP + stdMultiple * anchorStdDev;
+    const lowerPrice = anchorVWAP - stdMultiple * anchorStdDev;
+
+    return [
+      {
+        id: `vwap-z-fixed-upper-${stdMultiple}-${math.candleTime}`,
+        kind: "resistance_prediction" as ProjectionLineKind,
+        price: upperPrice,
+        color: stdMultiple <= 2 ? "#facc15" : "#fb923c",
+        lineStyle: LineStyle.Dashed,
+        lineWidth: 2,
+        title: `FIXED VWAP +${stdMultiple}STD ${formatPrice(upperPrice)}`,
+      },
+      {
+        id: `vwap-z-fixed-lower-${stdMultiple}-${math.candleTime}`,
+        kind: "support_prediction" as ProjectionLineKind,
+        price: lowerPrice,
+        color: stdMultiple <= 2 ? "#60a5fa" : "#38bdf8",
+        lineStyle: LineStyle.Dashed,
+        lineWidth: 2,
+        title: `FIXED VWAP -${stdMultiple}STD ${formatPrice(lowerPrice)}`,
+      },
+    ];
+  });
+
+  const levels: ProjectionLevel[] = [
+    ...stdLadderLevels,
+    {
+      id: `vwap-z-fixed-anchor-high-${math.candleTime}`,
+      kind: "resistance_prediction" as ProjectionLineKind,
+      price: Number(bar.high),
+      color: "#f97316",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 3,
+      title: `FIXED Anchor High ${formatPrice(bar.high)} | Z ${highZ.toFixed(2)}`,
+    },
+    {
+      id: `vwap-z-fixed-anchor-low-${math.candleTime}`,
+      kind: "support_prediction" as ProjectionLineKind,
+      price: Number(bar.low),
+      color: "#22c55e",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 3,
+      title: `FIXED Anchor Low ${formatPrice(bar.low)} | Z ${lowZ.toFixed(2)}`,
+    },
+  ].filter((level) => Number.isFinite(level.price) && level.price > 0);
+
+  return {
+    candleTime: math.candleTime,
+    bodyRange: math.bodyRange,
+    fullRange: math.fullRange,
+    levels,
+    anchorOpen: bar.open,
+    anchorClose: bar.close,
+    anchorHigh: bar.high,
+    anchorLow: bar.low,
+  };
+}
+
 function buildEmptyProjectionSelection(bar: Candle): ProjectionSelection {
   return {
     candleTime: toChartTime(bar.time),
@@ -3424,6 +3642,22 @@ const CHART_FUNCTIONS: ChartFunctionDefinition[] = [
     description: "No function projection lines. Only PMH, VWAP, compression, and other reference overlays remain visible.",
     category: "structure",
     buildSelection: buildEmptyProjectionSelection,
+  },
+  {
+    id: "vwap_zscore_projection",
+    label: "VWAP Z-Score Projection",
+    description:
+      "Click the first gap-up candle to lock its high and low VWAP Z-score. Orange resistance = current VWAP plus selected high Z times current VWAP deviation. Green support = current VWAP plus selected low Z times current VWAP deviation.",
+    category: "volatility",
+    buildSelection: buildVWAPZScoreProjectionSelection,
+  },
+  {
+    id: "vwap_zscore_fixed_projection",
+    label: "VWAP Z Fixed Historical",
+    description:
+      "Click an anchor candle to freeze that candle's VWAP and VWAP deviation. Draws fixed +1/+2/+3/+4 and -1/-2/-3/-4 STD levels from the candle-time VWAP, plus fixed anchor high/low Z labels.",
+    category: "volatility",
+    buildSelection: buildVWAPZScoreFixedProjectionSelection,
   },
   {
     id: "support_prediction_wick_range",
@@ -7413,7 +7647,7 @@ function ChartPanelComponent({
           activeChartFunctionIdRef.current === "none"
             ? "support_prediction_wick_range"
             : activeChartFunctionIdRef.current;
-        drawProjectionSelection(getChartFunctionDefinition(functionId).buildSelection(nearestBar));
+        drawProjectionSelection(getChartFunctionDefinition(functionId).buildSelection(nearestBar, barsRef.current));
         projectionModeRef.current = false;
         setProjectionMode(false);
         return;
@@ -7555,7 +7789,7 @@ function ChartPanelComponent({
       const nearestBar = findNearestBarByTime(barsRef.current, clickedTime);
       if (!nearestBar) return;
 
-      drawProjectionSelection(getChartFunctionDefinition(activeChartFunctionIdRef.current).buildSelection(nearestBar));
+      drawProjectionSelection(getChartFunctionDefinition(activeChartFunctionIdRef.current).buildSelection(nearestBar, barsRef.current));
       setProjectionMode(false);
     };
 
