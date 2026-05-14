@@ -149,6 +149,7 @@ export async function fetchBars(
     lookback?: string;
     forceRefresh?: boolean;
     limit?: number;
+    signal?: AbortSignal;
   }
 ): Promise<BarsResponse> {
   const normalizedSymbol = symbol.trim().toUpperCase();
@@ -174,13 +175,17 @@ export async function fetchBars(
       return cached.data;
     }
 
-    const inflight = barsInflight.get(cacheKey);
-    if (inflight) {
-      return inflight;
+    // Only reuse an inflight request when the caller did not pass AbortController.
+    // Sharing a request with a caller-owned signal can accidentally cancel other charts.
+    if (!options?.signal) {
+      const inflight = barsInflight.get(cacheKey);
+      if (inflight) {
+        return inflight;
+      }
     }
   }
 
-  const request = fetch(`${API_BASE}/bars?${params.toString()}`)
+  const request = fetch(`${API_BASE}/bars?${params.toString()}`, { signal: options?.signal })
     .then((res) => parseJson<BarsResponse>(res))
     .then((data) => {
       barsCache.set(cacheKey, {
@@ -193,7 +198,9 @@ export async function fetchBars(
       barsInflight.delete(cacheKey);
     });
 
-  barsInflight.set(cacheKey, request);
+  if (!options?.signal) {
+    barsInflight.set(cacheKey, request);
+  }
   return request;
 }
 

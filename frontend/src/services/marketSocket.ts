@@ -80,6 +80,35 @@ function isSocketAlive(socket: WebSocket | null): boolean {
 
 class MarketSocketManager {
   private entries = new Map<string, SocketEntry>();
+  private paused = typeof document !== "undefined" ? document.visibilityState === "hidden" : false;
+
+  constructor() {
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", () => {
+        this.setPaused(document.visibilityState === "hidden");
+      });
+    }
+  }
+
+  private setPaused(paused: boolean): void {
+    if (this.paused === paused) return;
+    this.paused = paused;
+
+    if (paused) {
+      for (const entry of Array.from(this.entries.values())) {
+        this.disconnectButKeepListeners(entry, "page-hidden");
+      }
+      return;
+    }
+
+    for (const entry of Array.from(this.entries.values())) {
+      if (entry.listeners.size > 0) {
+        entry.shouldReconnect = true;
+        entry.intentionalClose = false;
+        this.scheduleConnect(entry, 250);
+      }
+    }
+  }
 
   subscribe(symbol: string, listener: MarketSocketListener): void {
     const key = symbol.trim().toUpperCase();
@@ -90,7 +119,7 @@ class MarketSocketManager {
     entry.shouldReconnect = true;
     entry.intentionalClose = false;
 
-    if (!isSocketAlive(entry.socket) && !entry.isConnecting) {
+    if (!this.paused && !isSocketAlive(entry.socket) && !entry.isConnecting) {
       this.scheduleConnect(entry, 0);
     }
   }
@@ -147,6 +176,31 @@ class MarketSocketManager {
     }
   }
 
+  private disconnectButKeepListeners(entry: SocketEntry, reason: string): void {
+    entry.intentionalClose = true;
+    entry.isConnecting = false;
+    this.clearTimers(entry);
+
+    const socket = entry.socket;
+    entry.socket = null;
+    entry.connectionId += 1;
+
+    if (!socket) return;
+
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+
+    try {
+      if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, reason);
+      }
+    } catch {
+      // Safe to ignore.
+    }
+  }
+
   private closeEntry(entry: SocketEntry, reason: string): void {
     entry.shouldReconnect = false;
     entry.intentionalClose = true;
@@ -174,7 +228,7 @@ class MarketSocketManager {
   }
 
   private scheduleConnect(entry: SocketEntry, delayMs: number): void {
-    if (!entry.shouldReconnect || entry.listeners.size === 0) return;
+    if (this.paused || !entry.shouldReconnect || entry.listeners.size === 0) return;
     if (entry.isConnecting || isSocketAlive(entry.socket)) return;
 
     if (entry.connectTimer != null) {
@@ -192,7 +246,7 @@ class MarketSocketManager {
   }
 
   private connect(entry: SocketEntry): void {
-    if (entry.isConnecting || isSocketAlive(entry.socket)) return;
+    if (this.paused || entry.isConnecting || isSocketAlive(entry.socket)) return;
     if (!entry.shouldReconnect || entry.listeners.size === 0) return;
 
     entry.isConnecting = true;

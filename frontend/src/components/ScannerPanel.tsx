@@ -219,7 +219,7 @@ export default function ScannerPanel({
   const [armedAlertSymbols, setArmedAlertSymbols] = useState<Set<string>>(() => new Set(readStoredAlertSymbols()));
   const [alertSymbolsLoading, setAlertSymbolsLoading] = useState(false);
 
-  const [autoRefresh, setAutoRefresh] = useState(() => readStoredBoolean(SCANNER_AUTO_REFRESH_STORAGE_KEY, true));
+  const [autoRefresh, setAutoRefresh] = useState(() => readStoredBoolean(SCANNER_AUTO_REFRESH_STORAGE_KEY, false));
   const [refreshSeconds, setRefreshSeconds] = useState(() => readStoredNumber(SCANNER_REFRESH_SECONDS_STORAGE_KEY, 20, 5, 300));
 
   const [workflow, setWorkflow] = useState<Workflow>("auto");
@@ -529,10 +529,9 @@ export default function ScannerPanel({
 
       if (cacheResponse.data && !cacheIsEmpty) {
         setData(cacheResponse.data as ScannerResponse);
-      } else if (!cacheResponse.last_error) {
-        // Important: if the background cache is empty, immediately run a manual refresh
-        // using the visible scanner settings. Otherwise the UI can sit on an old empty
-        // cache and make it look like Polygon is not returning data.
+      } else if (!cacheResponse.last_error && options?.forceRefresh) {
+        // Only run a heavy scanner refresh when the user explicitly presses refresh.
+        // Page switches should read the backend cache only to avoid freezing charts.
         const seeded = await refreshScannerCache(scannerRequestParams() as any);
         setCacheStatus(seeded);
         if (seeded.data) setData(seeded.data as ScannerResponse);
@@ -599,6 +598,7 @@ export default function ScannerPanel({
   useEffect(() => {
     if (!autoRefresh) return;
     const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       loadScanner();
     }, refreshSeconds * 1000);
     return () => window.clearInterval(id);
