@@ -85,6 +85,8 @@ const ALL_STUDIES_OFF: OverlayVisibility = {
   trendlineCloseAlerts: false,
 };
 
+const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_OFF;
+
 const PRESETS: Record<OverlayPreset, OverlayVisibility> = {
   clean: ALL_STUDIES_OFF,
   runner: ALL_STUDIES_ON,
@@ -109,23 +111,23 @@ const PRESETS: Record<OverlayPreset, OverlayVisibility> = {
   },
 };
 
-const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility";
+const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility.v2.defaultOff";
 
 function normalizeOverlayVisibility(value: Partial<OverlayVisibility> | null | undefined): OverlayVisibility {
   return {
-    ...ALL_STUDIES_ON,
+    ...DEFAULT_VISIBILITY,
     ...(value ?? {}),
   };
 }
 
 function loadSharedStudyVisibility(): OverlayVisibility {
-  if (typeof window === "undefined") return ALL_STUDIES_ON;
+  if (typeof window === "undefined") return DEFAULT_VISIBILITY;
   try {
     const raw = window.localStorage.getItem(SHARED_STUDY_VISIBILITY_STORAGE_KEY);
-    if (!raw) return ALL_STUDIES_ON;
+    if (!raw) return DEFAULT_VISIBILITY;
     return normalizeOverlayVisibility(JSON.parse(raw));
   } catch {
-    return ALL_STUDIES_ON;
+    return DEFAULT_VISIBILITY;
   }
 }
 

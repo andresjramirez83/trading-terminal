@@ -559,28 +559,28 @@ type LineVisibilityState = {
   fvgFlip: boolean;
 };
 
-const CHART_LINE_VISIBILITY_STORAGE_KEY = "trading-terminal.chart.lineVisibility.v2";
+const CHART_LINE_VISIBILITY_STORAGE_KEY = "trading-terminal.chart.lineVisibility.v3.defaultOff";
 
 const DEFAULT_LINE_VISIBILITY: LineVisibilityState = {
-  pmh: true,
-  vwap: true,
-  compression: true,
-  choch: true,
-  sessionBands: true,
-  projections: true,
-  trendlines: true,
-  fakeEngulfing: true,
-  significantCandles: true,
-  liquiditySweeps: true,
-  volumeSignals: true,
+  pmh: false,
+  vwap: false,
+  compression: false,
+  choch: false,
+  sessionBands: false,
+  projections: false,
+  trendlines: false,
+  fakeEngulfing: false,
+  significantCandles: false,
+  liquiditySweeps: false,
+  volumeSignals: false,
   volumeProfile: false,
-  previousRthHighLow: true,
-  trendlineCloseAlerts: true,
-  bodyBreakDots: true,
-  closeAbovePrevCloseDots: true,
-  atrExpansionCandles: true,
-  resistanceBreakoutConfirm: true,
-  fvgFlip: true,
+  previousRthHighLow: false,
+  trendlineCloseAlerts: false,
+  bodyBreakDots: false,
+  closeAbovePrevCloseDots: false,
+  atrExpansionCandles: false,
+  resistanceBreakoutConfirm: false,
+  fvgFlip: false,
 };
 
 function readStoredLineVisibility(): LineVisibilityState {

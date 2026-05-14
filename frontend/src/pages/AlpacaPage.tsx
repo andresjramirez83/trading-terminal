@@ -102,26 +102,26 @@ const OVERLAY_PRESETS: Record<OverlayPreset, OverlayVisibility> = {
   },
 };
 
-const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_ON;
+const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_OFF;
 
-const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility";
-const CHART_STUDY_VISIBILITY_STORAGE_KEY = "alpacaChartStudyVisibilityByTimeframe";
+const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility.v2.defaultOff";
+const CHART_STUDY_VISIBILITY_STORAGE_KEY = "alpacaChartStudyVisibilityByTimeframe.v2.defaultOff";
 type ChartTimeframe = Exclude<ExpandedChartKey, null>;
 type ChartStudyVisibilityMap = Record<ChartTimeframe, OverlayVisibility>;
 type ChartPresetMap = Record<ChartTimeframe, OverlayPreset>;
 
 function normalizeOverlayVisibility(value: Partial<OverlayVisibility> | null | undefined): OverlayVisibility {
   return {
-    ...ALL_STUDIES_ON,
+    ...DEFAULT_VISIBILITY,
     ...(value ?? {}),
   };
 }
 
 function buildDefaultChartStudyVisibilityMap(): ChartStudyVisibilityMap {
   return {
-    "1m": { ...ALL_STUDIES_ON },
-    "5m": { ...ALL_STUDIES_ON },
-    "15m": { ...ALL_STUDIES_ON },
+    "1m": { ...DEFAULT_VISIBILITY },
+    "5m": { ...DEFAULT_VISIBILITY },
+    "15m": { ...DEFAULT_VISIBILITY },
   };
 }
 
@@ -152,13 +152,13 @@ function countVisibleStudies(visibility: OverlayVisibility): number {
 }
 
 function loadSharedStudyVisibility(): OverlayVisibility {
-  if (typeof window === "undefined") return ALL_STUDIES_ON;
+  if (typeof window === "undefined") return DEFAULT_VISIBILITY;
   try {
     const raw = window.localStorage.getItem(SHARED_STUDY_VISIBILITY_STORAGE_KEY);
-    if (!raw) return ALL_STUDIES_ON;
+    if (!raw) return DEFAULT_VISIBILITY;
     return normalizeOverlayVisibility(JSON.parse(raw));
   } catch {
-    return ALL_STUDIES_ON;
+    return DEFAULT_VISIBILITY;
   }
 }
 
@@ -1062,7 +1062,7 @@ function AlpacaPage() {
       setChartStudyVisibility((prev) => {
         const nextMap: ChartStudyVisibilityMap = {
           ...prev,
-          [timeframe]: normalizeOverlayVisibility(updater(prev[timeframe] ?? ALL_STUDIES_ON)),
+          [timeframe]: normalizeOverlayVisibility(updater(prev[timeframe] ?? DEFAULT_VISIBILITY)),
         };
         saveChartStudyVisibilityMap(nextMap);
         return nextMap;
@@ -1298,6 +1298,9 @@ function AlpacaPage() {
         throw new Error("Calculated share quantity must be at least 1");
       }
 
+      const hasTarget = targetPriceValue > 0;
+      const hasStop = stopPriceValue > 0;
+
       const payload: PlaceAlpacaOrderRequest = {
         ...orderForm,
         mode,
@@ -1307,7 +1310,26 @@ function AlpacaPage() {
         type: orderForm.type,
         time_in_force: orderForm.time_in_force,
         extended_hours: orderForm.extended_hours ?? false,
-        limit_price: orderForm.type === "limit" ? entryLimitPriceValue : undefined,
+        limit_price:
+          orderForm.type === "limit"
+            ? normalizeAlpacaOrderPrice(entryLimitPriceValue)
+            : undefined,
+        order_class:
+          hasTarget && hasStop
+            ? "bracket"
+            : hasTarget || hasStop
+              ? "oto"
+              : undefined,
+        take_profit: hasTarget
+          ? {
+              limit_price: normalizeAlpacaOrderPrice(targetPriceValue),
+            }
+          : undefined,
+        stop_loss: hasStop
+          ? {
+              stop_price: normalizeAlpacaOrderPrice(stopPriceValue),
+            }
+          : undefined,
       };
 
       setOrderForm(payload);
@@ -1600,7 +1622,7 @@ function AlpacaPage() {
               background: openStudiesMenu === activeTimeframe ? "#0d2a55" : "#0a1f44",
             }}
           >
-            Studies {countVisibleStudies(chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)}/{STUDY_OPTIONS.length} ▾
+            Studies {countVisibleStudies(chartStudyVisibility[activeTimeframe] ?? DEFAULT_VISIBILITY)}/{STUDY_OPTIONS.length} ▾
           </button>
 
           {openStudiesMenu === activeTimeframe ? (
@@ -1625,7 +1647,7 @@ function AlpacaPage() {
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <div style={{ fontSize: 13, fontWeight: 900 }}>Chart Studies</div>
-                <div style={{ fontSize: 11, opacity: 0.75 }}>{countVisibleStudies(chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)} / {STUDY_OPTIONS.length} on</div>
+                <div style={{ fontSize: 11, opacity: 0.75 }}>{countVisibleStudies(chartStudyVisibility[activeTimeframe] ?? DEFAULT_VISIBILITY)} / {STUDY_OPTIONS.length} on</div>
               </div>
 
               <div style={{ display: "grid", gap: 8, paddingBottom: 8 }}>
@@ -1639,7 +1661,7 @@ function AlpacaPage() {
                       gap: 10,
                       padding: "7px 8px",
                       borderRadius: 8,
-                      background: (chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)[study.key] ? "rgba(14,165,233,0.14)" : "rgba(15,23,42,0.82)",
+                      background: (chartStudyVisibility[activeTimeframe] ?? DEFAULT_VISIBILITY)[study.key] ? "rgba(14,165,233,0.14)" : "rgba(15,23,42,0.82)",
                       border: "1px solid rgba(255,255,255,0.08)",
                       cursor: "pointer",
                       fontSize: 13,
@@ -1649,7 +1671,7 @@ function AlpacaPage() {
                     <span>{study.label}</span>
                     <input
                       type="checkbox"
-                      checked={Boolean((chartStudyVisibility[activeTimeframe] ?? ALL_STUDIES_ON)[study.key])}
+                      checked={Boolean((chartStudyVisibility[activeTimeframe] ?? DEFAULT_VISIBILITY)[study.key])}
                       onChange={() => toggleOverlayVisibility(activeTimeframe, study.key)}
                     />
                   </label>
@@ -1806,7 +1828,7 @@ function AlpacaPage() {
             enableLiveStream={isExpanded || (expandedChart === null && chartId === "main-15m")}
             legendDensity={isExpanded ? "full" : legendDensity}
             compactTools={!isExpanded && chartId.startsWith("bottom-")}
-            visibility={deferredChartStudyVisibility[timeframe] ?? ALL_STUDIES_ON}
+            visibility={deferredChartStudyVisibility[timeframe] ?? DEFAULT_VISIBILITY}
             onStatsUpdate={statsSetter}
             trendlineAction={trendlineAction}
             onRequestAddSymbolToWatchlist={handleAddSymbolToWatchlist}
@@ -2321,7 +2343,7 @@ function AlpacaPage() {
             </div>
 
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 10 }}>
-              Target and stop are planning values only for now.
+              Target and stop will be submitted as linked Alpaca bracket orders.
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
