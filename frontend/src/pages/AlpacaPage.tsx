@@ -42,6 +42,7 @@ const STUDY_OPTIONS: Array<{ key: keyof OverlayVisibility; label: string }> = [
   { key: "bodyBreakDots", label: "Black Dots" },
   { key: "closeAbovePrevCloseDots", label: "White Dots" },
   { key: "trendlineCloseAlerts", label: "Trendline Close Alerts" },
+  { key: "adaptiveRunnerRsi", label: "Adaptive Runner RSI" },
 ];
 
 const ALL_STUDIES_ON: OverlayVisibility = {
@@ -61,6 +62,7 @@ const ALL_STUDIES_ON: OverlayVisibility = {
   bodyBreakDots: true,
   closeAbovePrevCloseDots: true,
   trendlineCloseAlerts: true,
+  adaptiveRunnerRsi: true,
 };
 
 const ALL_STUDIES_OFF: OverlayVisibility = {
@@ -80,6 +82,7 @@ const ALL_STUDIES_OFF: OverlayVisibility = {
   bodyBreakDots: false,
   closeAbovePrevCloseDots: false,
   trendlineCloseAlerts: false,
+  adaptiveRunnerRsi: false,
 };
 
 const OVERLAY_PRESETS: Record<OverlayPreset, OverlayVisibility> = {

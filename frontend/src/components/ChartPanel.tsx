@@ -42,6 +42,7 @@ export type OverlayVisibility = {
   resistanceBreakoutConfirm?: boolean;
   trendlineCloseAlerts?: boolean;
   fvgFlip?: boolean;
+  adaptiveRunnerRsi?: boolean;
 };
 
 export type TrendlineControlAction =
@@ -557,6 +558,7 @@ type LineVisibilityState = {
   atrExpansionCandles: boolean;
   resistanceBreakoutConfirm: boolean;
   fvgFlip: boolean;
+  adaptiveRunnerRsi: boolean;
 };
 
 const CHART_LINE_VISIBILITY_STORAGE_KEY = "trading-terminal.chart.lineVisibility.v3.defaultOff";
@@ -581,6 +583,7 @@ const DEFAULT_LINE_VISIBILITY: LineVisibilityState = {
   atrExpansionCandles: false,
   resistanceBreakoutConfirm: false,
   fvgFlip: false,
+  adaptiveRunnerRsi: false,
 };
 
 function readStoredLineVisibility(): LineVisibilityState {
@@ -704,6 +707,23 @@ type SignalMarkerPoint = {
   color: string;
   direction: "up" | "down";
   dotSize?: number;
+};
+
+type AdaptiveRunnerRsiState = {
+  rsi: number | null;
+  slope: number;
+  zoneLow: number | null;
+  zoneHigh: number | null;
+  winRate: number | null;
+  avgMovePct: number | null;
+  score: number;
+  status: "bounce" | "watch" | "neutral" | "exhaustion" | "insufficient";
+  label: string;
+  detail: string;
+  color: string;
+  background: string;
+  border: string;
+  markers: SignalMarkerPoint[];
 };
 
 
@@ -1474,6 +1494,210 @@ function averageVolumeBefore(bars: Candle[], index: number, lookback = 20): numb
     .map((bar) => bar.volume)
     .filter((value) => Number.isFinite(value) && value > 0);
   return average(values);
+}
+
+function computeRsiValues(bars: Candle[], length = 14): Array<number | null> {
+  const out: Array<number | null> = new Array(bars.length).fill(null);
+  if (bars.length <= length) return out;
+
+  let gainSum = 0;
+  let lossSum = 0;
+
+  for (let i = 1; i <= length; i += 1) {
+    const change = bars[i].close - bars[i - 1].close;
+    if (change >= 0) gainSum += change;
+    else lossSum += Math.abs(change);
+  }
+
+  let avgGain = gainSum / length;
+  let avgLoss = lossSum / length;
+
+  const calc = () => {
+    if (avgLoss <= 0) return 100;
+    const rs = avgGain / avgLoss;
+    return 100 - 100 / (1 + rs);
+  };
+
+  out[length] = calc();
+
+  for (let i = length + 1; i < bars.length; i += 1) {
+    const change = bars[i].close - bars[i - 1].close;
+    const gain = Math.max(change, 0);
+    const loss = Math.max(-change, 0);
+    avgGain = (avgGain * (length - 1) + gain) / length;
+    avgLoss = (avgLoss * (length - 1) + loss) / length;
+    out[i] = calc();
+  }
+
+  return out;
+}
+
+function computeAdaptiveRunnerRsiState(bars: Candle[], timeframe: string): AdaptiveRunnerRsiState {
+  const empty: AdaptiveRunnerRsiState = {
+    rsi: null,
+    slope: 0,
+    zoneLow: null,
+    zoneHigh: null,
+    winRate: null,
+    avgMovePct: null,
+    score: 0,
+    status: "insufficient",
+    label: "RSI: learning",
+    detail: "Need more recent candles",
+    color: "#94a3b8",
+    background: "rgba(51,65,85,0.88)",
+    border: "1px solid rgba(148,163,184,0.35)",
+    markers: [],
+  };
+
+  if (bars.length < 45 || isDailyTimeframe(timeframe)) return empty;
+
+  const rsiValues = computeRsiValues(bars, 14);
+  const latestIndex = bars.length - 1;
+  const currentRsi = rsiValues[latestIndex];
+  const prevRsi = rsiValues[Math.max(0, latestIndex - 3)];
+  if (currentRsi == null || !Number.isFinite(currentRsi)) return empty;
+
+  const tfMinutes = timeframeToMinutes(timeframe);
+  const approxBarsPerDay = Math.max(1, Math.round((16 * 60) / Math.max(tfMinutes, 1)));
+  const recentWindow = Math.min(bars.length, Math.max(80, approxBarsPerDay * 10));
+  const start = Math.max(14, bars.length - recentWindow);
+  const horizon = Math.max(4, Math.min(16, Math.round(180 / Math.max(tfMinutes, 1))));
+  const bucketSize = 5;
+
+  type Bucket = { low: number; high: number; total: number; wins: number; weightedTotal: number; weightedWins: number; moveSum: number; score: number };
+  const buckets = new Map<number, Bucket>();
+
+  for (let i = start; i < bars.length - horizon; i += 1) {
+    const rsi = rsiValues[i];
+    const close = bars[i].close;
+    if (rsi == null || !Number.isFinite(rsi) || !Number.isFinite(close) || close <= 0) continue;
+
+    const future = bars.slice(i + 1, i + horizon + 1);
+    if (future.length < Math.max(3, Math.floor(horizon * 0.5))) continue;
+
+    const maxHigh = Math.max(...future.map((bar) => bar.high));
+    const minLow = Math.min(...future.map((bar) => bar.low));
+    const upPct = ((maxHigh - close) / close) * 100;
+    const downPct = ((minLow - close) / close) * 100;
+    const ageFromLatest = bars.length - 1 - i;
+    const recencyWeight = Math.max(0.25, 1 - ageFromLatest / recentWindow);
+    const minBouncePct = close < 2 ? 6 : close < 10 ? 4 : 2.5;
+    const isWin = upPct >= minBouncePct && upPct >= Math.abs(downPct) * 1.15;
+    const bucketKey = Math.floor(rsi / bucketSize) * bucketSize;
+    const low = Math.max(0, bucketKey);
+    const high = Math.min(100, bucketKey + bucketSize);
+    const bucket = buckets.get(bucketKey) ?? { low, high, total: 0, wins: 0, weightedTotal: 0, weightedWins: 0, moveSum: 0, score: 0 };
+    bucket.total += 1;
+    bucket.weightedTotal += recencyWeight;
+    if (isWin) {
+      bucket.wins += 1;
+      bucket.weightedWins += recencyWeight;
+      bucket.moveSum += upPct * recencyWeight;
+    }
+    buckets.set(bucketKey, bucket);
+  }
+
+  const candidates = Array.from(buckets.values())
+    .filter((bucket) => bucket.total >= 3 && bucket.weightedTotal > 0)
+    .map((bucket) => {
+      const winRate = bucket.weightedWins / bucket.weightedTotal;
+      const avgMove = bucket.weightedWins > 0 ? bucket.moveSum / bucket.weightedWins : 0;
+      const sampleBoost = Math.min(1, bucket.total / 8);
+      const bounceScore = winRate * 70 + Math.min(avgMove, 20) * 1.5 + sampleBoost * 10;
+      return { ...bucket, winRate, avgMove, score: bounceScore };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const best = candidates[0];
+  if (!best) {
+    return {
+      ...empty,
+      rsi: currentRsi,
+      slope: prevRsi == null ? 0 : currentRsi - prevRsi,
+      label: `RSI ${currentRsi.toFixed(1)} · learning`,
+      detail: "Not enough repeatable bounce behavior yet",
+    };
+  }
+
+  const slope = prevRsi == null || !Number.isFinite(prevRsi) ? 0 : currentRsi - prevRsi;
+  const inBounceZone = currentRsi >= best.low - 1 && currentRsi <= best.high + 1;
+  const nearBounceZone = currentRsi >= best.low - 4 && currentRsi <= best.high + 4;
+
+  let status: AdaptiveRunnerRsiState["status"] = "neutral";
+  let label = `RSI ${currentRsi.toFixed(1)} · neutral`;
+  let detail = `Best bounce zone ${best.low}-${best.high} · ${(best.winRate * 100).toFixed(0)}% hist`;
+  let color = "#cbd5e1";
+  let background = "rgba(15,23,42,0.88)";
+  let border = "1px solid rgba(148,163,184,0.28)";
+
+  if (inBounceZone && slope >= 0.15) {
+    status = "bounce";
+    label = `RSI BOUNCE ${currentRsi.toFixed(1)}`;
+    detail = `${best.low}-${best.high} zone · ${(best.winRate * 100).toFixed(0)}% · avg +${best.avgMove.toFixed(1)}% · slope up`;
+    color = "#bbf7d0";
+    background = "rgba(20,83,45,0.92)";
+    border = "1px solid rgba(134,239,172,0.62)";
+  } else if (nearBounceZone) {
+    status = "watch";
+    label = `RSI WATCH ${currentRsi.toFixed(1)}`;
+    detail = `${best.low}-${best.high} zone nearby · ${(best.winRate * 100).toFixed(0)}% hist · wait for curl/reclaim`;
+    color = "#fde68a";
+    background = "rgba(113,63,18,0.92)";
+    border = "1px solid rgba(253,224,71,0.58)";
+  } else if (currentRsi >= 72 && slope < 0) {
+    status = "exhaustion";
+    label = `RSI EXHAUST ${currentRsi.toFixed(1)}`;
+    detail = "High RSI turning down · protect gains / wait for reset";
+    color = "#fecaca";
+    background = "rgba(127,29,29,0.92)";
+    border = "1px solid rgba(252,165,165,0.58)";
+  }
+
+  const markers: SignalMarkerPoint[] = [];
+  for (let i = Math.max(18, bars.length - 120); i < bars.length; i += 1) {
+    const rsi = rsiValues[i];
+    const prev = rsiValues[Math.max(0, i - 3)];
+    if (rsi == null || prev == null || !Number.isFinite(rsi) || !Number.isFinite(prev)) continue;
+    const localSlope = rsi - prev;
+    const enteredBounceZone = rsi >= best.low - 1 && rsi <= best.high + 1 && localSlope >= 0.15;
+    const exhaustionTurn = rsi >= 72 && localSlope < -1.0;
+
+    if (enteredBounceZone) {
+      markers.push({
+        time: toChartTime(bars[i].time),
+        price: bars[i].low,
+        label: `RSI Bounce ${rsi.toFixed(1)} (${best.low}-${best.high})`,
+        color: "#22c55e",
+        direction: "up",
+      });
+    } else if (exhaustionTurn) {
+      markers.push({
+        time: toChartTime(bars[i].time),
+        price: bars[i].high,
+        label: `RSI Exhaust ${rsi.toFixed(1)}`,
+        color: "#f97316",
+        direction: "down",
+      });
+    }
+  }
+
+  return {
+    rsi: currentRsi,
+    slope,
+    zoneLow: best.low,
+    zoneHigh: best.high,
+    winRate: best.winRate,
+    avgMovePct: best.avgMove,
+    score: Math.max(0, Math.min(100, Math.round(best.score))),
+    status,
+    label,
+    detail,
+    color,
+    background,
+    border,
+    markers: markers.slice(-8),
+  };
 }
 
 function computeLiquiditySweepSignals(bars: Candle[]): SignalMarkerPoint[] {
@@ -4570,6 +4794,7 @@ function ChartPanelComponent({
   const latestCloseAbovePrevCloseDotMarkersRef = useRef<SignalMarkerPoint[]>([]);
   const latestAtrExpansionMarkersRef = useRef<SignalMarkerPoint[]>([]);
   const latestResistanceBreakoutMarkersRef = useRef<SignalMarkerPoint[]>([]);
+  const latestAdaptiveRunnerRsiMarkersRef = useRef<SignalMarkerPoint[]>([]);
   const latestChochMarkersRef = useRef<ChochMarkerPoint[]>([]);
   const latestLineVisibilityRef = useRef<LineVisibilityState>({
     pmh: visibility.pmh,
@@ -4591,6 +4816,7 @@ function ChartPanelComponent({
     atrExpansionCandles: visibility.atrExpansionCandles ?? true,
     resistanceBreakoutConfirm: visibility.resistanceBreakoutConfirm ?? true,
     fvgFlip: visibility.fvgFlip ?? true,
+    adaptiveRunnerRsi: visibility.adaptiveRunnerRsi ?? true,
   });
   const onStatsUpdateRef = useRef(onStatsUpdate);
   const autoFitPendingRef = useRef(true);
@@ -4744,6 +4970,8 @@ function ChartPanelComponent({
   const [closeAbovePrevCloseDotMarkers, setCloseAbovePrevCloseDotMarkers] = useState<MarkerOverlay[]>([]);
   const [atrExpansionMarkers, setAtrExpansionMarkers] = useState<MarkerOverlay[]>([]);
   const [resistanceBreakoutMarkers, setResistanceBreakoutMarkers] = useState<MarkerOverlay[]>([]);
+  const [adaptiveRunnerRsiMarkers, setAdaptiveRunnerRsiMarkers] = useState<MarkerOverlay[]>([]);
+  const [adaptiveRunnerRsiState, setAdaptiveRunnerRsiState] = useState<AdaptiveRunnerRsiState | null>(null);
   const [trendlineHandleOverlays, setTrendlineHandleOverlays] = useState<TrendlineHandleOverlay[]>([]);
   const [trendlineFocusOverlay, setTrendlineFocusOverlay] = useState<TrendlineFocusOverlay | null>(null);
   const [orderLineOverlays, setOrderLineOverlays] = useState<OrderLineOverlay[]>([]);
@@ -4830,6 +5058,7 @@ function ChartPanelComponent({
       atrExpansionCandles: (visibility.atrExpansionCandles ?? true) && lineVisibility.atrExpansionCandles,
       resistanceBreakoutConfirm: (visibility.resistanceBreakoutConfirm ?? true) && lineVisibility.resistanceBreakoutConfirm,
       fvgFlip: (visibility.fvgFlip ?? true) && lineVisibility.fvgFlip,
+      adaptiveRunnerRsi: (visibility.adaptiveRunnerRsi ?? true) && lineVisibility.adaptiveRunnerRsi,
     }),
     [
       visibility.pmh,
@@ -4851,6 +5080,7 @@ function ChartPanelComponent({
       visibility.atrExpansionCandles,
       visibility.resistanceBreakoutConfirm,
       visibility.fvgFlip,
+      visibility.adaptiveRunnerRsi,
       lineVisibility,
     ]
   );
@@ -5122,6 +5352,7 @@ function ChartPanelComponent({
 
       latestSignalMarkersRef.current = [];
       latestChochMarkersRef.current = [];
+      latestAdaptiveRunnerRsiMarkersRef.current = [];
       resetTapeSnapshot(liveTapeRef.current);
       setSignalMarkers([]);
       setTrendlineCloseMarkers([]);
@@ -6524,6 +6755,30 @@ function ChartPanelComponent({
       setVwapMarkers([]);
     }
 
+    if (latestLineVisibilityRef.current.adaptiveRunnerRsi) {
+      const nextAdaptiveRsiMarkers: MarkerOverlay[] = [];
+      for (const marker of latestAdaptiveRunnerRsiMarkersRef.current) {
+        const x = timeScale.timeToCoordinate(marker.time as Time);
+        const y = candleSeries.priceToCoordinate(marker.price);
+
+        if (x == null || y == null || !Number.isFinite(x) || !Number.isFinite(y)) {
+          continue;
+        }
+
+        nextAdaptiveRsiMarkers.push({
+          left: x,
+          top: y,
+          label: marker.label,
+          color: marker.color,
+          direction: marker.direction,
+          dotSize: marker.dotSize,
+        });
+      }
+      setAdaptiveRunnerRsiMarkers(nextAdaptiveRsiMarkers);
+    } else {
+      setAdaptiveRunnerRsiMarkers([]);
+    }
+
     if (latestLineVisibilityRef.current.choch) {
       const nextChochMarkers: MarkerOverlay[] = [];
       for (const marker of latestChochMarkersRef.current) {
@@ -7142,6 +7397,10 @@ function ChartPanelComponent({
       latestCloseAbovePrevCloseDotMarkersRef.current = bodyBreakDotSignals.whiteDots;
       latestAtrExpansionMarkersRef.current = atrBreakoutSignals.expansionDots;
       latestResistanceBreakoutMarkersRef.current = atrBreakoutSignals.breakoutConfirmations;
+
+      const adaptiveRsiState = computeAdaptiveRunnerRsiState(bars, timeframe);
+      latestAdaptiveRunnerRsiMarkersRef.current = adaptiveRsiState.markers;
+      setAdaptiveRunnerRsiState(adaptiveRsiState);
 
       const volumeData: VolumePoint[] = bars.map((bar) => ({
         time: toChartTime(bar.time),
@@ -8176,6 +8435,7 @@ function ChartPanelComponent({
         setSessionBands([]);
         latestSignalMarkersRef.current = [];
         latestChochMarkersRef.current = [];
+        latestAdaptiveRunnerRsiMarkersRef.current = [];
         resetTapeSnapshot(liveTapeRef.current);
 
         candleSeriesRef.current?.setData([]);
@@ -8606,6 +8866,24 @@ function ChartPanelComponent({
         >
           {legend.session.currentSessionLabel}
         </div>
+        {effectiveLineVisibility.adaptiveRunnerRsi && adaptiveRunnerRsiState ? (
+          <div
+            style={{
+              ...legendBoxStyle,
+              pointerEvents: "auto",
+              padding: "5px 8px",
+              color: adaptiveRunnerRsiState.color,
+              background: adaptiveRunnerRsiState.background,
+              border: adaptiveRunnerRsiState.border,
+              boxShadow: adaptiveRunnerRsiState.status === "bounce" ? "0 0 14px rgba(34,197,94,0.32)" : undefined,
+            }}
+            title={adaptiveRunnerRsiState.detail}
+          >
+            {adaptiveRunnerRsiState.label}
+            {adaptiveRunnerRsiState.zoneLow != null && adaptiveRunnerRsiState.zoneHigh != null ? ` · ${adaptiveRunnerRsiState.zoneLow}-${adaptiveRunnerRsiState.zoneHigh}` : ""}
+          </div>
+        ) : null}
+
         <button
           type="button"
           onClick={() => setLegendExpanded((prev) => !prev)}
@@ -8643,6 +8921,11 @@ function ChartPanelComponent({
             ) : null}
             <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: controlState.color }}>CTRL: {controlState.label}</div>
             <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: controlState.color }}>{controlState.detail}</div>
+            {effectiveLineVisibility.adaptiveRunnerRsi && adaptiveRunnerRsiState ? (
+              <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: adaptiveRunnerRsiState.color }}>
+                RSI Hist: {adaptiveRunnerRsiState.winRate != null ? `${(adaptiveRunnerRsiState.winRate * 100).toFixed(0)}%` : "--"} · Avg: {adaptiveRunnerRsiState.avgMovePct != null ? `+${adaptiveRunnerRsiState.avgMovePct.toFixed(1)}%` : "--"} · Score: {adaptiveRunnerRsiState.score}
+              </div>
+            ) : null}
             {legend.compressionLabel ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#c4b5fd" }}>{legend.compressionLabel}</div> : null}
             {pendingTrendPoint ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#7dd3fc" }}>TL P1: {formatPacificTime(pendingTrendPoint.time, false)} @ {formatPrice(pendingTrendPoint.price)}</div> : null}
             {trendlines.length > 0 ? <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#67e8f9" }}>TL: {trendlines.length}</div> : null}
@@ -9108,6 +9391,7 @@ function ChartPanelComponent({
               ["resistanceBreakoutConfirm", "Resistance Breakout Confirm"],
               ["trendlineCloseAlerts", "Trendline Close Alerts"],
               ["fvgFlip", "FVG Flip + Quality"],
+              ["adaptiveRunnerRsi", "Adaptive Runner RSI"],
             ] as const).map(([key, label]) => {
               const isOn = lineVisibility[key];
               const disabled =
@@ -10502,6 +10786,64 @@ function ChartPanelComponent({
                   {getSignalLabelText(labelGroup, fakeEngulfingMarkers, marker, idx)}
                 </div>
           </div>
+          );
+        }) : null}
+
+        {effectiveLineVisibility.adaptiveRunnerRsi ? adaptiveRunnerRsiMarkers.map((marker, idx) => {
+          const labelLane = 2 + getMarkerLabelStack(adaptiveRunnerRsiMarkers, marker, idx);
+          const labelGroup = "adaptiversi";
+          const labelExpanded = isSignalLabelExpanded(labelGroup, marker, idx);
+
+          return (
+            <div key={`${marker.label}-${idx}-${marker.left}-adaptive-rsi`}>
+              <div
+                style={
+                  marker.direction === "up"
+                    ? {
+                        position: "absolute",
+                        left: marker.left - 8,
+                        top: marker.top + 6,
+                        width: 0,
+                        height: 0,
+                        borderLeft: "8px solid transparent",
+                        borderRight: "8px solid transparent",
+                        borderBottom: `14px solid ${marker.color}`,
+                        filter: `drop-shadow(0 0 7px ${marker.color})`,
+                        zIndex: 20,
+                      }
+                    : {
+                        position: "absolute",
+                        left: marker.left - 8,
+                        top: marker.top - 22,
+                        width: 0,
+                        height: 0,
+                        borderLeft: "8px solid transparent",
+                        borderRight: "8px solid transparent",
+                        borderTop: `14px solid ${marker.color}`,
+                        filter: `drop-shadow(0 0 7px ${marker.color})`,
+                        zIndex: 20,
+                      }
+                }
+              />
+              <div
+                style={getVerticalMarkerLabelStyle(
+                  marker,
+                  labelLane,
+                  `${marker.color}22`,
+                  `1px solid ${marker.color}66`,
+                  marker.color,
+                  0,
+                  labelExpanded
+                )}
+                title={getSignalLabelTitle(labelGroup, marker, idx)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleSignalLabel(labelGroup, marker, idx);
+                }}
+              >
+                {getSignalLabelText(labelGroup, adaptiveRunnerRsiMarkers, marker, idx)}
+              </div>
+            </div>
           );
         }) : null}
 
