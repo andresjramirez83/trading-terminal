@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -52,6 +52,10 @@ def candle_body(bar: Dict[str, float]) -> float:
     return abs(float(bar["close"]) - float(bar["open"]))
 
 
+def upper_wick(bar: Dict[str, float]) -> float:
+    return max(0.0, float(bar["high"]) - max(float(bar["open"]), float(bar["close"])))
+
+
 def lower_wick(bar: Dict[str, float]) -> float:
     return max(0.0, min(float(bar["open"]), float(bar["close"])) - float(bar["low"]))
 
@@ -67,38 +71,34 @@ def pct_change(current: float, previous: float) -> float:
     return ((current - previous) / previous) * 100.0
 
 
-def calc_atr(bars: List[Dict[str, float]], period: int = 14) -> float:
-    if len(bars) < 2:
-        return 0.0
-    trs: List[float] = []
-    for i in range(1, len(bars)):
-        high = float(bars[i]["high"])
-        low = float(bars[i]["low"])
-        prev_close = float(bars[i - 1]["close"])
-        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    return average(trs[-period:])
+def et_dt(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(ET)
 
 
-def ms_to_iso(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
-
-
-def ms_to_et_label(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(ET).strftime("%m/%d %H:%M")
-
-
-def iso_to_dt(value: Any) -> Optional[datetime]:
-    try:
-        text = str(value or "")
-        if not text:
-            return None
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return None
+def et_time_label(ms: int) -> str:
+    return et_dt(ms).strftime("%m/%d %H:%M")
 
 
 def current_trade_date() -> str:
     return datetime.now(ET).strftime("%Y-%m-%d")
+
+
+def parse_target_hours(raw: Any) -> List[int]:
+    if raw is None or raw == "":
+        return [6, 7]
+    if isinstance(raw, (list, tuple, set)):
+        values = raw
+    else:
+        values = str(raw).replace(";", ",").split(",")
+    out: List[int] = []
+    for item in values:
+        try:
+            hour = int(str(item).strip())
+        except Exception:
+            continue
+        if 0 <= hour <= 23 and hour not in out:
+            out.append(hour)
+    return sorted(out) or [6, 7]
 
 
 async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
@@ -125,8 +125,8 @@ async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "Order
 
 class HourlySweepRunnerScanner(ScannerBase):
     id = "hourly_sweep_runner"
-    name = "1H Expansion Sweep Runner"
-    description = "Remembers strong 1H upside runners, then tracks pullback-low sweeps and reclaim continuation setups."
+    name = "6/7 Hour Liquidity Sweep Scanner"
+    description = "Scans active stocks for liquidity sweeps of the 6:00 and 7:00 ET hour range."
 
     async def run(
         self,
@@ -134,67 +134,65 @@ class HourlySweepRunnerScanner(ScannerBase):
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        max_symbols = int(kwargs.get("max_symbols", 30))
+        max_symbols = int(kwargs.get("max_symbols", 40))
         min_price = float(kwargs.get("min_price", 0.5))
         max_price = float(kwargs.get("max_price", 20.0))
         min_volume = int(kwargs.get("min_volume", 150_000))
-        min_expansion_score = float(kwargs.get("min_expansion_score", 66.0))
-        min_atr_mult = float(kwargs.get("min_atr_mult", 1.45))
-        min_rvol = float(kwargs.get("min_rvol", 1.35))
-        min_body_pct = float(kwargs.get("min_body_pct", 0.55))
-        min_close_position_pct = float(kwargs.get("min_close_position_pct", 0.66))
-        structure_lookback = int(kwargs.get("structure_lookback", 12))
-        expansion_lookback_bars = int(kwargs.get("expansion_lookback_bars", 10))
-        memory_hours = int(kwargs.get("memory_hours", 36))
-        confirm_timeframe = str(kwargs.get("confirm_timeframe", "5m") or "5m").lower().strip()
-        if confirm_timeframe not in {"1m", "5m", "15m"}:
-            confirm_timeframe = "5m"
+        min_sweep_score = float(kwargs.get("min_sweep_score", 55.0))
+        min_rvol = float(kwargs.get("min_rvol", 1.0))
+        sweep_buffer_pct = float(kwargs.get("sweep_buffer_pct", 0.001))
+        recent_bars = int(kwargs.get("recent_bars", 36))
+        include_ready = str(kwargs.get("include_ready", "false")).lower() in {"1", "true", "yes", "on"}
+        timeframe = str(kwargs.get("timeframe", kwargs.get("confirm_timeframe", "5m")) or "5m").lower().strip()
+        if timeframe not in {"1m", "5m", "15m"}:
+            timeframe = "5m"
+        target_hours = parse_target_hours(kwargs.get("target_hours", kwargs.get("hours", "6,7")))
         extra_symbols = [normalize_symbol(x) for x in kwargs.get("extra_symbols", []) or []]
         extra_symbols = [x for x in extra_symbols if x]
 
-        memory = self._load_memory(snapshot_store)
-        memory = self._prune_memory(memory, memory_hours=memory_hours)
-
-        universe = await build_snapshot_universe(polygon, limit=max(80, max_symbols * 6))
-        candidate_symbols = list(OrderedDict((s, None) for s in list(memory.keys()) + extra_symbols + list(universe.keys())).keys())
+        universe = await build_snapshot_universe(polygon, limit=max(100, max_symbols * 6))
+        candidate_symbols = list(OrderedDict((s, None) for s in extra_symbols + list(universe.keys())).keys())
 
         rows: List[Dict[str, Any]] = []
         checked = 0
-        remembered_count_before = len(memory)
+        reject_counts: Dict[str, int] = {
+            "no_bars": 0,
+            "no_hour_range": 0,
+            "price": 0,
+            "volume": 0,
+            "no_sweep": 0,
+            "score": 0,
+            "passed": 0,
+        }
 
-        for symbol in candidate_symbols[: max_symbols * 10]:
+        for symbol in candidate_symbols[: max_symbols * 8]:
             checked += 1
-            row, remembered = await self._scan_symbol(
+            row, reject_reason = await self._scan_symbol(
                 polygon,
                 symbol,
-                memory.get(symbol),
+                timeframe=timeframe,
+                target_hours=target_hours,
                 min_price=min_price,
                 max_price=max_price,
                 min_volume=min_volume,
-                min_expansion_score=min_expansion_score,
-                min_atr_mult=min_atr_mult,
+                min_sweep_score=min_sweep_score,
                 min_rvol=min_rvol,
-                min_body_pct=min_body_pct,
-                min_close_position_pct=min_close_position_pct,
-                structure_lookback=structure_lookback,
-                expansion_lookback_bars=expansion_lookback_bars,
-                memory_hours=memory_hours,
-                confirm_timeframe=confirm_timeframe,
+                sweep_buffer_pct=sweep_buffer_pct,
+                recent_bars=recent_bars,
+                include_ready=include_ready,
             )
-            if remembered is not None:
-                memory[symbol] = remembered
             if row is not None:
                 rows.append(row)
-
-        memory = self._prune_memory(memory, memory_hours=memory_hours)
-        self._save_memory(snapshot_store, memory)
+                reject_counts["passed"] += 1
+            elif reject_reason in reject_counts:
+                reject_counts[reject_reason] += 1
 
         rows.sort(
             key=lambda item: (
                 safe_float(item.get("runner_score")),
-                safe_float(item.get("sweep_score")),
-                safe_float(item.get("expansion_score")),
+                1 if item.get("phase") == "CONFIRMED" else 0,
                 safe_float(item.get("rvol")),
+                safe_float(item.get("volume")),
             ),
             reverse=True,
         )
@@ -204,398 +202,342 @@ class HourlySweepRunnerScanner(ScannerBase):
             "scanner_id": self.id,
             "scanner_name": self.name,
             "description": self.description,
-            "workflow": "remembered_1h_expansion_sweep",
-            "timeframe": "1h",
-            "confirm_timeframe": confirm_timeframe,
+            "workflow": "hour_range_liquidity_sweep",
+            "timeframe": timeframe,
+            "confirm_timeframe": timeframe,
             "trade_day": current_trade_date(),
             "count": len(rows),
             "rows": rows,
             "meta": {
                 "checked": checked,
-                "remembered_before": remembered_count_before,
-                "remembered_after": len(memory),
-                "memory_hours": memory_hours,
+                "target_hours_et": target_hours,
+                "range_window_et": f"{min(target_hours):02d}:00-{max(target_hours) + 1:02d}:00",
+                "reject_counts": reject_counts,
                 "active_filters": {
                     "max_symbols": max_symbols,
                     "min_price": min_price,
                     "max_price": max_price,
                     "min_volume": min_volume,
-                    "min_expansion_score": min_expansion_score,
-                    "min_atr_mult": min_atr_mult,
+                    "min_sweep_score": min_sweep_score,
                     "min_rvol": min_rvol,
-                    "min_body_pct": min_body_pct,
-                    "min_close_position_pct": min_close_position_pct,
-                    "structure_lookback": structure_lookback,
-                    "expansion_lookback_bars": expansion_lookback_bars,
-                    "confirm_timeframe": confirm_timeframe,
+                    "sweep_buffer_pct": sweep_buffer_pct,
+                    "recent_bars": recent_bars,
+                    "include_ready": include_ready,
+                    "timeframe": timeframe,
+                    "target_hours": target_hours,
                 },
             },
         }
-
-    def _load_memory(self, snapshot_store: ScannerSnapshotStore) -> Dict[str, Dict[str, Any]]:
-        payload = snapshot_store.load_latest_snapshot(self.id, "memory") or {}
-        rows = payload.get("rows") if isinstance(payload, dict) else None
-        memory: Dict[str, Dict[str, Any]] = {}
-        for item in rows or []:
-            symbol = normalize_symbol(item.get("symbol"))
-            if symbol:
-                memory[symbol] = dict(item)
-        return memory
-
-    def _save_memory(self, snapshot_store: ScannerSnapshotStore, memory: Dict[str, Dict[str, Any]]) -> None:
-        payload = {
-            "scanner_id": self.id,
-            "session": "memory",
-            "trade_date": current_trade_date(),
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "count": len(memory),
-            "rows": list(memory.values()),
-        }
-        snapshot_store.save_snapshot(self.id, "memory", current_trade_date(), payload)
-
-    def _prune_memory(self, memory: Dict[str, Dict[str, Any]], *, memory_hours: int) -> Dict[str, Dict[str, Any]]:
-        now = datetime.now(timezone.utc)
-        out: Dict[str, Dict[str, Any]] = {}
-        for symbol, item in memory.items():
-            detected = iso_to_dt(item.get("detected_at")) or iso_to_dt(item.get("updated_at"))
-            if detected is None:
-                continue
-            if detected.tzinfo is None:
-                detected = detected.replace(tzinfo=timezone.utc)
-            if now - detected <= timedelta(hours=max(1, memory_hours)):
-                out[symbol] = item
-        return out
 
     async def _scan_symbol(
         self,
         polygon: PolygonService,
         symbol: str,
-        memory_item: Optional[Dict[str, Any]],
         *,
+        timeframe: str,
+        target_hours: List[int],
         min_price: float,
         max_price: float,
         min_volume: int,
-        min_expansion_score: float,
-        min_atr_mult: float,
+        min_sweep_score: float,
         min_rvol: float,
-        min_body_pct: float,
-        min_close_position_pct: float,
-        structure_lookback: int,
-        expansion_lookback_bars: int,
-        memory_hours: int,
-        confirm_timeframe: str,
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        sweep_buffer_pct: float,
+        recent_bars: int,
+        include_ready: bool,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
         try:
-            hourly_raw = await polygon.get_bars(symbol, "1h")
+            raw = await polygon.get_bars(symbol, timeframe)
         except Exception as exc:
-            print(f"[hourly-sweep-runner] 1h bars failed {symbol}: {exc}", flush=True)
-            return None, None
+            print(f"[hourly-sweep-runner] bars failed {symbol} {timeframe}: {exc}", flush=True)
+            return None, "no_bars"
 
-        hourly = valid_bars(hourly_raw)
-        if len(hourly) < 25:
-            return None, None
+        bars = valid_bars(raw)
+        if len(bars) < 20:
+            return None, "no_bars"
 
-        expansion = self._find_recent_expansion(
-            hourly,
-            min_price=min_price,
-            max_price=max_price,
-            min_volume=min_volume,
-            min_expansion_score=min_expansion_score,
-            min_atr_mult=min_atr_mult,
+        hour_range = self._build_target_hour_range(bars, target_hours)
+        if hour_range is None:
+            return None, "no_hour_range"
+
+        last = bars[-1]
+        last_price = safe_float(last["close"])
+        total_volume = int(sum(safe_float(b["volume"]) for b in self._todays_bars(bars)))
+        if last_price < min_price or (max_price > 0 and last_price > max_price):
+            return None, "price"
+        if total_volume < min_volume:
+            return None, "volume"
+
+        state = self._detect_hour_sweep(
+            bars,
+            hour_range,
             min_rvol=min_rvol,
-            min_body_pct=min_body_pct,
-            min_close_position_pct=min_close_position_pct,
-            structure_lookback=structure_lookback,
-            expansion_lookback_bars=expansion_lookback_bars,
+            sweep_buffer_pct=sweep_buffer_pct,
+            recent_bars=recent_bars,
+            include_ready=include_ready,
         )
-
-        remembered: Optional[Dict[str, Any]] = None
-        if expansion is not None:
-            remembered = {
-                "symbol": symbol,
-                "detected_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "memory_hours": memory_hours,
-                "expansion_time": expansion["expansion_time"],
-                "expansion_time_label": expansion["expansion_time_label"],
-                "expansion_high": expansion["expansion_high"],
-                "expansion_low": expansion["expansion_low"],
-                "expansion_mid": expansion["expansion_mid"],
-                "expansion_close": expansion["expansion_close"],
-                "expansion_score": expansion["expansion_score"],
-                "atr_mult": expansion["atr_mult"],
-                "rvol": expansion["rvol"],
-                "body_pct": expansion["body_pct"],
-                "close_position_pct": expansion["close_position_pct"],
-                "structure_break": expansion["structure_break"],
-            }
-        elif memory_item is not None:
-            remembered = dict(memory_item)
-            remembered["updated_at"] = datetime.now(timezone.utc).isoformat()
-        else:
-            return None, None
-
-        try:
-            confirm_raw = await polygon.get_bars(symbol, confirm_timeframe)
-        except Exception as exc:
-            print(f"[hourly-sweep-runner] confirm bars failed {symbol} {confirm_timeframe}: {exc}", flush=True)
-            confirm_raw = []
-
-        confirm_bars = valid_bars(confirm_raw)
-        state = self._classify_sweep_state(remembered, confirm_bars)
+        if state is None:
+            return None, "no_sweep"
+        if safe_float(state.get("runner_score")) < min_sweep_score and state.get("phase") != "READY":
+            return None, "score"
 
         row = {
             "symbol": symbol,
-            "timeframe": "1h",
-            "confirm_timeframe": confirm_timeframe,
+            "timeframe": timeframe,
+            "confirm_timeframe": timeframe,
             "last_price": state["last_price"],
             "price": state["last_price"],
-            "runner_type": "hourly_sweep",
+            "volume": total_volume,
+            "runner_type": "six_seven_hour_sweep",
+            "setup": state["setup"],
             "setup_state": state["setup_state"],
             "phase": state["phase"],
+            "direction": state["direction"],
             "runner_score": state["runner_score"],
             "sweep_score": state["sweep_score"],
-            "expansion_score": remembered.get("expansion_score"),
-            "atr_mult": remembered.get("atr_mult"),
-            "rvol": remembered.get("rvol"),
-            "body_pct": remembered.get("body_pct"),
-            "close_position_pct": remembered.get("close_position_pct"),
-            "structure_break": remembered.get("structure_break"),
-            "expansion_time": remembered.get("expansion_time"),
-            "expansion_time_label": remembered.get("expansion_time_label"),
-            "expansion_high": remembered.get("expansion_high"),
-            "expansion_low": remembered.get("expansion_low"),
-            "expansion_mid": remembered.get("expansion_mid"),
-            "pullback_low": state.get("pullback_low"),
-            "pullback_high": state.get("pullback_high"),
-            "sweep_low": state.get("sweep_low"),
+            "rvol": state["rvol"],
+            "range_high": hour_range["range_high"],
+            "range_low": hour_range["range_low"],
+            "range_mid": hour_range["range_mid"],
+            "range_pct": hour_range["range_pct"],
+            "range_start_time": hour_range["range_start_time"],
+            "range_end_time": hour_range["range_end_time"],
+            "range_label": hour_range["range_label"],
+            "sweep_time": state.get("sweep_time"),
+            "sweep_time_label": state.get("sweep_time_label"),
+            "sweep_price": state.get("sweep_price"),
             "sweep_depth_pct": state.get("sweep_depth_pct"),
             "reclaim_close": state.get("reclaim_close"),
-            "bars_since_expansion": state.get("bars_since_expansion"),
+            "reject_close": state.get("reject_close"),
             "bars_since_sweep": state.get("bars_since_sweep"),
             "notes": state["notes"],
-            "source": "remembered" if expansion is None else "fresh_expansion",
+            "source": "live_hour_range_sweep",
             "extra": {
-                "remembered": True,
-                "detected_at": remembered.get("detected_at"),
-                "updated_at": remembered.get("updated_at"),
+                "target_hours_et": target_hours,
+                "sweep_buffer_pct": sweep_buffer_pct,
+                "range_bar_count": hour_range["bar_count"],
             },
         }
-        return row, remembered
+        return row, "passed"
 
-    def _find_recent_expansion(
+    def _todays_bars(self, bars: List[Dict[str, float]]) -> List[Dict[str, float]]:
+        today = current_trade_date()
+        return [b for b in bars if et_dt(int(b["time"])).strftime("%Y-%m-%d") == today]
+
+    def _build_target_hour_range(
         self,
         bars: List[Dict[str, float]],
-        *,
-        min_price: float,
-        max_price: float,
-        min_volume: int,
-        min_expansion_score: float,
-        min_atr_mult: float,
-        min_rvol: float,
-        min_body_pct: float,
-        min_close_position_pct: float,
-        structure_lookback: int,
-        expansion_lookback_bars: int,
+        target_hours: List[int],
     ) -> Optional[Dict[str, Any]]:
-        best: Optional[Dict[str, Any]] = None
-        start_index = max(20, len(bars) - max(1, expansion_lookback_bars))
+        today = current_trade_date()
+        target_set = set(target_hours)
+        range_bars: List[Dict[str, float]] = []
 
-        for i in range(start_index, len(bars)):
-            bar = bars[i]
-            prior = bars[max(0, i - 30):i]
-            if len(prior) < 14:
+        for bar in bars:
+            dt = et_dt(int(bar["time"]))
+            if dt.strftime("%Y-%m-%d") != today:
                 continue
+            if dt.hour in target_set:
+                range_bars.append(bar)
 
-            close = safe_float(bar["close"])
-            open_price = safe_float(bar["open"])
+        if not range_bars:
+            return None
+
+        range_high = max(safe_float(b["high"]) for b in range_bars)
+        range_low = min(safe_float(b["low"]) for b in range_bars)
+        if range_high <= 0 or range_low <= 0 or range_high <= range_low:
+            return None
+
+        range_start = min(int(b["time"]) for b in range_bars)
+        range_end_hour = max(target_hours) + 1
+        last_dt = et_dt(max(int(b["time"]) for b in range_bars))
+        range_end_dt = datetime.combine(last_dt.date(), time(hour=min(range_end_hour, 23), minute=0), tzinfo=ET)
+        if range_end_hour >= 24:
+            range_end_dt = datetime.combine(last_dt.date(), time(hour=23, minute=59), tzinfo=ET)
+        range_end_ms = int(range_end_dt.astimezone(timezone.utc).timestamp() * 1000)
+        range_pct = pct_change(range_high, range_low)
+
+        return {
+            "range_high": round(range_high, 4),
+            "range_low": round(range_low, 4),
+            "range_mid": round((range_high + range_low) / 2.0, 4),
+            "range_pct": round(range_pct, 2),
+            "range_start_time": range_start,
+            "range_end_time": range_end_ms,
+            "range_label": f"{min(target_hours):02d}:00-{max(target_hours) + 1:02d}:00 ET",
+            "bar_count": len(range_bars),
+        }
+
+    def _detect_hour_sweep(
+        self,
+        bars: List[Dict[str, float]],
+        hour_range: Dict[str, Any],
+        *,
+        min_rvol: float,
+        sweep_buffer_pct: float,
+        recent_bars: int,
+        include_ready: bool,
+    ) -> Optional[Dict[str, Any]]:
+        range_high = safe_float(hour_range.get("range_high"))
+        range_low = safe_float(hour_range.get("range_low"))
+        range_end_time = int(safe_float(hour_range.get("range_end_time")))
+        after = [b for b in bars if int(b["time"]) >= range_end_time]
+        if not after:
+            return None
+
+        avg_volume = average([safe_float(b["volume"]) for b in bars[-60:-1]]) or average([safe_float(b["volume"]) for b in bars[:-1]])
+        recent_after = after[-max(1, recent_bars):]
+        candidates: List[Dict[str, Any]] = []
+
+        for index, bar in enumerate(after):
             high = safe_float(bar["high"])
             low = safe_float(bar["low"])
-            volume = safe_float(bar["volume"])
-            if close < min_price or (max_price > 0 and close > max_price):
-                continue
-            if volume < min_volume:
-                continue
-            if close <= open_price:
-                continue
-
-            rng = candle_range(bar)
-            body = candle_body(bar)
-            if rng <= 0 or body <= 0:
-                continue
-
-            atr = calc_atr(prior, 14)
-            avg_volume = average([safe_float(item["volume"]) for item in prior[-20:]])
-            atr_mult = rng / atr if atr > 0 else 0.0
-            rvol = volume / avg_volume if avg_volume > 0 else 0.0
-            body_pct = body / rng if rng > 0 else 0.0
-            close_position_pct = (close - low) / rng if rng > 0 else 0.0
-            prior_high = max(safe_float(item["high"]) for item in prior[-max(2, structure_lookback):])
-            structure_break = high > prior_high and close >= prior_high * 0.998
-
-            if atr_mult < min_atr_mult:
-                continue
-            if rvol < min_rvol:
-                continue
-            if body_pct < min_body_pct:
-                continue
-            if close_position_pct < min_close_position_pct:
-                continue
-
-            score = 0.0
-            score += min((atr_mult - 1.0) * 28.0, 28.0)
-            score += min((rvol - 1.0) * 18.0, 22.0)
-            score += min(body_pct * 26.0, 22.0)
-            score += min(close_position_pct * 18.0, 16.0)
-            if structure_break:
-                score += 12.0
-            score = round(max(0.0, min(100.0, score)), 2)
-
-            if score < min_expansion_score:
-                continue
-
-            item = {
-                "expansion_time": int(bar["time"]),
-                "expansion_time_label": ms_to_et_label(int(bar["time"])),
-                "expansion_high": round(high, 4),
-                "expansion_low": round(low, 4),
-                "expansion_mid": round((high + low) / 2.0, 4),
-                "expansion_close": round(close, 4),
-                "expansion_score": score,
-                "atr_mult": round(atr_mult, 2),
-                "rvol": round(rvol, 2),
-                "body_pct": round(body_pct, 2),
-                "close_position_pct": round(close_position_pct, 2),
-                "structure_break": structure_break,
-            }
-            if best is None or score > safe_float(best.get("expansion_score")):
-                best = item
-
-        return best
-
-    def _classify_sweep_state(self, memory: Dict[str, Any], bars: List[Dict[str, float]]) -> Dict[str, Any]:
-        expansion_time = int(safe_float(memory.get("expansion_time")))
-        expansion_high = safe_float(memory.get("expansion_high"))
-        expansion_low = safe_float(memory.get("expansion_low"))
-        expansion_mid = safe_float(memory.get("expansion_mid")) or ((expansion_high + expansion_low) / 2.0)
-        expansion_score = safe_float(memory.get("expansion_score"))
-
-        after = [b for b in bars if int(b["time"]) > expansion_time]
-        last = bars[-1] if bars else None
-        last_price = round(safe_float(last.get("close") if last else memory.get("expansion_close")), 4)
-        notes: List[str] = []
-
-        if not after:
-            return {
-                "setup_state": "EXPANSION",
-                "phase": "WATCH",
-                "last_price": last_price,
-                "runner_score": round(expansion_score, 2),
-                "sweep_score": 0.0,
-                "notes": ["remembered 1H expansion; waiting for lower-timeframe pullback"],
-                "bars_since_expansion": 0,
-                "bars_since_sweep": None,
-            }
-
-        # Pullback anchor: lowest low after the expansion while price holds above the expansion midpoint.
-        protected_after = [b for b in after if safe_float(b["low"]) >= expansion_mid * 0.985]
-        search = protected_after or after
-        pullback_bar = min(search, key=lambda b: safe_float(b["low"]))
-        pullback_low = safe_float(pullback_bar["low"])
-        pullback_high = safe_float(pullback_bar["high"])
-        pullback_index = after.index(pullback_bar) if pullback_bar in after else 0
-
-        post_pullback = after[pullback_index + 1:]
-        setup_state = "PULLBACK_BUILDING"
-        phase = "WATCH"
-        sweep_low: Optional[float] = None
-        sweep_depth_pct: Optional[float] = None
-        reclaim_close: Optional[float] = None
-        bars_since_sweep: Optional[int] = None
-        sweep_score = 0.0
-
-        if pullback_low > 0:
-            retrace_pct = pct_change(expansion_high, pullback_low)
-            notes.append(f"pullback low {pullback_low:.4f}")
-            if pullback_low >= expansion_mid:
-                notes.append("holding expansion midpoint")
-                sweep_score += 8
-            elif pullback_low >= expansion_low:
-                notes.append("deep pullback but still above expansion low")
-                sweep_score += 3
-            else:
-                notes.append("below expansion low - weaker")
-                sweep_score -= 12
-            if retrace_pct > 0:
-                notes.append(f"pullback range {retrace_pct:.1f}% from 1H high")
-
-        sweep_candidates: List[Tuple[int, Dict[str, float]]] = []
-        for j, bar in enumerate(post_pullback):
-            low = safe_float(bar["low"])
             close = safe_float(bar["close"])
-            if pullback_low > 0 and low < pullback_low and close > pullback_low:
-                sweep_candidates.append((j, bar))
+            volume = safe_float(bar["volume"])
+            rvol = volume / avg_volume if avg_volume > 0 else 0.0
+            rng = max(candle_range(bar), 0.000001)
+            body = candle_body(bar)
 
-        if not post_pullback:
-            setup_state = "SWEEP_READY"
-            phase = "READY"
-            notes.append("pullback formed; waiting for sweep below pullback low")
-            sweep_score += 10
-        elif sweep_candidates:
-            sweep_local_index, sweep_bar = sweep_candidates[-1]
-            sweep_low = safe_float(sweep_bar["low"])
-            reclaim_close = safe_float(sweep_bar["close"])
-            bars_since_sweep = len(post_pullback) - 1 - sweep_local_index
-            sweep_depth_pct = abs(pct_change(sweep_low, pullback_low)) if pullback_low > 0 else 0.0
-            low_wick_pct = lower_wick(sweep_bar) / max(candle_range(sweep_bar), 0.000001)
+            swept_low = low < range_low * (1.0 - sweep_buffer_pct) and close > range_low
+            swept_high = high > range_high * (1.0 + sweep_buffer_pct) and close < range_high
 
-            setup_state = "SWEEP_TRIGGERED"
-            phase = "PREALERT"
-            notes.append("swept pullback low and reclaimed")
-            sweep_score += 30
-            sweep_score += min(sweep_depth_pct * 18.0, 14.0)
-            sweep_score += min(low_wick_pct * 18.0, 12.0)
+            if not swept_low and not swept_high:
+                continue
 
-            current = after[-1]
-            if safe_float(current["close"]) > pullback_high:
-                setup_state = "CONTINUATION_ACTIVE"
-                phase = "CONFIRMED"
-                notes.append("continuation above pullback high")
-                sweep_score += 28
-            elif safe_float(current["close"]) > safe_float(sweep_bar["high"]):
-                setup_state = "RECLAIM_CONFIRMED"
-                phase = "CONFIRMED"
-                notes.append("reclaim confirmed above sweep candle high")
-                sweep_score += 20
-            elif bars_since_sweep is not None and bars_since_sweep <= 2:
-                setup_state = "SWEEP_TRIGGERED"
-                phase = "PREALERT"
-                notes.append("fresh sweep; watch for reclaim candle")
-                sweep_score += 8
-        else:
-            latest = after[-1]
-            if safe_float(latest["low"]) <= pullback_low * 1.002 and safe_float(latest["close"]) >= pullback_low:
-                setup_state = "SWEEP_READY"
-                phase = "READY"
-                notes.append("near pullback-low sweep level")
-                sweep_score += 18
-            else:
-                notes.append("waiting for pullback low sweep")
-                sweep_score += 5
+            if swept_low:
+                sweep_depth_pct = abs(pct_change(low, range_low))
+                wick_pct = lower_wick(bar) / rng
+                continuation = close > max(safe_float(b["high"]) for b in after[max(0, index - 4):index] or [bar])
+                score = self._score_sweep(
+                    sweep_depth_pct=sweep_depth_pct,
+                    wick_pct=wick_pct,
+                    rvol=rvol,
+                    body=body,
+                    rng=rng,
+                    continuation=continuation,
+                    bars_since=len(after) - 1 - index,
+                )
+                candidates.append({
+                    "setup": "6/7 LOW SWEEP RECLAIM",
+                    "setup_state": "LOW_SWEEP_RECLAIM",
+                    "phase": "CONFIRMED" if len(after) - 1 - index <= recent_bars else "WATCH",
+                    "direction": "bullish",
+                    "runner_score": score,
+                    "sweep_score": score,
+                    "last_price": round(safe_float(bars[-1]["close"]), 4),
+                    "rvol": round(rvol, 2),
+                    "sweep_time": int(bar["time"]),
+                    "sweep_time_label": et_time_label(int(bar["time"])),
+                    "sweep_price": round(low, 4),
+                    "sweep_depth_pct": round(sweep_depth_pct, 2),
+                    "reclaim_close": round(close, 4),
+                    "reject_close": None,
+                    "bars_since_sweep": len(after) - 1 - index,
+                    "notes": [
+                        f"swept below {hour_range['range_label']} low {range_low:.4f}",
+                        f"closed back above range low at {close:.4f}",
+                        f"sweep rvol {rvol:.2f}",
+                    ],
+                })
 
-        runner_score = round(max(0.0, min(100.0, expansion_score * 0.55 + sweep_score * 0.45)), 2)
-        return {
-            "setup_state": setup_state,
-            "phase": phase,
-            "last_price": last_price,
-            "runner_score": runner_score,
-            "sweep_score": round(max(0.0, min(100.0, sweep_score)), 2),
-            "pullback_low": round(pullback_low, 4) if pullback_low > 0 else None,
-            "pullback_high": round(pullback_high, 4) if pullback_high > 0 else None,
-            "sweep_low": round(sweep_low, 4) if sweep_low is not None else None,
-            "sweep_depth_pct": round(sweep_depth_pct, 2) if sweep_depth_pct is not None else None,
-            "reclaim_close": round(reclaim_close, 4) if reclaim_close is not None else None,
-            "bars_since_expansion": len(after),
-            "bars_since_sweep": bars_since_sweep,
-            "notes": notes,
-        }
+            if swept_high:
+                sweep_depth_pct = abs(pct_change(high, range_high))
+                wick_pct = upper_wick(bar) / rng
+                continuation = close < min(safe_float(b["low"]) for b in after[max(0, index - 4):index] or [bar])
+                score = self._score_sweep(
+                    sweep_depth_pct=sweep_depth_pct,
+                    wick_pct=wick_pct,
+                    rvol=rvol,
+                    body=body,
+                    rng=rng,
+                    continuation=continuation,
+                    bars_since=len(after) - 1 - index,
+                )
+                candidates.append({
+                    "setup": "6/7 HIGH SWEEP REJECT",
+                    "setup_state": "HIGH_SWEEP_REJECT",
+                    "phase": "CONFIRMED" if len(after) - 1 - index <= recent_bars else "WATCH",
+                    "direction": "bearish",
+                    "runner_score": score,
+                    "sweep_score": score,
+                    "last_price": round(safe_float(bars[-1]["close"]), 4),
+                    "rvol": round(rvol, 2),
+                    "sweep_time": int(bar["time"]),
+                    "sweep_time_label": et_time_label(int(bar["time"])),
+                    "sweep_price": round(high, 4),
+                    "sweep_depth_pct": round(sweep_depth_pct, 2),
+                    "reclaim_close": None,
+                    "reject_close": round(close, 4),
+                    "bars_since_sweep": len(after) - 1 - index,
+                    "notes": [
+                        f"swept above {hour_range['range_label']} high {range_high:.4f}",
+                        f"closed back below range high at {close:.4f}",
+                        f"sweep rvol {rvol:.2f}",
+                    ],
+                })
+
+        fresh_candidates = [c for c in candidates if int(c.get("bars_since_sweep") or 999999) <= recent_bars]
+        usable = fresh_candidates or candidates
+        if usable:
+            best = max(usable, key=lambda item: (safe_float(item.get("runner_score")), -safe_float(item.get("bars_since_sweep"))))
+            if safe_float(best.get("rvol")) < min_rvol:
+                best["notes"].append(f"below preferred rvol filter {min_rvol:.2f}")
+            return best
+
+        if not include_ready:
+            return None
+
+        last = bars[-1]
+        last_close = safe_float(last["close"])
+        near_low = abs(last_close - range_low) / range_low <= 0.012 if range_low > 0 else False
+        near_high = abs(last_close - range_high) / range_high <= 0.012 if range_high > 0 else False
+        if near_low or near_high:
+            direction = "bullish" if near_low else "bearish"
+            setup = "6/7 LOW SWEEP WATCH" if near_low else "6/7 HIGH SWEEP WATCH"
+            level = range_low if near_low else range_high
+            return {
+                "setup": setup,
+                "setup_state": "SWEEP_READY",
+                "phase": "READY",
+                "direction": direction,
+                "runner_score": 45.0,
+                "sweep_score": 45.0,
+                "last_price": round(last_close, 4),
+                "rvol": 0.0,
+                "sweep_time": None,
+                "sweep_time_label": None,
+                "sweep_price": None,
+                "sweep_depth_pct": None,
+                "reclaim_close": None,
+                "reject_close": None,
+                "bars_since_sweep": None,
+                "notes": [f"price is near {hour_range['range_label']} sweep level {level:.4f}"],
+            }
+
+        return None
+
+    def _score_sweep(
+        self,
+        *,
+        sweep_depth_pct: float,
+        wick_pct: float,
+        rvol: float,
+        body: float,
+        rng: float,
+        continuation: bool,
+        bars_since: int,
+    ) -> float:
+        body_pct = body / max(rng, 0.000001)
+        score = 35.0
+        score += min(max(sweep_depth_pct, 0.0) * 8.0, 18.0)
+        score += min(max(wick_pct, 0.0) * 22.0, 18.0)
+        score += min(max(rvol - 1.0, 0.0) * 12.0, 16.0)
+        score += min(max(body_pct, 0.0) * 10.0, 8.0)
+        if continuation:
+            score += 10.0
+        if bars_since <= 2:
+            score += 8.0
+        elif bars_since <= 6:
+            score += 4.0
+        elif bars_since > 36:
+            score -= 8.0
+        return round(max(0.0, min(100.0, score)), 2)
