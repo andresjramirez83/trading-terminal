@@ -10,6 +10,7 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 async def bars(
     symbol: str = Query(..., min_length=1, max_length=10),
     timeframe: str = Query("1m"),
+    session: str = Query("regular"),
 ):
     """
     Chart bars endpoint.
@@ -19,7 +20,7 @@ async def bars(
     """
     try:
         polygon = PolygonService()
-        data = await polygon.get_bars(symbol, timeframe)
+        data = await polygon.get_bars(symbol, timeframe, session=session)
         return BarsResponse(symbol=symbol.upper(), timeframe=timeframe, bars=data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bars error: {e}")

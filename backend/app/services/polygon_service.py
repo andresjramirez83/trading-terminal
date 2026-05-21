@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+
+ET = ZoneInfo("America/New_York")
 
 
 class PolygonService:
@@ -243,12 +246,102 @@ class PolygonService:
         print(f"POLYGON GET_BARS UNKNOWN TIMEFRAME {timeframe!r}; defaulting to 1m", flush=True)
         return 1, "minute", timedelta(days=3), "1m"
 
-    async def get_bars(self, symbol: str, timeframe: str = "1m") -> List[Dict[str, Any]]:
+    def _normalize_daily_session(self, session: Optional[str]) -> str:
+        value = str(session or "regular").lower().strip()
+        if value in {"regular", "rth", "market", "reg", "normal"}:
+            return "regular"
+        if value in {"extended", "ext", "full", "full_session", "all", "ah", "afterhours", "premarket"}:
+            return "extended"
+        return "regular"
+
+    def _bar_in_daily_session(self, ms: int, session: str) -> bool:
+        dt = datetime.fromtimestamp(ms / 1000, ET)
+        hhmm = dt.hour * 100 + dt.minute
+        if session == "extended":
+            return 400 <= hhmm < 2000
+        return 930 <= hhmm < 1600
+
+    def _aggregate_to_daily(self, bars: List[Dict[str, Any]], session: str) -> List[Dict[str, Any]]:
+        grouped: Dict[date, Dict[str, Any]] = {}
+        for bar in sorted(bars, key=lambda item: int(item.get("time", item.get("t", 0)) or 0)):
+            t = int(bar.get("time", bar.get("t", 0)) or 0)
+            if t <= 0 or not self._bar_in_daily_session(t, session):
+                continue
+
+            dt = datetime.fromtimestamp(t / 1000, ET)
+            day = dt.date()
+            open_dt = datetime(day.year, day.month, day.day, 9, 30, tzinfo=ET)
+            if session == "extended":
+                open_dt = datetime(day.year, day.month, day.day, 4, 0, tzinfo=ET)
+
+            o = float(bar.get("open", bar.get("o", 0)) or 0)
+            h = float(bar.get("high", bar.get("h", 0)) or 0)
+            l = float(bar.get("low", bar.get("l", 0)) or 0)
+            c = float(bar.get("close", bar.get("c", 0)) or 0)
+            v = float(bar.get("volume", bar.get("v", 0)) or 0)
+            if h <= 0 or l <= 0 or c <= 0:
+                continue
+
+            row = grouped.get(day)
+            if row is None:
+                row = {
+                    "time": int(open_dt.timestamp() * 1000),
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": v,
+                }
+                grouped[day] = row
+                continue
+
+            row["high"] = max(float(row["high"]), h)
+            row["low"] = min(float(row["low"]), l)
+            row["close"] = c
+            row["volume"] = float(row["volume"]) + v
+
+        out: List[Dict[str, Any]] = []
+        for _, row in sorted(grouped.items(), key=lambda item: item[0]):
+            row.update({
+                "t": row["time"],
+                "o": row["open"],
+                "h": row["high"],
+                "l": row["low"],
+                "c": row["close"],
+                "v": row["volume"],
+            })
+            out.append(row)
+        return out
+
+
+    async def get_bars(self, symbol: str, timeframe: str = "1m", session: str = "regular") -> List[Dict[str, Any]]:
         symbol = symbol.upper().strip()
         multiplier, timespan, lookback, normalized_tf = self._timeframe_config(timeframe)
 
         now = datetime.now(timezone.utc)
         start = now - lookback
+
+        # Daily charts are built from 1m bars so today's candle forms live.
+        if normalized_tf == "1d":
+            normalized_session = self._normalize_daily_session(session)
+            raw = await self.get_aggs(
+                symbol=symbol,
+                multiplier=1,
+                timespan="minute",
+                start_ms=int(start.timestamp() * 1000),
+                end_ms=int(now.timestamp() * 1000),
+                adjusted="true",
+                sort="asc",
+                limit=50000,
+            )
+            intraday = self._normalize_aggs(raw)
+            bars = self._aggregate_to_daily(intraday, normalized_session)
+            print(
+                f"POLYGON GET_BARS RESULT {symbol} 1d session={normalized_session}: "
+                f"raw_1m={len(raw)} daily={len(bars)}",
+                flush=True,
+            )
+            return bars
 
         print(
             f"POLYGON GET_BARS {symbol} tf={timeframe} normalized={normalized_tf} "
@@ -289,8 +382,8 @@ class PolygonService:
 
 # Backwards-compatible function wrappers for older routes/scanner code that still imports
 # get_polygon_bars/get_last_trade directly from app.services.polygon_service.
-def get_polygon_bars(symbol: str, timeframe: str = "1m") -> List[Dict[str, Any]]:
-    return asyncio.run(PolygonService().get_bars(symbol, timeframe))
+def get_polygon_bars(symbol: str, timeframe: str = "1m", session: str = "regular") -> List[Dict[str, Any]]:
+    return asyncio.run(PolygonService().get_bars(symbol, timeframe, session=session))
 
 
 def get_last_trade(symbol: str) -> Optional[float]:

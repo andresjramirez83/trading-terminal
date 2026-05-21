@@ -546,6 +546,95 @@ def is_intraday_timeframe(timeframe: str) -> bool:
     return timeframe.lower().strip() in {"1m", "5m", "15m", "30m", "1h"}
 
 
+def is_daily_timeframe(timeframe: str) -> bool:
+    return timeframe.lower().strip() in {"1d", "day", "daily", "d"}
+
+
+def normalize_daily_session(session: Optional[str]) -> str:
+    value = str(session or "regular").lower().strip()
+    if value in {"regular", "rth", "market", "reg", "normal"}:
+        return "regular"
+    if value in {"extended", "ext", "full", "full_session", "all", "ah", "afterhours", "premarket"}:
+        return "extended"
+    raise HTTPException(status_code=400, detail="session must be 'regular'/'rth' or 'extended'/'ext'")
+
+
+def bar_is_in_daily_session(ms: int, session: str) -> bool:
+    dt = datetime.fromtimestamp(ms / 1000, ET)
+    hhmm = dt.hour * 100 + dt.minute
+    if session == "extended":
+        return 400 <= hhmm < 2000
+    return 930 <= hhmm < 1600
+
+
+def aggregate_intraday_to_daily_bars(
+    intraday_bars: List[Candle],
+    *,
+    session: str,
+    limit_bars: Optional[int] = MAX_BARS_DEFAULT,
+) -> List[Candle]:
+    """Build live 1D candles from intraday bars.
+
+    Polygon daily aggregates can lag until the day is complete. This function
+    creates the current in-progress daily candle from 1m bars so the 1D chart
+    updates during the active session.
+    """
+    grouped: Dict[date, Dict[str, Any]] = {}
+
+    for bar in sorted(intraday_bars, key=lambda item: int(item.time)):
+        if not bar_is_in_daily_session(int(bar.time), session):
+            continue
+
+        dt = datetime.fromtimestamp(int(bar.time) / 1000, ET)
+        day = dt.date()
+        bucket = grouped.get(day)
+
+        if bucket is None:
+            open_dt = datetime(day.year, day.month, day.day, 9, 30 if session == "regular" else 0, tzinfo=ET)
+            if session == "extended":
+                open_dt = datetime(day.year, day.month, day.day, 4, 0, tzinfo=ET)
+            bucket = {
+                "time": int(open_dt.timestamp() * 1000),
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": float(bar.volume),
+                "last_time": int(bar.time),
+            }
+            grouped[day] = bucket
+            continue
+
+        bucket["high"] = max(float(bucket["high"]), float(bar.high))
+        bucket["low"] = min(float(bucket["low"]), float(bar.low))
+        bucket["close"] = float(bar.close)
+        bucket["volume"] = float(bucket["volume"]) + float(bar.volume)
+        bucket["last_time"] = int(bar.time)
+
+    daily = [
+        Candle(
+            time=int(row["time"]),
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            volume=float(row["volume"]),
+        )
+        for _, row in sorted(grouped.items(), key=lambda item: item[0])
+    ]
+
+    if limit_bars is not None and limit_bars > 0 and len(daily) > limit_bars:
+        daily = daily[-limit_bars:]
+
+    return daily
+
+
+def daily_session_trading_date(bars: List[Candle]) -> date:
+    if bars:
+        return datetime.fromtimestamp(int(bars[-1].time) / 1000, ET).date()
+    return previous_trading_day()
+
+
 def extended_session_window_ms(
     *,
     timeframe: str,
@@ -801,7 +890,13 @@ async def fetch_bars_for_day_async(
     timeframe: str,
     trading_day: date,
     limit_bars: Optional[int] = MAX_BARS_DEFAULT,
+    session: str = "regular",
 ) -> List[Candle]:
+    if is_daily_timeframe(timeframe):
+        intraday_bars, _ = await fetch_bars_range_async(symbol, "1m", "1d", trading_day, limit_bars=None)
+        daily = aggregate_intraday_to_daily_bars(intraday_bars, session=session, limit_bars=limit_bars)
+        return [bar for bar in daily if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
+
     bars, _ = await fetch_bars_range_async(symbol, timeframe, "1d", trading_day, limit_bars=limit_bars)
     if bars:
         return [bar for bar in bars if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
@@ -919,7 +1014,13 @@ def fetch_bars_for_day(
     timeframe: str,
     trading_day: date,
     limit_bars: Optional[int] = MAX_BARS_DEFAULT,
+    session: str = "regular",
 ) -> List[Candle]:
+    if is_daily_timeframe(timeframe):
+        intraday_bars, _ = fetch_bars_range(symbol, "1m", "1d", trading_day, limit_bars=None)
+        daily = aggregate_intraday_to_daily_bars(intraday_bars, session=session, limit_bars=limit_bars)
+        return [bar for bar in daily if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
+
     bars, _ = fetch_bars_range(symbol, timeframe, "1d", trading_day, limit_bars=limit_bars)
     if bars:
         return [bar for bar in bars if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
@@ -1946,12 +2047,25 @@ def push_alert(payload: AlertPayload):
     if not payload.message.strip():
         raise HTTPException(status_code=400, detail="message is required")
 
+    # Safety gate: generic push alerts are disabled by default. The only
+    # production alert path should be /backend-alerts/instant-chart or the
+    # backend alert loop, both of which verify that the symbol was armed from
+    # the UI. Set ALLOW_GENERIC_PUSH_ALERTS=true only for manual testing.
+    allow_generic = os.getenv("ALLOW_GENERIC_PUSH_ALERTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if not allow_generic:
+        return {
+            "ok": True,
+            "delivered": False,
+            "reason": "generic push alerts disabled",
+        }
+
     title = (payload.title or "Trading Alert").strip() or "Trading Alert"
     message = payload.message.strip()
     result = send_pushover_alert(title=title, message=message, priority=payload.priority)
 
     return {
         "ok": True,
+        "delivered": True,
         "provider": "pushover",
         "title": title,
         "message": message,
@@ -2247,6 +2361,35 @@ async def backend_alerts_stop():
     return backend_alerts_status()
 
 
+async def fetch_chart_bars_async(
+    symbol: str,
+    timeframe: str,
+    *,
+    lookback: Optional[str],
+    limit_bars: Optional[int],
+    session: str,
+) -> tuple[List[Candle], date]:
+    if is_daily_timeframe(timeframe):
+        # Pull 1m data and aggregate it into live 1D candles. This makes the
+        # current day form in real time instead of waiting for Polygon's
+        # completed daily aggregate.
+        intraday_bars, _ = await fetch_bars_range_async(
+            symbol,
+            "1m",
+            lookback=lookback or DEFAULT_LOOKBACK_BY_TIMEFRAME.get("1d", "6m"),
+            limit_bars=None,
+        )
+        daily_bars = aggregate_intraday_to_daily_bars(intraday_bars, session=session, limit_bars=limit_bars)
+        return daily_bars, daily_session_trading_date(daily_bars)
+
+    return await fetch_bars_range_async(
+        symbol,
+        timeframe,
+        lookback=lookback,
+        limit_bars=limit_bars,
+    )
+
+
 @app.get("/bars", response_model=BarsResponse)
 async def get_bars(
     symbol: str = Query(..., min_length=1),
@@ -2254,20 +2397,34 @@ async def get_bars(
     date_str: Optional[str] = Query(None, alias="date"),
     lookback: Optional[str] = Query(None),
     limit: int = Query(MAX_BARS_DEFAULT, ge=50, le=5000),
+    session: str = Query("regular"),
 ):
     normalized_symbol = symbol.upper().strip()
     normalized_timeframe = timeframe.lower().strip()
+    normalized_session = normalize_daily_session(session)
 
     if date_str:
         requested_day = parse_requested_date(date_str)
-        bars = await fetch_bars_for_day_async(normalized_symbol, normalized_timeframe, requested_day, limit_bars=limit)
+        bars = await fetch_bars_for_day_async(
+            normalized_symbol,
+            normalized_timeframe,
+            requested_day,
+            limit_bars=limit,
+            session=normalized_session,
+        )
         used_day = requested_day
 
         if not bars:
             probe = requested_day
             for _ in range(7):
                 probe = previous_trading_day(probe - timedelta(days=1))
-                bars = await fetch_bars_for_day_async(normalized_symbol, normalized_timeframe, probe, limit_bars=limit)
+                bars = await fetch_bars_for_day_async(
+                    normalized_symbol,
+                    normalized_timeframe,
+                    probe,
+                    limit_bars=limit,
+                    session=normalized_session,
+                )
                 if bars:
                     used_day = probe
                     break
@@ -2279,7 +2436,7 @@ async def get_bars(
             trading_date=used_day.strftime("%Y-%m-%d"),
         )
 
-    cache_key = f"{normalized_symbol}::{normalized_timeframe}::{lookback or ''}::{limit}"
+    cache_key = f"{normalized_symbol}::{normalized_timeframe}::{normalized_session}::{lookback or ''}::{limit}"
     now = datetime.now(timezone.utc)
     cached = BARS_CACHE.get(cache_key)
     if cached is not None:
@@ -2290,11 +2447,12 @@ async def get_bars(
     in_flight = IN_FLIGHT_BARS_REQUESTS.get(cache_key)
     if in_flight is None or in_flight.done():
         in_flight = asyncio.create_task(
-            fetch_bars_range_async(
+            fetch_chart_bars_async(
                 normalized_symbol,
                 normalized_timeframe,
                 lookback=lookback,
                 limit_bars=limit,
+                session=normalized_session,
             )
         )
         IN_FLIGHT_BARS_REQUESTS[cache_key] = in_flight
