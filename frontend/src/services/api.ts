@@ -147,6 +147,7 @@ export async function fetchBars(
   options?: {
     date?: string;
     lookback?: string;
+    session?: "regular" | "extended";
     forceRefresh?: boolean;
     limit?: number;
     signal?: AbortSignal;
@@ -163,10 +164,12 @@ export async function fetchBars(
 
   if (options?.date) params.set("date", options.date);
   if (normalizedLookback) params.set("lookback", normalizedLookback);
+  const normalizedSession = options?.session === "regular" ? "regular" : options?.session === "extended" ? "extended" : undefined;
+  if (normalizedSession) params.set("session", normalizedSession);
   const limit = Math.max(50, Math.min(5000, Math.floor(options?.limit ?? defaultBarsLimit(normalizedTimeframe))));
   params.set("limit", String(limit));
 
-  const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${options?.date ?? ""}|${normalizedLookback}|${limit}`;
+  const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${options?.date ?? ""}|${normalizedLookback}|${normalizedSession ?? ""}|${limit}`;
   const now = Date.now();
 
   if (!options?.forceRefresh) {

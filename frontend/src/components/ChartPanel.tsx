@@ -54,6 +54,7 @@ export type TrendlineControlAction =
 
 export type TrendlineSnapMode = "auto" | "wick" | "body";
 export type TrendlineScope = "shared" | "timeframe";
+export type DailySessionMode = "regular" | "extended";
 
 type Stats = {
   last: number | null;
@@ -585,6 +586,30 @@ const DEFAULT_LINE_VISIBILITY: LineVisibilityState = {
   fvgFlip: false,
   adaptiveRunnerRsi: false,
 };
+
+const DAILY_SESSION_MODE_STORAGE_KEY = "trading-terminal.dailySessionMode.v1";
+
+function normalizeDailySessionMode(value: unknown): DailySessionMode {
+  return value === "extended" ? "extended" : "regular";
+}
+
+function readStoredDailySessionMode(): DailySessionMode {
+  if (typeof window === "undefined") return "regular";
+  try {
+    return normalizeDailySessionMode(window.localStorage.getItem(DAILY_SESSION_MODE_STORAGE_KEY));
+  } catch {
+    return "regular";
+  }
+}
+
+function saveStoredDailySessionMode(mode: DailySessionMode): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(DAILY_SESSION_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage failures.
+  }
+}
 
 function readStoredLineVisibility(): LineVisibilityState {
   if (typeof window === "undefined") return DEFAULT_LINE_VISIBILITY;
@@ -2037,11 +2062,22 @@ function normalizeBarsForChart(rawBars: unknown): Candle[] {
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
 }
 
-function aggregateIntradayBarsToEtDailyBar(intradayBars: Candle[], preferredEtDate?: string | null): Candle | null {
+function isBarInsideDailySession(bar: Candle, mode: DailySessionMode): boolean {
+  const hm = getEtBarParts(bar.time).hm;
+  if (mode === "regular") return hm >= 930 && hm < 1600;
+  return hm >= 400 && hm < 2000;
+}
+
+function aggregateIntradayBarsToEtDailyBar(
+  intradayBars: Candle[],
+  preferredEtDate?: string | null,
+  mode: DailySessionMode = "regular"
+): Candle | null {
   if (!intradayBars.length) return null;
 
   const barsByDate = new Map<string, Candle[]>();
   for (const bar of intradayBars) {
+    if (!isBarInsideDailySession(bar, mode)) continue;
     const etDate = getEtBarParts(bar.time).date;
     const list = barsByDate.get(etDate) ?? [];
     list.push(bar);
@@ -2068,8 +2104,13 @@ function aggregateIntradayBarsToEtDailyBar(intradayBars: Candle[], preferredEtDa
   };
 }
 
-function upsertCurrentDailyBarFromIntraday(dailyBars: Candle[], intradayBars: Candle[], preferredEtDate?: string | null): Candle[] {
-  const currentDailyBar = aggregateIntradayBarsToEtDailyBar(intradayBars, preferredEtDate);
+function upsertCurrentDailyBarFromIntraday(
+  dailyBars: Candle[],
+  intradayBars: Candle[],
+  preferredEtDate?: string | null,
+  mode: DailySessionMode = "regular"
+): Candle[] {
+  const currentDailyBar = aggregateIntradayBarsToEtDailyBar(intradayBars, preferredEtDate, mode);
   if (!currentDailyBar) return dailyBars;
 
   const nextBars = dailyBars.slice();
@@ -4952,6 +4993,11 @@ function ChartPanelComponent({
 
   const [chartTimeframe, setChartTimeframe] = useState(timeframeProp || "15m");
   const timeframe = chartTimeframe;
+  const [dailySessionMode, setDailySessionMode] = useState<DailySessionMode>(() => readStoredDailySessionMode());
+
+  useEffect(() => {
+    saveStoredDailySessionMode(dailySessionMode);
+  }, [dailySessionMode]);
 
   const [error, setError] = useState("");
   const [compressionRect, setCompressionRect] = useState<RectOverlay | null>(null);
@@ -8388,8 +8434,9 @@ function ChartPanelComponent({
 
         const barsResp = await fetchBars(symbol, timeframe, {
           lookback: lookback || chartLookbackForTimeframe(timeframe),
+          session: isDailyTimeframe(timeframe) ? dailySessionMode : undefined,
           limit: chartLimitForTimeframe(timeframe),
-          forceRefresh: false,
+          forceRefresh: isDailyTimeframe(timeframe),
         });
         if (cancelled) return;
 
@@ -8399,6 +8446,7 @@ function ChartPanelComponent({
           try {
             const intradayResp = await fetchBars(symbol, "1m", {
               lookback: "2d",
+              session: dailySessionMode,
               limit: 1200,
               forceRefresh: true,
             });
@@ -8406,7 +8454,8 @@ function ChartPanelComponent({
             normalizedBars = upsertCurrentDailyBarFromIntraday(
               normalizedBars,
               intradayBars,
-              intradayResp.trading_date ?? barsResp.trading_date ?? null
+              intradayResp.trading_date ?? barsResp.trading_date ?? null,
+              dailySessionMode
             );
           } catch {
             // Keep the normal daily response if the intraday overlay request fails.
@@ -8494,7 +8543,7 @@ function ChartPanelComponent({
     return () => {
       cancelled = true;
     };
-  }, [symbol, timeframe, lookback, loadDelayMs, renderBars]);
+  }, [symbol, timeframe, lookback, loadDelayMs, dailySessionMode, renderBars]);
 
   useEffect(() => {
     if (!enableLiveStream) return;
@@ -8569,6 +8618,8 @@ function ChartPanelComponent({
               volume: typeof secondMsg.v === "number" ? secondMsg.v : 0,
             };
 
+            if (isDailyTimeframe(timeframe) && !isBarInsideDailySession(secondBar, dailySessionMode)) continue;
+
             const result: { bars: Candle[]; lastPrice: number | null; changed: boolean } =
               timeframe === "1m"
                 ? applySecondAggregateToBars(nextBars, secondMsg)
@@ -8594,6 +8645,8 @@ function ChartPanelComponent({
               volume: typeof tradeMsg.s === "number" ? tradeMsg.s : 0,
             };
 
+            if (isDailyTimeframe(timeframe) && !isBarInsideDailySession(tradeBar, dailySessionMode)) continue;
+
             const result: { bars: Candle[]; lastPrice: number | null; changed: boolean } =
               timeframe === "1m"
                 ? applyTradeToBars(nextBars, tradeMsg)
@@ -8618,6 +8671,8 @@ function ChartPanelComponent({
               close: typeof minuteMsg.c === "number" ? minuteMsg.c : fallbackClose(),
               volume: typeof minuteMsg.v === "number" ? minuteMsg.v : 0,
             };
+
+            if (isDailyTimeframe(timeframe) && !isBarInsideDailySession(minuteBar, dailySessionMode)) continue;
 
             const result: { bars: Candle[]; lastPrice: number | null; changed: boolean } =
               timeframe === "1m"
@@ -8670,7 +8725,7 @@ function ChartPanelComponent({
       }
       marketSocket.unsubscribe(symbol, handlePayload);
     };
-  }, [symbol, timeframe, enableLiveStream, renderBars]);
+  }, [symbol, timeframe, enableLiveStream, dailySessionMode, renderBars]);
 
   const canAddWatchlist = useMemo(
     () => Boolean(onRequestAddSymbolToWatchlist),
@@ -8822,7 +8877,7 @@ function ChartPanelComponent({
         <div style={{ ...legendBoxStyle, pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: 8, padding: "5px 8px" }}>
           <strong>{symbol}</strong> · {timeframe} · {legend.tradingDate ?? "--"} · PT
           <span style={{ display: "inline-flex", gap: 4, marginLeft: 4, verticalAlign: "middle" }}>
-            {(["1m", "5m", "15m"] as const).map((tf) => (
+            {(["1m", "5m", "15m", "1d"] as const).map((tf) => (
               <button
                 key={tf}
                 onClick={() => {
@@ -8847,6 +8902,35 @@ function ChartPanelComponent({
               </button>
             ))}
           </span>
+          {isDailyTimeframe(timeframe) ? (
+            <span style={{ display: "inline-flex", gap: 4, marginLeft: 4, verticalAlign: "middle" }}>
+              {([
+                ["regular", "RTH"],
+                ["extended", "EXT"],
+              ] as const).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setDailySessionMode(mode)}
+                  style={{
+                    height: 22,
+                    minWidth: 38,
+                    padding: "0 7px",
+                    borderRadius: 8,
+                    border: dailySessionMode === mode ? "1px solid rgba(45,212,191,0.85)" : "1px solid rgba(148,163,184,0.22)",
+                    background: dailySessionMode === mode ? "rgba(13,148,136,0.88)" : "rgba(15,23,42,0.88)",
+                    color: dailySessionMode === mode ? "#ecfeff" : "#bfdbfe",
+                    fontSize: 11,
+                    fontWeight: 900,
+                    cursor: "pointer",
+                  }}
+                  title={mode === "regular" ? "Daily candle uses 9:30-16:00 ET only" : "Daily candle includes 4:00-20:00 ET"}
+                >
+                  {label}
+                </button>
+              ))}
+            </span>
+          ) : null}
         </div>
 
         <div style={{ ...legendBoxStyle, pointerEvents: "auto", padding: "5px 8px" }}>VWAP: {formatPrice(legend.vwap)}</div>
