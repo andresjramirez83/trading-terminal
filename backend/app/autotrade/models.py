@@ -8,6 +8,7 @@ AutoTradeMode = Literal["paper", "live"]
 AutoTradeSource = Literal["manual", "scanner", "both"]
 SizingMode = Literal["dollars", "shares"]
 RunnerMode = Literal["off", "scale_trail"]
+EntryTriggerMode = Literal["reclaim_close", "sweep_touch"]
 StrategyId = Literal["six_seven_sweep"]
 
 
@@ -37,6 +38,9 @@ class AutoTradeConfig(BaseModel):
     require_flat_account: bool = True
     max_signal_age_bars: int = 3
     runner_mode: RunnerMode = "off"
+    # reclaim_close = safer default: wait for candle close back above range low.
+    # sweep_touch = aggressive: fire as soon as a candle sweeps below range low; does not wait for reclaim close.
+    entry_trigger_mode: EntryTriggerMode = "reclaim_close"
     scale_out_pct: float = 0.50
     trail_lookback_bars: int = 2
     trail_buffer_pct: float = 0.002
@@ -62,6 +66,7 @@ class AutoTradeConfigUpdate(BaseModel):
     require_flat_account: Optional[bool] = None
     max_signal_age_bars: Optional[int] = None
     runner_mode: Optional[RunnerMode] = None
+    entry_trigger_mode: Optional[EntryTriggerMode] = None
     scale_out_pct: Optional[float] = None
     trail_lookback_bars: Optional[int] = None
     trail_buffer_pct: Optional[float] = None

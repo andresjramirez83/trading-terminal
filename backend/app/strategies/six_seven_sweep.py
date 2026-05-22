@@ -75,6 +75,7 @@ class SixSevenSweepStrategy(StrategyBase):
             return None
 
         threshold = range_low * (1.0 - float(config.sweep_buffer_pct))
+        trigger_mode = str(getattr(config, "entry_trigger_mode", "reclaim_close") or "reclaim_close").lower().strip()
         sweep_low: Optional[float] = None
         signal_bar: Optional[Dict[str, Any]] = None
         signal_index: Optional[int] = None
@@ -82,9 +83,18 @@ class SixSevenSweepStrategy(StrategyBase):
         for idx, bar in enumerate(after_bars):
             low = safe_float(bar.get("low", bar.get("l")))
             close = safe_float(bar.get("close", bar.get("c")))
-            if low < threshold:
+
+            swept = low < threshold
+            if swept:
                 sweep_low = low if sweep_low is None else min(sweep_low, low)
-            if sweep_low is not None and close > range_low:
+                if trigger_mode == "sweep_touch":
+                    # Aggressive mode: signal as soon as the sweep happens.
+                    # This does NOT wait for the candle to close back above range_low.
+                    signal_bar = bar
+                    signal_index = idx
+
+            if trigger_mode != "sweep_touch" and sweep_low is not None and close > range_low:
+                # Safer default: wait for reclaim close back above range_low.
                 signal_bar = bar
                 signal_index = idx
 
@@ -106,7 +116,7 @@ class SixSevenSweepStrategy(StrategyBase):
             strategy_id=self.id,
             symbol=symbol,
             side="buy",
-            setup="bullish_6_7_low_sweep_retest",
+            setup="bullish_6_7_low_sweep_touch" if trigger_mode == "sweep_touch" else "bullish_6_7_low_sweep_retest",
             signal_id=signal_id,
             timeframe=config.timeframe,
             signal_time=signal_time.isoformat(),
@@ -120,6 +130,8 @@ class SixSevenSweepStrategy(StrategyBase):
                 "body_target": target_price,
                 "sweep_low": round(float(sweep_low), 4),
                 "bars_since_signal": bars_since,
+                "entry_trigger_mode": trigger_mode,
+                "entry_trigger_rule": "aggressive_sweep_touch_no_reclaim_close" if trigger_mode == "sweep_touch" else "wait_for_close_back_above_range_low",
                 "target_rule": "highest_body_open_or_close_no_wicks",
                 "range_window_et": "09:00-10:00",
                 "range_window_pt": "06:00-07:00",

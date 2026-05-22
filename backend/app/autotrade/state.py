@@ -74,6 +74,19 @@ class AutoTradeStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_entries (
+                    order_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL,
+                    signal_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
             if self.get_raw("config") is None:
                 self.set_config(AutoTradeConfig())
             if self.get_raw("worker") is None:
@@ -203,6 +216,50 @@ class AutoTradeStore:
     def delete_runner_state(self, symbol: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM runner_states WHERE symbol = ?", (symbol.upper(),))
+
+    def upsert_pending_entry(self, order_id: str, payload: Dict[str, Any]) -> None:
+        symbol = str(payload.get("symbol") or "").upper()
+        strategy_id = str(payload.get("strategy_id") or "")
+        signal_id = str(payload.get("signal_id") or "")
+        now = time.time()
+        with self._connect() as conn:
+            existing = conn.execute("SELECT created_at FROM pending_entries WHERE order_id = ?", (order_id,)).fetchone()
+            created_at = float(existing["created_at"]) if existing else now
+            conn.execute(
+                "INSERT INTO pending_entries(order_id, symbol, strategy_id, signal_id, payload, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(order_id) DO UPDATE SET "
+                "symbol=excluded.symbol, strategy_id=excluded.strategy_id, signal_id=excluded.signal_id, "
+                "payload=excluded.payload, updated_at=excluded.updated_at",
+                (order_id, symbol, strategy_id, signal_id, json.dumps(payload, default=str), created_at, now),
+            )
+
+    def list_pending_entries(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT order_id, symbol, strategy_id, signal_id, payload, created_at, updated_at "
+                "FROM pending_entries ORDER BY created_at ASC"
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except Exception:
+                payload = {}
+            out.append({
+                "order_id": row["order_id"],
+                "symbol": row["symbol"],
+                "strategy_id": row["strategy_id"],
+                "signal_id": row["signal_id"],
+                "payload": payload,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            })
+        return out
+
+    def delete_pending_entry(self, order_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM pending_entries WHERE order_id = ?", (order_id,))
 
     def status_payload(self) -> Dict[str, Any]:
         cfg = self.get_config()
