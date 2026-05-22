@@ -16,8 +16,16 @@ import {
   sendBackendTestAlert,
   fetchSharedAlpacaState,
   saveSharedAlpacaState,
+  fetchAutoTradeStatus,
+  updateAutoTradeConfig,
+  startAutoTrade,
+  stopAutoTrade,
+  checkAutoTradeOnce,
   API_BASE,
   type SharedChartRange,
+  type AutoTradeStatus,
+  type AutoTradeSource,
+  type AutoTradeSizingMode,
 } from "../services/api";
 import type { PlaceAlpacaOrderRequest } from "../types/market";
 
@@ -459,6 +467,9 @@ function AlpacaPage() {
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string>("");
   const [submitMessage, setSubmitMessage] = useState<string>("");
+  const [autoTradeStatus, setAutoTradeStatus] = useState<AutoTradeStatus | null>(null);
+  const [autoTradeBusy, setAutoTradeBusy] = useState(false);
+  const [autoTradeError, setAutoTradeError] = useState<string>("");
   const brokerLoadInFlightRef = useRef(false);
   const orderPriceLocksRef = useRef<Record<string, { price: number; kind: string; expiresAt: number }>>({});
   // Order cancel quarantine: Alpaca can return a just-canceled order in the next
@@ -947,6 +958,72 @@ function AlpacaPage() {
     }, BROKER_POLL_MS);
     return () => window.clearInterval(id);
   }, [loadBrokerData]);
+
+
+  const loadAutoTradeStatus = useCallback(async (silent = true) => {
+    if (!silent) setAutoTradeBusy(true);
+    setAutoTradeError("");
+    try {
+      const status = await fetchAutoTradeStatus();
+      setAutoTradeStatus(status);
+    } catch (err) {
+      setAutoTradeError(err instanceof Error ? err.message : "Failed to load auto-trade status");
+    } finally {
+      if (!silent) setAutoTradeBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAutoTradeStatus(true);
+    const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void loadAutoTradeStatus(true);
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [loadAutoTradeStatus]);
+
+  const patchAutoTradeConfig = useCallback(async (patch: Record<string, unknown>) => {
+    setAutoTradeBusy(true);
+    setAutoTradeError("");
+    try {
+      const status = await updateAutoTradeConfig(patch);
+      setAutoTradeStatus(status);
+    } catch (err) {
+      setAutoTradeError(err instanceof Error ? err.message : "Failed to update auto-trade config");
+    } finally {
+      setAutoTradeBusy(false);
+    }
+  }, []);
+
+  const toggleAutoTrade = useCallback(async () => {
+    setAutoTradeBusy(true);
+    setAutoTradeError("");
+    try {
+      const isOn = Boolean(autoTradeStatus?.config?.enabled);
+      const next = isOn
+        ? await stopAutoTrade()
+        : await startAutoTrade({ enabled: true, mode: "paper" });
+      setAutoTradeStatus(next);
+    } catch (err) {
+      setAutoTradeError(err instanceof Error ? err.message : "Failed to toggle auto trade");
+    } finally {
+      setAutoTradeBusy(false);
+    }
+  }, [autoTradeStatus?.config?.enabled]);
+
+  const runAutoTradeCheckOnce = useCallback(async () => {
+    setAutoTradeBusy(true);
+    setAutoTradeError("");
+    try {
+      await checkAutoTradeOnce();
+      await loadAutoTradeStatus(true);
+      await loadBrokerData(true);
+    } catch (err) {
+      setAutoTradeError(err instanceof Error ? err.message : "Auto trade check failed");
+    } finally {
+      setAutoTradeBusy(false);
+    }
+  }, [loadAutoTradeStatus, loadBrokerData]);
 
   const applyWatchlist = () => {
     const next = normalizeWatchlist(watchlistInput);
@@ -1549,6 +1626,147 @@ function AlpacaPage() {
       patchOrderPrice,
     ]
   );
+
+
+  const renderAutoTradePanel = () => {
+    const cfg = autoTradeStatus?.config;
+    const enabled = Boolean(cfg?.enabled);
+    const lastSkip = autoTradeStatus?.last_skip;
+    const lastSignal = autoTradeStatus?.last_signal;
+    const lastOrder = autoTradeStatus?.last_order;
+
+    return (
+      <section style={{ ...subPanelStyle, border: enabled ? "1px solid rgba(34,197,94,0.42)" : subPanelStyle.border }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <div>
+            <div style={sectionTitleStyle}>Auto Trade</div>
+            <div style={{ fontSize: 11, opacity: 0.72 }}>Bullish 6-7 sweep · paper guarded</div>
+          </div>
+          <button
+            type="button"
+            onClick={toggleAutoTrade}
+            disabled={autoTradeBusy}
+            style={{
+              ...primaryButtonStyle,
+              background: enabled ? "#16a34a" : "#334155",
+              border: enabled ? "1px solid rgba(187,247,208,0.55)" : "1px solid rgba(255,255,255,0.14)",
+              minWidth: 112,
+            }}
+          >
+            {autoTradeBusy ? "Working..." : enabled ? "AUTO ON" : "AUTO OFF"}
+          </button>
+        </div>
+
+        {autoTradeError ? <div style={errorBoxStyle}>{autoTradeError}</div> : null}
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <div>
+            <label style={labelStyle}>Source</label>
+            <select
+              value={(cfg?.source ?? "manual") as AutoTradeSource}
+              onChange={(e) => void patchAutoTradeConfig({ source: e.target.value as AutoTradeSource })}
+              style={selectStyle}
+            >
+              <option value="manual">Manual WL</option>
+              <option value="scanner">Scanner WL</option>
+              <option value="both">Both</option>
+            </select>
+          </div>
+          <div>
+            <label style={labelStyle}>Timeframe</label>
+            <select
+              value={cfg?.timeframe ?? "1m"}
+              onChange={(e) => void patchAutoTradeConfig({ timeframe: e.target.value })}
+              style={selectStyle}
+            >
+              <option value="1m">1m</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+          <div>
+            <label style={labelStyle}>Sizing</label>
+            <select
+              value={(cfg?.sizing_mode ?? "dollars") as AutoTradeSizingMode}
+              onChange={(e) => void patchAutoTradeConfig({ sizing_mode: e.target.value as AutoTradeSizingMode })}
+              style={selectStyle}
+            >
+              <option value="dollars">Dollars</option>
+              <option value="shares">Shares</option>
+            </select>
+          </div>
+          <div>
+            <label style={labelStyle}>{(cfg?.sizing_mode ?? "dollars") === "shares" ? "Shares" : "Trade $"}</label>
+            <input
+              type="number"
+              min="1"
+              step={(cfg?.sizing_mode ?? "dollars") === "shares" ? "1" : "25"}
+              value={(cfg?.sizing_mode ?? "dollars") === "shares" ? String(cfg?.fixed_shares ?? 100) : String(cfg?.trade_amount ?? 500)}
+              onChange={(e) => {
+                const value = Number(e.target.value || 0);
+                void patchAutoTradeConfig((cfg?.sizing_mode ?? "dollars") === "shares" ? { fixed_shares: value } : { trade_amount: value });
+              }}
+              style={inputStyle}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+          <div>
+            <label style={labelStyle}>Min Range $</label>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={String(cfg?.min_profit_range ?? 0.15)}
+              onChange={(e) => void patchAutoTradeConfig({ min_profit_range: Number(e.target.value || 0) })}
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>Max Active</label>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={String(cfg?.max_active_trades ?? 1)}
+              onChange={(e) => void patchAutoTradeConfig({ max_active_trades: Number(e.target.value || 1) })}
+              style={inputStyle}
+            />
+          </div>
+        </div>
+
+        <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+          <input
+            type="checkbox"
+            checked={Boolean(cfg?.require_flat_account ?? true)}
+            onChange={(e) => void patchAutoTradeConfig({ require_flat_account: e.target.checked })}
+          />
+          Lock out if any position/open order exists
+        </label>
+
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button type="button" onClick={() => void loadAutoTradeStatus(false)} style={{ ...secondaryButtonStyle, flex: 1 }}>
+            Refresh
+          </button>
+          <button type="button" onClick={runAutoTradeCheckOnce} disabled={autoTradeBusy} style={{ ...secondaryButtonStyle, flex: 1 }}>
+            Check Once
+          </button>
+        </div>
+
+        <div style={{ marginTop: 10, display: "grid", gap: 5, fontSize: 12, opacity: 0.86 }}>
+          <div>Status: <strong>{autoTradeStatus?.status ?? "N/A"}</strong>{autoTradeStatus?.running ? " · loop running" : ""}</div>
+          {lastSignal ? <div>Last signal: {lastSignal.symbol} entry {lastSignal.entry_price} → target {lastSignal.target_price}</div> : null}
+          {lastOrder ? <div style={{ color: "#86efac" }}>Last order: {lastOrder.symbol} qty {lastOrder.qty}</div> : null}
+          {lastSkip ? <div style={{ color: "#fbbf24" }}>Last skip: {lastSkip.symbol ?? "—"} · {lastSkip.reason}</div> : null}
+          <div style={{ opacity: 0.68 }}>Mode is forced to paper unless backend live lock is explicitly changed.</div>
+        </div>
+      </section>
+    );
+  };
 
   const renderChartControls = (activeTimeframe: Exclude<ExpandedChartKey, null>) => (
     <div
@@ -2202,6 +2420,8 @@ function AlpacaPage() {
             <div style={kvRowStyle}><span>Cash</span><strong>{formatMoney(account?.cash)}</strong></div>
             <div style={kvRowStyle}><span>PDT Count</span><strong>{account?.daytrade_count ?? "N/A"}</strong></div>
           </section>
+
+          {renderAutoTradePanel()}
 
           <section style={subPanelStyle}>
             <div style={sectionTitleStyle}>Custom Order Entry</div>

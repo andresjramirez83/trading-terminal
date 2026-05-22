@@ -438,6 +438,384 @@ scanner_last_status: str = "stopped"
 scanner_run_count: int = 0
 scanner_last_auto_ah_save_date: Optional[str] = None
 
+
+# === AUTO TRADE STATE (paper-first guarded execution) ===
+class AutoTradeConfig(BaseModel):
+    enabled: bool = False
+    mode: str = "paper"  # hard-guarded to paper unless allow_live=True
+    allow_live: bool = False
+    source: str = "manual"  # manual | scanner | both
+    timeframe: str = "1m"
+    sizing_mode: str = "dollars"  # dollars | shares
+    trade_amount: float = 500.0
+    fixed_shares: int = 100
+    max_active_trades: int = 1
+    min_profit_range: float = 0.15
+    sweep_buffer_pct: float = 0.001
+    stop_buffer_pct: float = 0.002
+    poll_seconds: int = 10
+    extended_hours: bool = False
+    max_symbols: int = 12
+    require_flat_account: bool = True
+    max_signal_age_bars: int = 3
+
+
+class AutoTradeConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None
+    allow_live: Optional[bool] = None
+    source: Optional[str] = None
+    timeframe: Optional[str] = None
+    sizing_mode: Optional[str] = None
+    trade_amount: Optional[float] = None
+    fixed_shares: Optional[int] = None
+    max_active_trades: Optional[int] = None
+    min_profit_range: Optional[float] = None
+    sweep_buffer_pct: Optional[float] = None
+    stop_buffer_pct: Optional[float] = None
+    poll_seconds: Optional[int] = None
+    extended_hours: Optional[bool] = None
+    max_symbols: Optional[int] = None
+    require_flat_account: Optional[bool] = None
+    max_signal_age_bars: Optional[int] = None
+
+
+auto_trade_config = AutoTradeConfig()
+auto_trade_task: Optional[asyncio.Task] = None
+auto_trade_last_check: Optional[datetime] = None
+auto_trade_last_error: Optional[str] = None
+auto_trade_last_status: str = "stopped"
+auto_trade_last_skip: Optional[Dict[str, Any]] = None
+auto_trade_last_signal: Optional[Dict[str, Any]] = None
+auto_trade_last_order: Optional[Dict[str, Any]] = None
+auto_trade_history: List[Dict[str, Any]] = []
+auto_trade_fired_signal_ids: Dict[str, str] = {}
+
+
+def _auto_trade_log(event: Dict[str, Any]) -> None:
+    event = {**event, "ts": datetime.now(timezone.utc).isoformat()}
+    auto_trade_history.append(event)
+    if len(auto_trade_history) > 100:
+        del auto_trade_history[:-100]
+
+
+def _auto_trade_status_payload() -> Dict[str, Any]:
+    return {
+        "config": auto_trade_config.dict(),
+        "running": bool(auto_trade_task and not auto_trade_task.done()),
+        "status": auto_trade_last_status,
+        "last_check": auto_trade_last_check.isoformat() if auto_trade_last_check else None,
+        "last_error": auto_trade_last_error,
+        "last_skip": auto_trade_last_skip,
+        "last_signal": auto_trade_last_signal,
+        "last_order": auto_trade_last_order,
+        "history": auto_trade_history[-30:],
+    }
+
+
+def _apply_auto_trade_update(update: AutoTradeConfigUpdate) -> None:
+    data = update.dict(exclude_unset=True)
+    for key, value in data.items():
+        if key == "mode":
+            value = str(value or "paper").lower().strip()
+            if value not in {"paper", "live"}:
+                raise HTTPException(status_code=400, detail="mode must be paper or live")
+        if key == "source":
+            value = str(value or "manual").lower().strip()
+            if value not in {"manual", "scanner", "both"}:
+                raise HTTPException(status_code=400, detail="source must be manual, scanner, or both")
+        if key == "timeframe":
+            value = str(value or "1m").lower().strip()
+            if value not in {"1m", "5m", "15m"}:
+                raise HTTPException(status_code=400, detail="timeframe must be 1m, 5m, or 15m")
+        if key == "sizing_mode":
+            value = str(value or "dollars").lower().strip()
+            if value not in {"dollars", "shares"}:
+                raise HTTPException(status_code=400, detail="sizing_mode must be dollars or shares")
+        if key in {"trade_amount", "min_profit_range", "sweep_buffer_pct", "stop_buffer_pct"}:
+            value = max(0.0, float(value))
+        if key in {"fixed_shares", "max_active_trades", "poll_seconds", "max_symbols", "max_signal_age_bars"}:
+            value = max(1, int(value))
+        setattr(auto_trade_config, key, value)
+
+    # hard safety: live cannot be enabled by accident from the simple UI
+    if auto_trade_config.mode == "live" and not auto_trade_config.allow_live:
+        auto_trade_config.enabled = False
+        raise HTTPException(status_code=400, detail="Auto trade live mode is locked. Keep mode paper or explicitly allow_live first.")
+
+
+def _load_auto_trade_manual_symbols() -> List[str]:
+    try:
+        if not ALPACA_APP_STATE_FILE.exists():
+            return []
+        data = json.loads(ALPACA_APP_STATE_FILE.read_text(encoding="utf-8"))
+        manual = data.get("manualWatchlist") if isinstance(data, dict) else []
+        selected = data.get("selectedSymbol") if isinstance(data, dict) else None
+        return _normalize_symbol_list([*(manual or []), selected or ""])
+    except Exception:
+        return []
+
+
+def _load_auto_trade_scanner_symbols() -> List[str]:
+    rows = (scanner_cache or {}).get("rows") if isinstance(scanner_cache, dict) else []
+    symbols = [str(row.get("symbol") or "") for row in rows or [] if isinstance(row, dict)]
+    return _normalize_symbol_list(symbols)
+
+
+def _auto_trade_symbols() -> List[str]:
+    source = auto_trade_config.source
+    symbols: List[str] = []
+    if source in {"manual", "both"}:
+        symbols.extend(_load_auto_trade_manual_symbols())
+    if source in {"scanner", "both"}:
+        symbols.extend(_load_auto_trade_scanner_symbols())
+    return _normalize_symbol_list(symbols)[: max(1, int(auto_trade_config.max_symbols))]
+
+
+def _bar_et_datetime(row: Dict[str, Any]) -> datetime:
+    raw = int(float(row.get("time", row.get("t", 0)) or 0))
+    if raw < 10_000_000_000:
+        raw *= 1000
+    return datetime.fromtimestamp(raw / 1000, ET)
+
+
+def _find_bullish_six_seven_signal(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    bars = fetch_signal_bars(symbol, timeframe)
+    if len(bars) < 20:
+        return None
+
+    latest_day = _bar_et_datetime(bars[-1]).date()
+    day_bars = [b for b in bars if _bar_et_datetime(b).date() == latest_day]
+    range_bars = []
+    after_bars = []
+    for bar in day_bars:
+        dt = _bar_et_datetime(bar)
+        hhmm = dt.hour * 100 + dt.minute
+        if 900 <= hhmm < 1000:
+            range_bars.append(bar)
+        elif hhmm >= 1000:
+            after_bars.append(bar)
+
+    if not range_bars or not after_bars:
+        return None
+
+    range_low = min(_safe_price(b.get("low")) for b in range_bars)
+    range_close = _safe_price(range_bars[-1].get("close"))
+    if range_low <= 0 or range_close <= 0 or range_close <= range_low:
+        return None
+
+    min_range = float(auto_trade_config.min_profit_range)
+    profit_range = range_close - range_low
+    if profit_range < min_range:
+        return {
+            "symbol": symbol.upper(),
+            "tradable": False,
+            "skip_reason": f"range too small: ${profit_range:.2f} < ${min_range:.2f}",
+            "entry_price": round(range_low, 4),
+            "target_price": round(range_close, 4),
+            "profit_range": round(profit_range, 4),
+        }
+
+    threshold = range_low * (1.0 - float(auto_trade_config.sweep_buffer_pct))
+    sweep_low: Optional[float] = None
+    signal_bar_index: Optional[int] = None
+    signal_bar: Optional[Dict[str, Any]] = None
+
+    for idx, bar in enumerate(after_bars):
+        low = _safe_price(bar.get("low"))
+        close = _safe_price(bar.get("close"))
+        if low < threshold:
+            sweep_low = low if sweep_low is None else min(sweep_low, low)
+        if sweep_low is not None and close > range_low:
+            signal_bar_index = idx
+            signal_bar = bar
+
+    if signal_bar is None or signal_bar_index is None or sweep_low is None:
+        return None
+
+    bars_since = len(after_bars) - 1 - signal_bar_index
+    if bars_since > max(1, int(auto_trade_config.max_signal_age_bars)):
+        return None
+
+    signal_dt = _bar_et_datetime(signal_bar)
+    signal_id = f"six_seven_bull::{symbol.upper()}::{latest_day.isoformat()}::{int(float(signal_bar.get('time', signal_bar.get('t', 0)) or 0))}"
+    entry_price = round(range_low, 4)
+    target_price = round(range_close, 4)
+    stop_price = round(float(sweep_low) * (1.0 - float(auto_trade_config.stop_buffer_pct)), 4)
+
+    return {
+        "symbol": symbol.upper(),
+        "tradable": True,
+        "signal_id": signal_id,
+        "setup": "bullish_6_7_low_sweep_retest",
+        "timeframe": timeframe,
+        "signal_time": signal_dt.isoformat(),
+        "entry_price": entry_price,
+        "target_price": target_price,
+        "stop_price": stop_price,
+        "range_low": round(range_low, 4),
+        "range_close": target_price,
+        "sweep_low": round(float(sweep_low), 4),
+        "profit_range": round(target_price - entry_price, 4),
+        "bars_since_signal": bars_since,
+    }
+
+
+def _auto_trade_active_count(positions: List[Dict[str, Any]], orders: List[Dict[str, Any]]) -> int:
+    open_orders = [o for o in orders or [] if str(o.get("status") or "").lower() not in {"filled", "canceled", "expired", "rejected"}]
+    open_positions = []
+    for p in positions or []:
+        try:
+            qty = abs(float(p.get("qty") or 0))
+        except Exception:
+            qty = 0.0
+        if qty > 0:
+            open_positions.append(p)
+    if auto_trade_config.require_flat_account:
+        return len(open_orders) + len(open_positions)
+    auto_orders = [o for o in open_orders if str(o.get("client_order_id") or "").startswith("autotrade_")]
+    return len(auto_orders)
+
+
+def _auto_trade_required_qty(entry_price: float, buying_power: float) -> int:
+    if auto_trade_config.sizing_mode == "shares":
+        qty = int(auto_trade_config.fixed_shares)
+        required = qty * entry_price
+        if required > buying_power:
+            return 0
+        return max(0, qty)
+    dollars = min(float(auto_trade_config.trade_amount), buying_power)
+    return max(0, int(dollars // entry_price))
+
+
+def _auto_trade_try_execute(symbol: str) -> Dict[str, Any]:
+    signal = _find_bullish_six_seven_signal(symbol, auto_trade_config.timeframe)
+    if not signal:
+        return {"symbol": symbol.upper(), "action": "none", "reason": "no fresh bullish 6-7 sweep"}
+    if not signal.get("tradable"):
+        return {"symbol": symbol.upper(), "action": "skip", "reason": signal.get("skip_reason"), "signal": signal}
+
+    signal_id = str(signal.get("signal_id"))
+    if auto_trade_fired_signal_ids.get(symbol.upper()) == signal_id:
+        return {"symbol": symbol.upper(), "action": "skip", "reason": "signal already handled", "signal": signal}
+
+    mode = auto_trade_config.mode
+    if mode == "live" and not auto_trade_config.allow_live:
+        return {"symbol": symbol.upper(), "action": "skip", "reason": "live mode locked", "signal": signal}
+
+    service = get_alpaca_service(mode)
+    account = service.get_account()
+    positions = service.get_positions()
+    orders = service.get_orders(status="open", limit=100, nested=True)
+
+    active_count = _auto_trade_active_count(positions, orders)
+    if active_count >= int(auto_trade_config.max_active_trades):
+        return {"symbol": symbol.upper(), "action": "skip", "reason": "active trade/order lockout", "active_count": active_count, "signal": signal}
+
+    buying_power = _safe_price(account.get("buying_power"), default=_safe_price(account.get("cash")))
+    entry_price = float(signal["entry_price"])
+    qty = _auto_trade_required_qty(entry_price, buying_power)
+    if qty <= 0:
+        return {"symbol": symbol.upper(), "action": "skip", "reason": "insufficient buying power", "buying_power": buying_power, "signal": signal}
+
+    client_order_id = f"autotrade_{symbol.upper()}_{int(datetime.now(timezone.utc).timestamp())}"
+    order = service.place_order(
+        symbol=symbol,
+        side="buy",
+        order_type="limit",
+        time_in_force="day",
+        qty=qty,
+        limit_price=entry_price,
+        extended_hours=bool(auto_trade_config.extended_hours),
+        client_order_id=client_order_id,
+        order_class="bracket",
+        take_profit={"limit_price": float(signal["target_price"])},
+        stop_loss={"stop_price": float(signal["stop_price"])},
+    )
+    auto_trade_fired_signal_ids[symbol.upper()] = signal_id
+    return {"symbol": symbol.upper(), "action": "ordered", "qty": qty, "order": order, "signal": signal}
+
+
+async def run_auto_trade_loop() -> None:
+    global auto_trade_last_check, auto_trade_last_error, auto_trade_last_status, auto_trade_last_skip, auto_trade_last_signal, auto_trade_last_order
+    print("[auto-trade-loop] started", flush=True)
+    while True:
+        try:
+            if not auto_trade_config.enabled:
+                auto_trade_last_status = "disabled"
+                await asyncio.sleep(1)
+                continue
+
+            auto_trade_last_status = "scanning"
+            symbols = _auto_trade_symbols()
+            auto_trade_last_check = datetime.now(timezone.utc)
+            if not symbols:
+                auto_trade_last_skip = {"reason": "no symbols selected", "source": auto_trade_config.source}
+                auto_trade_last_status = "idle"
+                await asyncio.sleep(max(3, int(auto_trade_config.poll_seconds)))
+                continue
+
+            for symbol in symbols:
+                result = await asyncio.to_thread(_auto_trade_try_execute, symbol)
+                action = result.get("action")
+                if action == "ordered":
+                    auto_trade_last_order = result
+                    auto_trade_last_signal = result.get("signal")
+                    auto_trade_last_skip = None
+                    auto_trade_last_status = "ordered"
+                    _auto_trade_log({"event": "ordered", **result})
+                    break
+                if action == "skip":
+                    auto_trade_last_skip = result
+                    _auto_trade_log({"event": "skip", **result})
+            else:
+                auto_trade_last_status = "watching"
+
+            auto_trade_last_error = None
+        except asyncio.CancelledError:
+            auto_trade_last_status = "cancelled"
+            print("[auto-trade-loop] cancelled", flush=True)
+            raise
+        except Exception as exc:
+            auto_trade_last_error = str(exc)
+            auto_trade_last_status = "error"
+            print(f"[auto-trade-loop] error: {exc}", flush=True)
+            traceback.print_exc()
+
+        await asyncio.sleep(max(3, int(auto_trade_config.poll_seconds)))
+
+
+def start_auto_trade_task_if_needed() -> None:
+    global auto_trade_task
+    if auto_trade_task and not auto_trade_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        auto_trade_task = loop.create_task(run_auto_trade_loop())
+        return
+    except RuntimeError:
+        pass
+    loop = BACKGROUND_EVENT_LOOP
+    if loop is not None and loop.is_running():
+        def _start_on_loop() -> None:
+            global auto_trade_task
+            if auto_trade_task and not auto_trade_task.done():
+                return
+            auto_trade_task = loop.create_task(run_auto_trade_loop())
+        loop.call_soon_threadsafe(_start_on_loop)
+
+
+async def stop_auto_trade_task() -> None:
+    global auto_trade_task
+    task = auto_trade_task
+    auto_trade_task = None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
 SCANNER_BACKGROUND_ENABLED = os.getenv("SCANNER_BACKGROUND_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SCANNER_INTERVAL_SECONDS = max(30, int(os.getenv("SCANNER_INTERVAL_SECONDS", "45") or "45"))
 SCANNER_MAX_SYMBOLS = max(1, int(os.getenv("SCANNER_MAX_SYMBOLS", "25") or "25"))
@@ -1938,6 +2316,7 @@ async def on_startup() -> None:
     if acquire_background_worker_lock():
         start_backend_alert_task_if_needed()
         start_scanner_task_if_needed()
+        start_auto_trade_task_if_needed()
 
 
 @app.on_event("shutdown")
@@ -1946,6 +2325,7 @@ async def on_shutdown() -> None:
     if BACKGROUND_LOCK_HELD:
         await stop_backend_alert_task()
         await stop_scanner_task()
+        await stop_auto_trade_task()
         release_background_worker_lock()
     if POLYGON_HTTP_CLIENT is not None and not POLYGON_HTTP_CLIENT.is_closed:
         await POLYGON_HTTP_CLIENT.aclose()
@@ -2842,6 +3222,46 @@ def get_chart_projections(symbol: str, scope: str):
 def put_chart_projections(symbol: str, scope: str, items: Any = Body(default=[])):
     return _write_chart_items(symbol, scope, "projections", items)
 
+
+
+@app.get("/auto-trade/status")
+def auto_trade_status():
+    return _auto_trade_status_payload()
+
+
+@app.post("/auto-trade/config")
+def auto_trade_config_update(update: AutoTradeConfigUpdate):
+    _apply_auto_trade_update(update)
+    if auto_trade_config.enabled:
+        start_auto_trade_task_if_needed()
+    return _auto_trade_status_payload()
+
+
+@app.post("/auto-trade/start")
+def auto_trade_start(update: Optional[AutoTradeConfigUpdate] = Body(default=None)):
+    if update is not None:
+        _apply_auto_trade_update(update)
+    auto_trade_config.enabled = True
+    if auto_trade_config.mode == "live" and not auto_trade_config.allow_live:
+        auto_trade_config.enabled = False
+        raise HTTPException(status_code=400, detail="Auto trade live mode is locked. Use paper mode.")
+    start_auto_trade_task_if_needed()
+    return _auto_trade_status_payload()
+
+
+@app.post("/auto-trade/stop")
+def auto_trade_stop():
+    auto_trade_config.enabled = False
+    return _auto_trade_status_payload()
+
+
+@app.post("/auto-trade/check-once")
+async def auto_trade_check_once():
+    symbols = _auto_trade_symbols()
+    results = []
+    for symbol in symbols:
+        results.append(await asyncio.to_thread(_auto_trade_try_execute, symbol))
+    return {"symbols": symbols, "results": results, "status": _auto_trade_status_payload()}
 
 @app.get("/alpaca/account")
 def alpaca_account(mode: str = Query("paper")):

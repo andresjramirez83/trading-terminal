@@ -651,6 +651,81 @@ export async function cancelAlpacaOrder(
   return parseJson(res);
 }
 
+
+/* =========================
+   AUTO TRADE API
+   ========================= */
+
+export type AutoTradeSource = "manual" | "scanner" | "both";
+export type AutoTradeSizingMode = "dollars" | "shares";
+
+export type AutoTradeConfig = {
+  enabled: boolean;
+  mode: AlpacaMode;
+  allow_live: boolean;
+  source: AutoTradeSource;
+  timeframe: "1m" | "5m" | "15m";
+  sizing_mode: AutoTradeSizingMode;
+  trade_amount: number;
+  fixed_shares: number;
+  max_active_trades: number;
+  min_profit_range: number;
+  sweep_buffer_pct: number;
+  stop_buffer_pct: number;
+  poll_seconds: number;
+  extended_hours: boolean;
+  max_symbols: number;
+  require_flat_account: boolean;
+  max_signal_age_bars: number;
+};
+
+export type AutoTradeStatus = {
+  config: AutoTradeConfig;
+  running: boolean;
+  status: string;
+  last_check?: string | null;
+  last_error?: string | null;
+  last_skip?: any;
+  last_signal?: any;
+  last_order?: any;
+  history?: any[];
+};
+
+export type AutoTradeConfigUpdate = Partial<AutoTradeConfig>;
+
+export async function fetchAutoTradeStatus(): Promise<AutoTradeStatus> {
+  const res = await fetch(`${API_BASE}/auto-trade/status`);
+  return parseJson<AutoTradeStatus>(res);
+}
+
+export async function updateAutoTradeConfig(payload: AutoTradeConfigUpdate): Promise<AutoTradeStatus> {
+  const res = await fetch(`${API_BASE}/auto-trade/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson<AutoTradeStatus>(res);
+}
+
+export async function startAutoTrade(payload: AutoTradeConfigUpdate = {}): Promise<AutoTradeStatus> {
+  const res = await fetch(`${API_BASE}/auto-trade/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson<AutoTradeStatus>(res);
+}
+
+export async function stopAutoTrade(): Promise<AutoTradeStatus> {
+  const res = await fetch(`${API_BASE}/auto-trade/stop`, { method: "POST" });
+  return parseJson<AutoTradeStatus>(res);
+}
+
+export async function checkAutoTradeOnce(): Promise<any> {
+  const res = await fetch(`${API_BASE}/auto-trade/check-once`, { method: "POST" });
+  return parseJson<any>(res);
+}
+
 /* =========================
    SHARED APP STATE SYNC
    ========================= */
