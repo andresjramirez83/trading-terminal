@@ -659,6 +659,14 @@ export async function cancelAlpacaOrder(
 export type AutoTradeSource = "manual" | "scanner" | "both";
 export type AutoTradeSizingMode = "dollars" | "shares";
 export type AutoTradeRunnerMode = "off" | "scale_trail";
+export type AutoTradeStrategyId = "six_seven_sweep";
+
+export type AutoTradeStrategyConfig = {
+  enabled: boolean;
+  strategy_id: AutoTradeStrategyId;
+  weight: number;
+  min_score: number;
+};
 
 export type AutoTradeConfig = {
   enabled: boolean;
@@ -682,6 +690,7 @@ export type AutoTradeConfig = {
   scale_out_pct: number;
   trail_lookback_bars: number;
   trail_buffer_pct: number;
+  strategies?: AutoTradeStrategyConfig[];
 };
 
 export type AutoTradeStatus = {
@@ -693,6 +702,7 @@ export type AutoTradeStatus = {
   last_skip?: any;
   last_signal?: any;
   last_order?: any;
+  worker?: any;
   runner_states?: Record<string, any>;
   history?: any[];
 };
@@ -730,6 +740,16 @@ export async function stopAutoTrade(): Promise<AutoTradeStatus> {
 export async function checkAutoTradeOnce(): Promise<any> {
   const res = await fetch(`${API_BASE}/auto-trade/check-once`, { method: "POST" });
   return parseJson<any>(res);
+}
+
+export async function killAutoTrade(): Promise<AutoTradeStatus> {
+  const res = await fetch(`${API_BASE}/auto-trade/kill`, { method: "POST" });
+  return parseJson<AutoTradeStatus>(res);
+}
+
+export async function fetchAutoTradeStrategies(): Promise<{ strategies: Array<{ id: string; name: string }> }> {
+  const res = await fetch(`${API_BASE}/auto-trade/strategies`);
+  return parseJson<{ strategies: Array<{ id: string; name: string }> }>(res);
 }
 
 /* =========================

@@ -46,6 +46,7 @@ from app.services.signal_engine import (
     signal_state_from_dict,
     signal_state_to_dict,
 )
+from app.routes.auto_trade import router as professional_auto_trade_router
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 registry = ScannerRegistry()
@@ -67,6 +68,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Professional auto-trade API: shared SQLite state + dedicated worker execution.
+# Registered before legacy in-main endpoints so web workers never own trade state.
+app.include_router(professional_auto_trade_router)
 
 
 class Candle(BaseModel):
@@ -2506,7 +2511,8 @@ async def on_startup() -> None:
     if acquire_background_worker_lock():
         start_backend_alert_task_if_needed()
         start_scanner_task_if_needed()
-        start_auto_trade_task_if_needed()
+        # Auto-trade execution moved to dedicated trading-autotrade.service.
+        # Do not start an in-Gunicorn auto-trade loop here.
 
 
 @app.on_event("shutdown")
@@ -2515,7 +2521,7 @@ async def on_shutdown() -> None:
     if BACKGROUND_LOCK_HELD:
         await stop_backend_alert_task()
         await stop_scanner_task()
-        await stop_auto_trade_task()
+        # Dedicated auto-trade worker is stopped by systemd, not the web backend.
         release_background_worker_lock()
     if POLYGON_HTTP_CLIENT is not None and not POLYGON_HTTP_CLIENT.is_closed:
         await POLYGON_HTTP_CLIENT.aclose()
