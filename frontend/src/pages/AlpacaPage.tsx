@@ -1689,6 +1689,23 @@ function AlpacaPage() {
           </div>
         </div>
 
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 8 }}>
+          <div>
+            <label style={labelStyle}>Entry Trigger</label>
+            <select
+              value={String((cfg as any)?.entry_trigger_mode ?? "reclaim_close")}
+              onChange={(e) => void patchAutoTradeConfig({ entry_trigger_mode: e.target.value })}
+              style={selectStyle}
+            >
+              <option value="reclaim_close">Reclaim Close</option>
+              <option value="sweep_touch">Sweep Touch (Aggressive)</option>
+            </select>
+            <div style={{ marginTop: 4, fontSize: 11, opacity: 0.7, lineHeight: 1.25 }}>
+              Reclaim Close waits for candle close back above the blue line. Sweep Touch enters as soon as the low sweep is detected.
+            </div>
+          </div>
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
           <div>
             <label style={labelStyle}>Sizing</label>

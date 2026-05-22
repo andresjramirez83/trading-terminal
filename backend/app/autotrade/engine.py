@@ -29,6 +29,22 @@ class AutoTradeEngine:
         self.strategy_registry = StrategyRegistry()
         self.stop_requested = False
 
+
+    @staticmethod
+    def _alpaca_price(price: Any) -> float:
+        """Normalize to Alpaca price increment rules.
+
+        Alpaca rejects sub-penny prices: >= $1 uses cents, < $1 allows 4 decimals.
+        Use this for stored targets/stops and target-reached comparisons.
+        """
+        try:
+            value = float(price)
+        except Exception:
+            return 0.0
+        if value <= 0:
+            return 0.0
+        return round(value, 2) if value >= 1 else round(value, 4)
+
     async def run_forever(self) -> None:
         self.store.set_worker_status({"running": True, "status": "started", "last_error": None})
         print("[auto-trade-worker] started", flush=True)
@@ -111,8 +127,8 @@ class AutoTradeEngine:
                 "strategy_id": best.strategy_id,
                 "signal_id": best.signal_id,
                 "entry_price": best.entry_price,
-                "target_price": best.target_price,
-                "stop_price": best.stop_price,
+                "target_price": self._alpaca_price(best.target_price),
+                "stop_price": self._alpaca_price(best.stop_price),
                 "qty": qty,
                 "submitted_at": datetime.now(timezone.utc).isoformat(),
                 "reason": "cancel_if_target_reached_before_entry_fill",
@@ -148,7 +164,7 @@ class AutoTradeEngine:
             order_id = str(item.get("order_id") or "")
             symbol = str(item.get("symbol") or "").upper()
             payload = item.get("payload") or {}
-            target = self._safe_float(payload.get("target_price"))
+            target = self._alpaca_price(payload.get("target_price"))
             if not order_id or not symbol or target <= 0:
                 if order_id:
                     self.store.delete_pending_entry(order_id)
@@ -200,6 +216,7 @@ class AutoTradeEngine:
                 )
 
     async def _target_reached(self, symbol: str, target: float, polygon: PolygonService) -> tuple[bool, Dict[str, Any]]:
+        target = self._alpaca_price(target)
         last_price = 0.0
         recent_high = 0.0
         try:
@@ -216,7 +233,7 @@ class AutoTradeEngine:
         except Exception:
             recent_high = 0.0
 
-        reached = (last_price >= target) or (recent_high >= target)
+        reached = (self._alpaca_price(last_price) >= target) or (self._alpaca_price(recent_high) >= target)
         return reached, {"last_price": last_price, "recent_1m_high": recent_high, "target_price": target}
 
     @staticmethod
