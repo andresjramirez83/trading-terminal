@@ -1820,6 +1820,7 @@ function computeSixSevenSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
     close: number | null;
     ready: boolean;
     lowSwept: boolean;
+    highSwept: boolean;
   };
 
   const signals: SignalMarkerPoint[] = [];
@@ -1835,6 +1836,7 @@ function computeSixSevenSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
         close: null,
         ready: false,
         lowSwept: false,
+        highSwept: false,
       };
     }
 
@@ -1853,14 +1855,10 @@ function computeSixSevenSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
       state.ready = true;
     }
 
-    if (!afterRange || !state.ready || state.low == null || state.close == null) {
+    if (!afterRange || !state.ready || state.high == null || state.low == null || state.close == null) {
       continue;
     }
 
-    // Bullish-only setup:
-    // 1) price sweeps below the 6-7 low
-    // 2) candle closes back above the 6-7 low
-    // 3) target is the 6-7 close
     const lowSweep =
       !state.lowSwept &&
       bar.low < state.low * (1 - SWEEP_BUFFER_PCT) &&
@@ -1884,6 +1882,30 @@ function computeSixSevenSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
       });
       state.lowSwept = true;
     }
+
+    const highSweep =
+      !state.highSwept &&
+      bar.high > state.high * (1 + SWEEP_BUFFER_PCT) &&
+      bar.close < state.high;
+
+    if (highSweep) {
+      const risk = Math.max(bar.high - state.high, 0);
+      signals.push({
+        time: toChartTime(bar.time),
+        price: bar.high,
+        label: `6-7 HIGH SWEEP ENTRY ↓ | tgt ${formatPrice(state.close)} | stop ${formatPrice(bar.high)}`,
+        color: "#ef4444",
+        direction: "down",
+      });
+      signals.push({
+        time: toChartTime(bar.time),
+        price: state.close,
+        label: `6-7 CLOSE TARGET ${formatPrice(state.close)}${risk > 0 ? ` | R ${formatPrice(risk)}` : ""}`,
+        color: "#facc15",
+        direction: "up",
+      });
+      state.highSwept = true;
+    }
   }
 
   return signals.slice(-40);
@@ -1903,17 +1925,15 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
 
   type RangeState = {
     date: string;
+    high: number | null;
     low: number | null;
     close: number | null;
     lowSweepActive: boolean;
+    highSweepActive: boolean;
     lowTargetHit: boolean;
+    highTargetHit: boolean;
   };
 
-  // Bullish-only, trade-zone-only visual rules:
-  // - do not draw bearish/high-sweep lines
-  // - do not carry the 6-7 low across the whole session
-  // - cyan support + orange target only start on the LOW SWEEP entry candle
-  // - both stop once the orange 6-7 close target is touched
   const highLine: LinePoint[] = [];
   const lowLine: LinePoint[] = [];
   const closeLine: LinePoint[] = [];
@@ -1924,10 +1944,13 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
     if (!state || state.date !== parts.date) {
       state = {
         date: parts.date,
+        high: null,
         low: null,
         close: null,
         lowSweepActive: false,
+        highSweepActive: false,
         lowTargetHit: false,
+        highTargetHit: false,
       };
     }
 
@@ -1935,41 +1958,58 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
     const afterRange = parts.hm >= RANGE_END_ET;
 
     if (inRange) {
+      state.high = state.high == null ? bar.high : Math.max(state.high, bar.high);
       state.low = state.low == null ? bar.low : Math.min(state.low, bar.low);
       state.close = bar.close;
       continue;
     }
 
-    if (!afterRange || state.low == null || state.close == null || state.lowTargetHit) {
+    if (!afterRange || state.high == null || state.low == null || state.close == null) {
       continue;
     }
 
     const time = toChartTime(bar.time);
 
+    // Keep the 6-7 range visible all day so you can see the sweep level.
+    highLine.push({ time, value: state.high });
+    lowLine.push({ time, value: state.low });
+
     const lowSweep =
       !state.lowSweepActive &&
+      !state.lowTargetHit &&
       bar.low < state.low * (1 - SWEEP_BUFFER_PCT) &&
       bar.close > state.low;
 
-    if (lowSweep) {
-      state.lowSweepActive = true;
+    const highSweep =
+      !state.highSweepActive &&
+      !state.highTargetHit &&
+      bar.high > state.high * (1 + SWEEP_BUFFER_PCT) &&
+      bar.close < state.high;
+
+    if (lowSweep) state.lowSweepActive = true;
+    if (highSweep) state.highSweepActive = true;
+
+    const lowTargetActive = state.lowSweepActive && !state.lowTargetHit;
+    const highTargetActive = state.highSweepActive && !state.highTargetHit;
+
+    // Only draw the orange target after an actual sweep entry. Stop drawing once target is touched.
+    if (lowTargetActive || highTargetActive) {
+      closeLine.push({ time, value: state.close });
     }
 
-    // Only draw the affected bullish trade area after the sweep/reclaim entry exists.
-    if (state.lowSweepActive) {
-      lowLine.push({ time, value: state.low });
-      closeLine.push({ time, value: state.close });
+    if (lowTargetActive && bar.high >= state.close) {
+      state.lowTargetHit = true;
+      state.lowSweepActive = false;
+    }
 
-      if (bar.high >= state.close) {
-        state.lowTargetHit = true;
-        state.lowSweepActive = false;
-      }
+    if (highTargetActive && bar.low <= state.close) {
+      state.highTargetHit = true;
+      state.highSweepActive = false;
     }
   }
 
   return { highLine, lowLine, closeLine };
 }
-
 
 function computeVolumeSignalMarkers(bars: Candle[]): SignalMarkerPoint[] {
   if (bars.length < 25) return [];
@@ -5264,9 +5304,7 @@ function ChartPanelComponent({
       vwap: visibility.vwap && lineVisibility.vwap,
       compression: visibility.compression && lineVisibility.compression,
       choch: visibility.choch && lineVisibility.choch,
-      // Session bands are controlled by the page Studies toggle only.
-      // Do not double-hide them behind the internal Line Visibility state because old localStorage can keep them off.
-      sessionBands: visibility.sessionBands,
+      sessionBands: visibility.sessionBands && lineVisibility.sessionBands,
       projections: visibility.projections && lineVisibility.projections,
       trendlines: visibility.trendlines && lineVisibility.trendlines,
       fakeEngulfing: (visibility.fakeEngulfing ?? true) && lineVisibility.fakeEngulfing,
@@ -8127,9 +8165,8 @@ function ChartPanelComponent({
       color: "#facc15",
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
-      // Keep this as a plotted segment only. Do not let Lightweight draw a full-width price line.
-      priceLineVisible: false,
-      lastValueVisible: false,
+      priceLineVisible: true,
+      lastValueVisible: true,
       crosshairMarkerVisible: false,
     });
 
@@ -8137,9 +8174,8 @@ function ChartPanelComponent({
       color: "#22d3ee",
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
-      // Keep this as a plotted segment only. Do not let Lightweight draw a full-width price line.
-      priceLineVisible: false,
-      lastValueVisible: false,
+      priceLineVisible: true,
+      lastValueVisible: true,
       crosshairMarkerVisible: false,
     });
 
@@ -8147,9 +8183,8 @@ function ChartPanelComponent({
       color: "#f97316",
       lineWidth: 2,
       lineStyle: LineStyle.Dotted,
-      // The close target should stop when hit. A priceLine would keep drawing forever, so keep it off.
-      priceLineVisible: false,
-      lastValueVisible: false,
+      priceLineVisible: true,
+      lastValueVisible: true,
       crosshairMarkerVisible: false,
     });
 
@@ -10297,7 +10332,7 @@ function ChartPanelComponent({
               width: band.width,
               height: "100%",
               pointerEvents: "none",
-              zIndex: 8,
+              zIndex: 4,
               background:
                 band.kind === "premarket" || band.kind === "afterhours" || band.kind === "overnight"
                   ? "rgba(209,213,219,0.18)"

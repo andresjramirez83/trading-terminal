@@ -458,6 +458,10 @@ class AutoTradeConfig(BaseModel):
     max_symbols: int = 12
     require_flat_account: bool = True
     max_signal_age_bars: int = 3
+    runner_mode: str = "off"  # off | scale_trail
+    scale_out_pct: float = 0.50
+    trail_lookback_bars: int = 2
+    trail_buffer_pct: float = 0.002
 
 
 class AutoTradeConfigUpdate(BaseModel):
@@ -478,6 +482,10 @@ class AutoTradeConfigUpdate(BaseModel):
     max_symbols: Optional[int] = None
     require_flat_account: Optional[bool] = None
     max_signal_age_bars: Optional[int] = None
+    runner_mode: Optional[str] = None
+    scale_out_pct: Optional[float] = None
+    trail_lookback_bars: Optional[int] = None
+    trail_buffer_pct: Optional[float] = None
 
 
 auto_trade_config = AutoTradeConfig()
@@ -490,6 +498,7 @@ auto_trade_last_signal: Optional[Dict[str, Any]] = None
 auto_trade_last_order: Optional[Dict[str, Any]] = None
 auto_trade_history: List[Dict[str, Any]] = []
 auto_trade_fired_signal_ids: Dict[str, str] = {}
+auto_trade_runner_states: Dict[str, Dict[str, Any]] = {}
 
 
 def _auto_trade_log(event: Dict[str, Any]) -> None:
@@ -509,6 +518,7 @@ def _auto_trade_status_payload() -> Dict[str, Any]:
         "last_skip": auto_trade_last_skip,
         "last_signal": auto_trade_last_signal,
         "last_order": auto_trade_last_order,
+        "runner_states": auto_trade_runner_states,
         "history": auto_trade_history[-30:],
     }
 
@@ -532,9 +542,15 @@ def _apply_auto_trade_update(update: AutoTradeConfigUpdate) -> None:
             value = str(value or "dollars").lower().strip()
             if value not in {"dollars", "shares"}:
                 raise HTTPException(status_code=400, detail="sizing_mode must be dollars or shares")
-        if key in {"trade_amount", "min_profit_range", "sweep_buffer_pct", "stop_buffer_pct"}:
+        if key == "runner_mode":
+            value = str(value or "off").lower().strip()
+            if value not in {"off", "scale_trail"}:
+                raise HTTPException(status_code=400, detail="runner_mode must be off or scale_trail")
+        if key in {"trade_amount", "min_profit_range", "sweep_buffer_pct", "stop_buffer_pct", "trail_buffer_pct"}:
             value = max(0.0, float(value))
-        if key in {"fixed_shares", "max_active_trades", "poll_seconds", "max_symbols", "max_signal_age_bars"}:
+        if key == "scale_out_pct":
+            value = max(0.1, min(0.9, float(value)))
+        if key in {"fixed_shares", "max_active_trades", "poll_seconds", "max_symbols", "max_signal_age_bars", "trail_lookback_bars"}:
             value = max(1, int(value))
         setattr(auto_trade_config, key, value)
 
@@ -719,21 +735,193 @@ def _auto_trade_try_execute(symbol: str) -> Dict[str, Any]:
         return {"symbol": symbol.upper(), "action": "skip", "reason": "insufficient buying power", "buying_power": buying_power, "signal": signal}
 
     client_order_id = f"autotrade_{symbol.upper()}_{int(datetime.now(timezone.utc).timestamp())}"
-    order = service.place_order(
-        symbol=symbol,
-        side="buy",
-        order_type="limit",
-        time_in_force="day",
-        qty=qty,
-        limit_price=entry_price,
-        extended_hours=bool(auto_trade_config.extended_hours),
-        client_order_id=client_order_id,
-        order_class="bracket",
-        take_profit={"limit_price": float(signal["target_price"])},
-        stop_loss={"stop_price": float(signal["stop_price"])},
-    )
+
+    if auto_trade_config.runner_mode == "scale_trail" and qty >= 2:
+        # Runner mode: place the entry only. Once it fills, the loop submits
+        # a 50% OCO target/stop and a separate dynamic runner stop for the rest.
+        order = service.place_order(
+            symbol=symbol,
+            side="buy",
+            order_type="limit",
+            time_in_force="day",
+            qty=qty,
+            limit_price=entry_price,
+            extended_hours=bool(auto_trade_config.extended_hours),
+            client_order_id=client_order_id,
+        )
+        auto_trade_runner_states[symbol.upper()] = {
+            "phase": "entry_submitted",
+            "symbol": symbol.upper(),
+            "signal_id": signal_id,
+            "entry_order_id": order.get("id"),
+            "entry_price": entry_price,
+            "target_price": float(signal["target_price"]),
+            "stop_price": float(signal["stop_price"]),
+            "qty": qty,
+            "scale_qty": max(1, int(qty * float(auto_trade_config.scale_out_pct))),
+            "runner_qty": max(1, qty - max(1, int(qty * float(auto_trade_config.scale_out_pct)))),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    else:
+        order = service.place_order(
+            symbol=symbol,
+            side="buy",
+            order_type="limit",
+            time_in_force="day",
+            qty=qty,
+            limit_price=entry_price,
+            extended_hours=bool(auto_trade_config.extended_hours),
+            client_order_id=client_order_id,
+            order_class="bracket",
+            take_profit={"limit_price": float(signal["target_price"])},
+            stop_loss={"stop_price": float(signal["stop_price"])},
+        )
+
     auto_trade_fired_signal_ids[symbol.upper()] = signal_id
-    return {"symbol": symbol.upper(), "action": "ordered", "qty": qty, "order": order, "signal": signal}
+    return {"symbol": symbol.upper(), "action": "ordered", "qty": qty, "order": order, "signal": signal, "runner_mode": auto_trade_config.runner_mode}
+
+
+def _auto_trade_latest_trail_stop(symbol: str, current_stop: float) -> Optional[float]:
+    """Raise-only trailing stop under the last N completed candle lows."""
+    try:
+        bars = fetch_signal_bars(symbol, auto_trade_config.timeframe)
+    except Exception:
+        return None
+    lookback = max(1, int(auto_trade_config.trail_lookback_bars))
+    closed = bars[:-1] if len(bars) > lookback + 1 else bars
+    recent = closed[-lookback:]
+    lows = [_safe_price(b.get("low")) for b in recent]
+    lows = [x for x in lows if x > 0]
+    if not lows:
+        return None
+    candidate = round(min(lows) * (1.0 - float(auto_trade_config.trail_buffer_pct)), 4)
+    if candidate > float(current_stop):
+        return candidate
+    return None
+
+
+def _auto_trade_position_qty(positions: List[Dict[str, Any]], symbol: str) -> float:
+    symbol_u = symbol.upper()
+    for pos in positions or []:
+        if str(pos.get("symbol") or "").upper() != symbol_u:
+            continue
+        try:
+            return abs(float(pos.get("qty") or 0))
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def _auto_trade_manage_runner_states() -> None:
+    """Manage filled runner-mode entries and raise runner stops.
+
+    This is deliberately conservative and paper-first:
+    - entry order is placed first
+    - after fill, half gets OCO target/stop
+    - remaining shares get a stop that only moves upward
+    """
+    if not auto_trade_runner_states:
+        return
+    mode = auto_trade_config.mode
+    service = get_alpaca_service(mode)
+    positions = service.get_positions()
+
+    for symbol, state in list(auto_trade_runner_states.items()):
+        phase = str(state.get("phase") or "")
+        try:
+            if phase == "entry_submitted":
+                order_id = str(state.get("entry_order_id") or "")
+                if not order_id:
+                    state["phase"] = "error"
+                    state["error"] = "missing entry order id"
+                    continue
+                order = service.get_order(order_id, nested=True)
+                status = str(order.get("status") or "").lower()
+                if status in {"canceled", "expired", "rejected"}:
+                    state["phase"] = status
+                    continue
+                filled_qty = int(float(order.get("filled_qty") or 0))
+                if status != "filled" and filled_qty <= 0:
+                    continue
+
+                qty = max(1, int(float(order.get("filled_qty") or state.get("qty") or 0)))
+                scale_qty = max(1, min(qty - 1, int(qty * float(auto_trade_config.scale_out_pct)))) if qty >= 2 else qty
+                runner_qty = max(0, qty - scale_qty)
+                target = float(state.get("target_price") or 0)
+                stop = float(state.get("stop_price") or 0)
+
+                scale_order = None
+                runner_stop = None
+                if scale_qty > 0 and target > 0 and stop > 0:
+                    scale_order = service.place_order(
+                        symbol=symbol,
+                        side="sell",
+                        order_type="limit",
+                        time_in_force="day",
+                        qty=scale_qty,
+                        limit_price=target,
+                        extended_hours=bool(auto_trade_config.extended_hours),
+                        client_order_id=f"autotrade_scale_{symbol}_{int(datetime.now(timezone.utc).timestamp())}",
+                        order_class="oco",
+                        take_profit={"limit_price": target},
+                        stop_loss={"stop_price": stop},
+                    )
+                if runner_qty > 0 and stop > 0:
+                    runner_stop = service.place_order(
+                        symbol=symbol,
+                        side="sell",
+                        order_type="stop",
+                        time_in_force="day",
+                        qty=runner_qty,
+                        stop_price=stop,
+                        extended_hours=bool(auto_trade_config.extended_hours),
+                        client_order_id=f"autotrade_runner_stop_{symbol}_{int(datetime.now(timezone.utc).timestamp())}",
+                    )
+
+                state.update({
+                    "phase": "exits_submitted",
+                    "filled_qty": qty,
+                    "scale_qty": scale_qty,
+                    "runner_qty": runner_qty,
+                    "scale_order_id": (scale_order or {}).get("id"),
+                    "runner_stop_id": (runner_stop or {}).get("id"),
+                    "runner_stop_price": stop,
+                    "filled_at": datetime.now(timezone.utc).isoformat(),
+                })
+                _auto_trade_log({"event": "runner_exits_submitted", "symbol": symbol, "state": dict(state)})
+                continue
+
+            if phase == "exits_submitted":
+                pos_qty = _auto_trade_position_qty(positions, symbol)
+                if pos_qty <= 0:
+                    state["phase"] = "closed"
+                    state["closed_at"] = datetime.now(timezone.utc).isoformat()
+                    _auto_trade_log({"event": "runner_closed", "symbol": symbol, "state": dict(state)})
+                    continue
+
+                runner_stop_id = str(state.get("runner_stop_id") or "")
+                current_stop = float(state.get("runner_stop_price") or state.get("stop_price") or 0)
+                if not runner_stop_id or current_stop <= 0:
+                    continue
+
+                next_stop = _auto_trade_latest_trail_stop(symbol, current_stop)
+                if next_stop is None:
+                    continue
+
+                try:
+                    updated = service.update_order(runner_stop_id, stop_price=next_stop)
+                    state["runner_stop_price"] = next_stop
+                    state["last_trail_update"] = datetime.now(timezone.utc).isoformat()
+                    state["last_trail_order"] = updated
+                    _auto_trade_log({"event": "runner_stop_raised", "symbol": symbol, "stop_price": next_stop})
+                except Exception as exc:
+                    # Do not kill the whole auto-trade loop if Alpaca rejects a replace while filling.
+                    state["last_trail_error"] = str(exc)
+
+        except Exception as exc:
+            state["phase"] = "error"
+            state["error"] = str(exc)
+            _auto_trade_log({"event": "runner_error", "symbol": symbol, "error": str(exc)})
 
 
 async def run_auto_trade_loop() -> None:
@@ -745,6 +933,8 @@ async def run_auto_trade_loop() -> None:
                 auto_trade_last_status = "disabled"
                 await asyncio.sleep(1)
                 continue
+
+            await asyncio.to_thread(_auto_trade_manage_runner_states)
 
             auto_trade_last_status = "scanning"
             symbols = _auto_trade_symbols()
@@ -3257,6 +3447,7 @@ def auto_trade_stop():
 
 @app.post("/auto-trade/check-once")
 async def auto_trade_check_once():
+    await asyncio.to_thread(_auto_trade_manage_runner_states)
     symbols = _auto_trade_symbols()
     results = []
     for symbol in symbols:

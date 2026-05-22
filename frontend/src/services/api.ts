@@ -658,6 +658,7 @@ export async function cancelAlpacaOrder(
 
 export type AutoTradeSource = "manual" | "scanner" | "both";
 export type AutoTradeSizingMode = "dollars" | "shares";
+export type AutoTradeRunnerMode = "off" | "scale_trail";
 
 export type AutoTradeConfig = {
   enabled: boolean;
@@ -677,6 +678,10 @@ export type AutoTradeConfig = {
   max_symbols: number;
   require_flat_account: boolean;
   max_signal_age_bars: number;
+  runner_mode: AutoTradeRunnerMode;
+  scale_out_pct: number;
+  trail_lookback_bars: number;
+  trail_buffer_pct: number;
 };
 
 export type AutoTradeStatus = {
@@ -688,6 +693,7 @@ export type AutoTradeStatus = {
   last_skip?: any;
   last_signal?: any;
   last_order?: any;
+  runner_states?: Record<string, any>;
   history?: any[];
 };
 
