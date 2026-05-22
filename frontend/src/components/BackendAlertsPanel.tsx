@@ -110,10 +110,15 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
       ]);
       setStatus(next);
 
+      // Backend selected-symbols endpoint is the source of truth.
+      // Empty means empty. Do not fall back to status/config symbols because
+      // stale config/local symbols can re-arm unwanted alerts after refresh.
+      const selectedSymbols = Array.isArray(selectedSymbolsPayload.symbols)
+        ? selectedSymbolsPayload.symbols
+        : [];
+
       const cfg: BackendAlertsConfig = {
-        symbols: selectedSymbolsPayload.symbols?.length
-          ? selectedSymbolsPayload.symbols
-          : next.config?.symbols ?? next.symbols ?? DEFAULT_CONFIG.symbols,
+        symbols: selectedSymbols,
         timeframe: next.config?.timeframe ?? next.timeframe ?? DEFAULT_CONFIG.timeframe,
         timeframes: next.config?.timeframes ?? next.timeframes ?? DEFAULT_CONFIG.timeframes,
         confluence_mode: next.config?.confluence_mode ?? next.confluence_mode ?? DEFAULT_CONFIG.confluence_mode,
@@ -138,6 +143,12 @@ export default function BackendAlertsPanel({ selectedSymbol }: Props) {
       };
 
       setSymbolsInput((cfg.symbols ?? []).join(", "));
+      try {
+        window.localStorage.setItem("backendAlertSelectedSymbols", JSON.stringify(cfg.symbols ?? []));
+        window.dispatchEvent(new CustomEvent<string[]>("backend-alert-symbols-change", { detail: cfg.symbols ?? [] }));
+      } catch {
+        // Backend remains source of truth.
+      }
       setTimeframes(normalizeTimeframes(cfg.timeframes ?? cfg.timeframe));
       setConfluenceMode(cfg.confluence_mode === "all" ? "all" : "any");
       setAlertSetups(normalizeSetups(cfg.alert_setups));

@@ -216,7 +216,7 @@ export default function ScannerPanel({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [cacheStatus, setCacheStatus] = useState<ScannerCacheResponse | null>(null);
-  const [armedAlertSymbols, setArmedAlertSymbols] = useState<Set<string>>(() => new Set(readStoredAlertSymbols()));
+  const [armedAlertSymbols, setArmedAlertSymbols] = useState<Set<string>>(() => new Set());
   const [alertSymbolsLoading, setAlertSymbolsLoading] = useState(false);
 
   const [autoRefresh, setAutoRefresh] = useState(() => readStoredBoolean(SCANNER_AUTO_REFRESH_STORAGE_KEY, false));
@@ -300,28 +300,14 @@ export default function ScannerPanel({
       const remoteSymbols = Array.from(
         new Set((payload.symbols || []).map((item) => normalizeSymbol(item)).filter(Boolean))
       );
-      const localSymbols = readStoredAlertSymbols();
-
-      // Backend is the source of truth, but localStorage protects the UI from
-      // looking reset during reloads or after a local/dev backend restart.
-      // If the backend is empty and this browser has a saved alert list, restore
-      // that list back to the backend once on mount.
-      if (!remoteSymbols.length && localSymbols.length) {
-        const restored = await saveSelectedAlertSymbols(localSymbols);
-        const restoredSymbols = Array.from(
-          new Set((restored.symbols || localSymbols).map((item) => normalizeSymbol(item)).filter(Boolean))
-        );
-        setArmedAlertSymbols(new Set(restoredSymbols));
-        writeStoredAlertSymbols(restoredSymbols);
-        return;
-      }
-
+      // Backend selected-symbols endpoint is the source of truth.
+      // Empty means empty. Never restore old localStorage symbols back to backend.
       setArmedAlertSymbols(new Set(remoteSymbols));
       writeStoredAlertSymbols(remoteSymbols);
     } catch (exc) {
       console.error("Failed to fetch selected alert symbols", exc);
-      const localSymbols = readStoredAlertSymbols();
-      if (localSymbols.length) setArmedAlertSymbols(new Set(localSymbols));
+      // Do not fall back to localStorage here; stale browser symbols were the cause
+      // of unwanted alerts being resurrected. Keep current UI state until backend responds.
     } finally {
       setAlertSymbolsLoading(false);
     }

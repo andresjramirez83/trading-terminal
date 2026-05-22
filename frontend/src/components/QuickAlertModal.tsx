@@ -171,11 +171,10 @@ export default function QuickAlertModal({ open, initialSymbol = "", onClose }: P
         cfg.timeframes ?? cfg.timeframe ?? next.timeframes ?? next.timeframe,
         DEFAULT_CONFIG.timeframes
       );
-      const restoredSymbols = stripLegacyDefaultSymbols(
-        selectedSymbolsPayload.symbols?.length
-          ? selectedSymbolsPayload.symbols
-          : cfg.symbols ?? next.symbols ?? DEFAULT_CONFIG.symbols
-      );
+      // Backend selected-symbols endpoint is the source of truth.
+      // Empty means empty. Do not fall back to status/config symbols because
+      // stale config/local symbols can re-arm unwanted alerts after refresh.
+      const restoredSymbols = stripLegacyDefaultSymbols(selectedSymbolsPayload.symbols ?? []);
       setSymbolsInput(restoredSymbols.join(", "));
       setTimeframes(restoredTimeframes);
       setConfluenceMode((cfg.confluence_mode ?? next.confluence_mode) === "all" ? "all" : "any");
