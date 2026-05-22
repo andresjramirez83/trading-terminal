@@ -169,7 +169,7 @@ type VolumePoint = {
 
 type LinePoint = {
   time: UTCTimestamp;
-  value: number;
+  value?: number;
 };
 
 type CompressionDirection = "bull" | "bear";
@@ -1817,10 +1817,9 @@ function computeSixSevenSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
     date: string;
     high: number | null;
     low: number | null;
-    close: number | null;
+    bodyTarget: number | null;
     ready: boolean;
     lowSwept: boolean;
-    highSwept: boolean;
   };
 
   const signals: SignalMarkerPoint[] = [];
@@ -1833,10 +1832,9 @@ function computeSixSevenSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
         date: parts.date,
         high: null,
         low: null,
-        close: null,
+        bodyTarget: null,
         ready: false,
         lowSwept: false,
-        highSwept: false,
       };
     }
 
@@ -1844,67 +1842,49 @@ function computeSixSevenSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
     const afterRange = parts.hm >= RANGE_END_ET;
 
     if (inRange) {
+      const bodyHigh = Math.max(bar.open, bar.close);
       state.high = state.high == null ? bar.high : Math.max(state.high, bar.high);
       state.low = state.low == null ? bar.low : Math.min(state.low, bar.low);
-      state.close = bar.close;
+      state.bodyTarget = state.bodyTarget == null ? bodyHigh : Math.max(state.bodyTarget, bodyHigh);
       state.ready = false;
       continue;
     }
 
-    if (afterRange && state.high != null && state.low != null && state.close != null) {
+    if (afterRange && state.high != null && state.low != null && state.bodyTarget != null) {
       state.ready = true;
     }
 
-    if (!afterRange || !state.ready || state.high == null || state.low == null || state.close == null) {
+    if (!afterRange || !state.ready || state.low == null || state.bodyTarget == null) {
       continue;
     }
 
+    // Bullish-only setup:
+    // 1) price sweeps below the 6-7 low
+    // 2) candle closes back above the 6-7 low
+    // 3) target is the highest 6-7 body price: max(open, close), no wicks
     const lowSweep =
       !state.lowSwept &&
       bar.low < state.low * (1 - SWEEP_BUFFER_PCT) &&
       bar.close > state.low;
 
     if (lowSweep) {
+      const targetPrice = state.bodyTarget;
       const risk = Math.max(state.low - bar.low, 0);
       signals.push({
         time: toChartTime(bar.time),
         price: bar.low,
-        label: `6-7 LOW SWEEP ENTRY ↑ | tgt ${formatPrice(state.close)} | stop ${formatPrice(bar.low)}`,
+        label: `6-7 LOW SWEEP ENTRY ↑ | body tgt ${formatPrice(targetPrice)} | stop ${formatPrice(bar.low)}`,
         color: "#22c55e",
         direction: "up",
       });
       signals.push({
         time: toChartTime(bar.time),
-        price: state.close,
-        label: `6-7 CLOSE TARGET ${formatPrice(state.close)}${risk > 0 ? ` | R ${formatPrice(risk)}` : ""}`,
+        price: targetPrice,
+        label: `6-7 BODY TARGET ${formatPrice(targetPrice)}${risk > 0 ? ` | R ${formatPrice(risk)}` : ""}`,
         color: "#facc15",
         direction: "down",
       });
       state.lowSwept = true;
-    }
-
-    const highSweep =
-      !state.highSwept &&
-      bar.high > state.high * (1 + SWEEP_BUFFER_PCT) &&
-      bar.close < state.high;
-
-    if (highSweep) {
-      const risk = Math.max(bar.high - state.high, 0);
-      signals.push({
-        time: toChartTime(bar.time),
-        price: bar.high,
-        label: `6-7 HIGH SWEEP ENTRY ↓ | tgt ${formatPrice(state.close)} | stop ${formatPrice(bar.high)}`,
-        color: "#ef4444",
-        direction: "down",
-      });
-      signals.push({
-        time: toChartTime(bar.time),
-        price: state.close,
-        label: `6-7 CLOSE TARGET ${formatPrice(state.close)}${risk > 0 ? ` | R ${formatPrice(risk)}` : ""}`,
-        color: "#facc15",
-        direction: "up",
-      });
-      state.highSwept = true;
     }
   }
 
@@ -1923,34 +1903,39 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
   const RANGE_END_ET = 1000;  // 7:00 AM Pacific = 10:00 AM Eastern
   const SWEEP_BUFFER_PCT = 0.001;
 
-  type RangeState = {
+  type DayRangeState = {
     date: string;
-    high: number | null;
     low: number | null;
-    close: number | null;
-    lowSweepActive: boolean;
-    highSweepActive: boolean;
-    lowTargetHit: boolean;
-    highTargetHit: boolean;
+    bodyTarget: number | null;
+    lowSwept: boolean;
   };
 
-  const highLine: LinePoint[] = [];
-  const lowLine: LinePoint[] = [];
-  const closeLine: LinePoint[] = [];
-  let state: RangeState | null = null;
+  type TradeSegment = {
+    startIndex: number;
+    endIndex: number;
+    low: number;
+    target: number;
+  };
 
-  for (const bar of bars) {
+  const segments: TradeSegment[] = [];
+  let state: DayRangeState | null = null;
+  let activeSegment: TradeSegment | null = null;
+
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
     const parts = getEtBarParts(bar.time);
+
     if (!state || state.date !== parts.date) {
+      if (activeSegment) {
+        activeSegment.endIndex = Math.max(activeSegment.startIndex, i - 1);
+        segments.push(activeSegment);
+        activeSegment = null;
+      }
       state = {
         date: parts.date,
-        high: null,
         low: null,
-        close: null,
-        lowSweepActive: false,
-        highSweepActive: false,
-        lowTargetHit: false,
-        highTargetHit: false,
+        bodyTarget: null,
+        lowSwept: false,
       };
     }
 
@@ -1958,57 +1943,90 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
     const afterRange = parts.hm >= RANGE_END_ET;
 
     if (inRange) {
-      state.high = state.high == null ? bar.high : Math.max(state.high, bar.high);
+      const bodyHigh = Math.max(bar.open, bar.close);
       state.low = state.low == null ? bar.low : Math.min(state.low, bar.low);
-      state.close = bar.close;
+      // Freeze the target as the highest BODY price inside the 6-7 PT window. No wick highs.
+      state.bodyTarget = state.bodyTarget == null ? bodyHigh : Math.max(state.bodyTarget, bodyHigh);
+      state.lowSwept = false;
+      activeSegment = null;
       continue;
     }
 
-    if (!afterRange || state.high == null || state.low == null || state.close == null) {
+    if (!afterRange || state.low == null || state.bodyTarget == null || state.lowSwept) {
       continue;
     }
-
-    const time = toChartTime(bar.time);
-
-    // Keep the 6-7 range visible all day so you can see the sweep level.
-    highLine.push({ time, value: state.high });
-    lowLine.push({ time, value: state.low });
 
     const lowSweep =
-      !state.lowSweepActive &&
-      !state.lowTargetHit &&
       bar.low < state.low * (1 - SWEEP_BUFFER_PCT) &&
       bar.close > state.low;
 
-    const highSweep =
-      !state.highSweepActive &&
-      !state.highTargetHit &&
-      bar.high > state.high * (1 + SWEEP_BUFFER_PCT) &&
-      bar.close < state.high;
-
-    if (lowSweep) state.lowSweepActive = true;
-    if (highSweep) state.highSweepActive = true;
-
-    const lowTargetActive = state.lowSweepActive && !state.lowTargetHit;
-    const highTargetActive = state.highSweepActive && !state.highTargetHit;
-
-    // Only draw the orange target after an actual sweep entry. Stop drawing once target is touched.
-    if (lowTargetActive || highTargetActive) {
-      closeLine.push({ time, value: state.close });
+    if (!lowSweep) {
+      continue;
     }
 
-    if (lowTargetActive && bar.high >= state.close) {
-      state.lowTargetHit = true;
-      state.lowSweepActive = false;
+    activeSegment = {
+      startIndex: i,
+      endIndex: i,
+      low: state.low,
+      target: state.bodyTarget,
+    };
+    state.lowSwept = true;
+
+    // If target is hit on the same candle, keep this as a one-candle segment.
+    if (bar.high >= state.bodyTarget) {
+      segments.push(activeSegment);
+      activeSegment = null;
+      continue;
     }
 
-    if (highTargetActive && bar.low <= state.close) {
-      state.highTargetHit = true;
-      state.highSweepActive = false;
+    for (let j = i + 1; j < bars.length; j++) {
+      const nextBar = bars[j];
+      const nextParts = getEtBarParts(nextBar.time);
+      if (nextParts.date !== state.date) {
+        activeSegment.endIndex = Math.max(activeSegment.startIndex, j - 1);
+        segments.push(activeSegment);
+        activeSegment = null;
+        break;
+      }
+      activeSegment.endIndex = j;
+      if (nextBar.high >= state.bodyTarget) {
+        segments.push(activeSegment);
+        activeSegment = null;
+        break;
+      }
+    }
+
+    if (activeSegment) {
+      // Leave the latest active setup open through the latest loaded candle.
+      segments.push(activeSegment);
+      activeSegment = null;
     }
   }
 
-  return { highLine, lowLine, closeLine };
+  const highLine: LinePoint[] = [];
+  const lowLine: LinePoint[] = [];
+  const closeLine: LinePoint[] = [];
+
+  // Show only the most recent bullish 6-7 setup line segment. This avoids the
+  // Lightweight Charts behavior where multiple separated line chunks can visually
+  // connect across old setups. Markers can still show older setups; the trade-zone
+  // lines stay focused on the latest actionable setup.
+  const segment = segments[segments.length - 1];
+  if (!segment) {
+    return { highLine, lowLine, closeLine };
+  }
+
+  for (let i = segment.startIndex; i <= segment.endIndex && i < bars.length; i++) {
+    const time = toChartTime(bars[i].time);
+    lowLine.push({ time, value: segment.low });
+    closeLine.push({ time, value: segment.target });
+  }
+
+  return {
+    highLine,
+    lowLine,
+    closeLine,
+  };
 }
 
 function computeVolumeSignalMarkers(bars: Candle[]): SignalMarkerPoint[] {
@@ -5304,7 +5322,9 @@ function ChartPanelComponent({
       vwap: visibility.vwap && lineVisibility.vwap,
       compression: visibility.compression && lineVisibility.compression,
       choch: visibility.choch && lineVisibility.choch,
-      sessionBands: visibility.sessionBands && lineVisibility.sessionBands,
+      // Session bands are controlled by the page Studies toggle only.
+      // Do not double-hide them behind the internal Line Visibility state because old localStorage can keep them off.
+      sessionBands: visibility.sessionBands,
       projections: visibility.projections && lineVisibility.projections,
       trendlines: visibility.trendlines && lineVisibility.trendlines,
       fakeEngulfing: (visibility.fakeEngulfing ?? true) && lineVisibility.fakeEngulfing,
@@ -8165,8 +8185,9 @@ function ChartPanelComponent({
       color: "#facc15",
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
-      priceLineVisible: true,
-      lastValueVisible: true,
+      // Keep this as a plotted segment only. Do not let Lightweight draw a full-width price line.
+      priceLineVisible: false,
+      lastValueVisible: false,
       crosshairMarkerVisible: false,
     });
 
@@ -8174,8 +8195,9 @@ function ChartPanelComponent({
       color: "#22d3ee",
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
-      priceLineVisible: true,
-      lastValueVisible: true,
+      // Keep this as a plotted segment only. Do not let Lightweight draw a full-width price line.
+      priceLineVisible: false,
+      lastValueVisible: false,
       crosshairMarkerVisible: false,
     });
 
@@ -8183,8 +8205,9 @@ function ChartPanelComponent({
       color: "#f97316",
       lineWidth: 2,
       lineStyle: LineStyle.Dotted,
-      priceLineVisible: true,
-      lastValueVisible: true,
+      // The close target should stop when hit. A priceLine would keep drawing forever, so keep it off.
+      priceLineVisible: false,
+      lastValueVisible: false,
       crosshairMarkerVisible: false,
     });
 
@@ -10332,7 +10355,7 @@ function ChartPanelComponent({
               width: band.width,
               height: "100%",
               pointerEvents: "none",
-              zIndex: 4,
+              zIndex: 8,
               background:
                 band.kind === "premarket" || band.kind === "afterhours" || band.kind === "overnight"
                   ? "rgba(209,213,219,0.18)"
