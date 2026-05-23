@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -44,12 +45,18 @@ def init_db() -> None:
             scanner TEXT NOT NULL,
             symbol TEXT NOT NULL,
             pick_date TEXT NOT NULL,
+            timeframe TEXT,
             rank INTEGER,
             score REAL,
             payload_json TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(scanner, symbol, pick_date)
         )
+        """)
+
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scanner_picks_scanner_date
+        ON scanner_picks(scanner, pick_date)
         """)
 
         conn.execute("""
@@ -77,12 +84,16 @@ def init_db() -> None:
         conn.commit()
 
 
+def normalize_symbol(raw: Any) -> str:
+    return "".join(ch for ch in str(raw or "").upper().strip() if ch.isalpha() or ch == ".")
+
+
 def upsert_candles(symbol: str, timeframe: str, candles: List[Dict[str, Any]]) -> int:
     init_db()
     rows = []
     for c in candles:
         rows.append((
-            symbol.upper(),
+            normalize_symbol(symbol),
             timeframe.lower(),
             int(c["ts"]),
             str(c["dt_utc"]),
@@ -111,7 +122,7 @@ def upsert_candles(symbol: str, timeframe: str, candles: List[Dict[str, Any]]) -
 
 def get_candles(symbol: str, timeframe: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
     init_db()
-    params: List[Any] = [symbol.upper(), timeframe.lower()]
+    params: List[Any] = [normalize_symbol(symbol), timeframe.lower()]
     where = "WHERE symbol = ? AND timeframe = ?"
 
     if start_date:
@@ -166,3 +177,163 @@ def save_backtest_trade(trade: Dict[str, Any]) -> None:
             trade.get("notes"),
         ))
         conn.commit()
+
+
+def save_scanner_picks(
+    scanner: str,
+    pick_date: str,
+    rows: List[Dict[str, Any]],
+    timeframe: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Save scanner output rows so backtests can test only scanner-picked symbols.
+
+    Expected row shape is flexible. It looks for:
+    symbol, score/runner_score/sweep_score/ifvg_score, timeframe/confirm_timeframe.
+    """
+    init_db()
+    saved = 0
+    skipped = 0
+
+    prepared = []
+    for idx, row in enumerate(rows or [], start=1):
+        symbol = normalize_symbol(row.get("symbol") or row.get("ticker"))
+        if not symbol:
+            skipped += 1
+            continue
+
+        score_raw = (
+            row.get("score")
+            if row.get("score") is not None
+            else row.get("runner_score")
+            if row.get("runner_score") is not None
+            else row.get("sweep_score")
+            if row.get("sweep_score") is not None
+            else row.get("ifvg_score")
+        )
+
+        try:
+            score = float(score_raw) if score_raw is not None else None
+        except Exception:
+            score = None
+
+        row_timeframe = (
+            timeframe
+            or row.get("timeframe")
+            or row.get("confirm_timeframe")
+            or row.get("scan_timeframe")
+        )
+
+        prepared.append((
+            scanner,
+            symbol,
+            pick_date,
+            str(row_timeframe).lower() if row_timeframe else None,
+            idx,
+            score,
+            json.dumps(row, default=str),
+        ))
+
+    with get_conn() as conn:
+        conn.executemany("""
+        INSERT OR REPLACE INTO scanner_picks
+        (scanner, symbol, pick_date, timeframe, rank, score, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, prepared)
+        conn.commit()
+
+    saved = len(prepared)
+    return {
+        "ok": True,
+        "scanner": scanner,
+        "pick_date": pick_date,
+        "saved": saved,
+        "skipped": skipped,
+    }
+
+
+def get_scanner_picks(
+    scanner: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    min_score: Optional[float] = None,
+    limit_per_day: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    init_db()
+    params: List[Any] = [scanner]
+    where = "WHERE scanner = ?"
+
+    if start_date:
+        where += " AND pick_date >= ?"
+        params.append(start_date)
+    if end_date:
+        where += " AND pick_date <= ?"
+        params.append(end_date)
+    if min_score is not None:
+        where += " AND (score IS NULL OR score >= ?)"
+        params.append(float(min_score))
+
+    with get_conn() as conn:
+        cur = conn.execute(f"""
+        SELECT *
+        FROM scanner_picks
+        {where}
+        ORDER BY pick_date ASC, rank ASC, score DESC
+        """, params)
+        rows = [dict(row) for row in cur.fetchall()]
+
+    if limit_per_day and limit_per_day > 0:
+        counts: Dict[str, int] = {}
+        filtered = []
+        for row in rows:
+            day = str(row["pick_date"])
+            counts[day] = counts.get(day, 0) + 1
+            if counts[day] <= limit_per_day:
+                filtered.append(row)
+        rows = filtered
+
+    for row in rows:
+        try:
+            row["payload"] = json.loads(row.get("payload_json") or "{}")
+        except Exception:
+            row["payload"] = {}
+
+    return rows
+
+
+def get_scanner_symbols(
+    scanner: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    min_score: Optional[float] = None,
+    limit_per_day: Optional[int] = None,
+) -> List[str]:
+    rows = get_scanner_picks(
+        scanner=scanner,
+        start_date=start_date,
+        end_date=end_date,
+        min_score=min_score,
+        limit_per_day=limit_per_day,
+    )
+    symbols: List[str] = []
+    for row in rows:
+        symbol = normalize_symbol(row.get("symbol"))
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def count_scanner_picks(scanner: str) -> Dict[str, Any]:
+    init_db()
+    with get_conn() as conn:
+        cur = conn.execute("""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(DISTINCT symbol) AS symbols,
+            COUNT(DISTINCT pick_date) AS dates,
+            MIN(pick_date) AS first_date,
+            MAX(pick_date) AS last_date
+        FROM scanner_picks
+        WHERE scanner = ?
+        """, (scanner,))
+        row = dict(cur.fetchone() or {})
+    return {"scanner": scanner, **row}
