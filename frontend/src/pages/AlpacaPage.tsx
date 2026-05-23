@@ -26,6 +26,7 @@ import {
   type AutoTradeStatus,
   type AutoTradeSource,
   type AutoTradeSizingMode,
+  type AutoTradeStrategy,
 } from "../services/api";
 import type { PlaceAlpacaOrderRequest } from "../types/market";
 
@@ -1643,7 +1644,11 @@ function AlpacaPage() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <div>
             <div style={sectionTitleStyle}>Auto Trade</div>
-            <div style={{ fontSize: 11, opacity: 0.72 }}>Bullish 6-7 sweep · paper guarded</div>
+            <div style={{ fontSize: 11, opacity: 0.72 }}>
+              {(cfg as any)?.strategy === "five_am_sweep"
+                ? "5AM sweep synthetic bracket · paper only"
+                : "Bullish 6-7 sweep · paper guarded"}
+            </div>
           </div>
           <button
             type="button"
@@ -1676,6 +1681,20 @@ function AlpacaPage() {
             </select>
           </div>
           <div>
+            <label style={labelStyle}>Strategy</label>
+            <select
+              value={String((cfg as any)?.strategy ?? "six_seven") as AutoTradeStrategy}
+              onChange={(e) => void patchAutoTradeConfig({ strategy: e.target.value as AutoTradeStrategy })}
+              style={selectStyle}
+            >
+              <option value="six_seven">6/7 Sweep</option>
+              <option value="five_am_sweep">5AM Sweep</option>
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+          <div>
             <label style={labelStyle}>Timeframe</label>
             <select
               value={cfg?.timeframe ?? "1m"}
@@ -1687,6 +1706,35 @@ function AlpacaPage() {
               <option value="15m">15m</option>
             </select>
           </div>
+
+          {(cfg as any)?.strategy === "five_am_sweep" ? (
+            <div>
+              <label style={labelStyle}>Target R</label>
+              <input
+                type="number"
+                min="1"
+                step="0.5"
+                value={String((cfg as any)?.target_r ?? 2)}
+                onChange={(e) => void patchAutoTradeConfig({ target_r: Number(e.target.value || 2) })}
+                style={inputStyle}
+              />
+            </div>
+          ) : (
+            <div>
+              <label style={labelStyle}>Signal Type</label>
+              <div
+                style={{
+                  ...inputStyle,
+                  display: "flex",
+                  alignItems: "center",
+                  opacity: 0.72,
+                  fontSize: 12,
+                }}
+              >
+                Bullish reclaim
+              </div>
+            </div>
+          )}
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 8 }}>
