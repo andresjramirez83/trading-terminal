@@ -15,6 +15,13 @@ def get_conn():
     return conn
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    existing = {str(row[1]) for row in cur.fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
     with get_conn() as conn:
         conn.execute("""
@@ -50,9 +57,14 @@ def init_db() -> None:
             score REAL,
             payload_json TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(scanner, symbol, pick_date)
         )
         """)
+
+        # Auto-migrate existing SQLite files created by the older table shape.
+        _ensure_column(conn, "scanner_picks", "timeframe", "TEXT")
+        _ensure_column(conn, "scanner_picks", "updated_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
 
         conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_scanner_picks_scanner_date
@@ -185,16 +197,26 @@ def save_scanner_picks(
     rows: List[Dict[str, Any]],
     timeframe: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Save scanner output rows so backtests can test only scanner-picked symbols.
+    """Save scanner output rows for scanner-only backtests.
 
-    Expected row shape is flexible. It looks for:
-    symbol, score/runner_score/sweep_score/ifvg_score, timeframe/confirm_timeframe.
+    Duplicate-safe rule:
+    UNIQUE(scanner, symbol, pick_date)
+
+    If the background scanner saves the same symbol many times in one day,
+    this updates the existing row instead of adding duplicates.
     """
     init_db()
-    saved = 0
+    prepared = []
     skipped = 0
 
-    prepared = []
+    clean_scanner = str(scanner or "").strip()
+    clean_date = str(pick_date or "")[:10]
+
+    if not clean_scanner:
+        return {"ok": False, "scanner": clean_scanner, "pick_date": clean_date, "saved": 0, "skipped": len(rows or []), "error": "scanner is required"}
+    if not clean_date:
+        return {"ok": False, "scanner": clean_scanner, "pick_date": clean_date, "saved": 0, "skipped": len(rows or []), "error": "pick_date is required"}
+
     for idx, row in enumerate(rows or [], start=1):
         symbol = normalize_symbol(row.get("symbol") or row.get("ticker"))
         if not symbol:
@@ -209,6 +231,8 @@ def save_scanner_picks(
             else row.get("sweep_score")
             if row.get("sweep_score") is not None
             else row.get("ifvg_score")
+            if row.get("ifvg_score") is not None
+            else row.get("ah_score")
         )
 
         try:
@@ -224,30 +248,45 @@ def save_scanner_picks(
         )
 
         prepared.append((
-            scanner,
+            clean_scanner,
             symbol,
-            pick_date,
+            clean_date,
             str(row_timeframe).lower() if row_timeframe else None,
             idx,
             score,
             json.dumps(row, default=str),
         ))
 
+    if not prepared:
+        return {
+            "ok": True,
+            "scanner": clean_scanner,
+            "pick_date": clean_date,
+            "saved": 0,
+            "skipped": skipped,
+        }
+
     with get_conn() as conn:
         conn.executemany("""
-        INSERT OR REPLACE INTO scanner_picks
-        (scanner, symbol, pick_date, timeframe, rank, score, payload_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO scanner_picks
+        (scanner, symbol, pick_date, timeframe, rank, score, payload_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(scanner, symbol, pick_date) DO UPDATE SET
+            timeframe = excluded.timeframe,
+            rank = excluded.rank,
+            score = excluded.score,
+            payload_json = excluded.payload_json,
+            updated_at = CURRENT_TIMESTAMP
         """, prepared)
         conn.commit()
 
-    saved = len(prepared)
     return {
         "ok": True,
-        "scanner": scanner,
-        "pick_date": pick_date,
-        "saved": saved,
+        "scanner": clean_scanner,
+        "pick_date": clean_date,
+        "saved": len(prepared),
         "skipped": skipped,
+        "duplicate_safe": True,
     }
 
 

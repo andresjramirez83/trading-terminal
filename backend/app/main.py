@@ -48,6 +48,7 @@ from app.services.signal_engine import (
 )
 from app.routes.auto_trade import router as professional_auto_trade_router
 from app.backtests.routes import router as backtest_router
+from app.backtests.market_cache import save_scanner_picks
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 registry = ScannerRegistry()
@@ -444,6 +445,65 @@ scanner_last_error: Optional[str] = None
 scanner_last_status: str = "stopped"
 scanner_run_count: int = 0
 scanner_last_auto_ah_save_date: Optional[str] = None
+
+
+def auto_save_scanner_result(scanner_id: str, result: Any, *, source: str = "scanner") -> Dict[str, Any]:
+    """Persist scanner rows into backtest scanner_picks table.
+
+    Duplicate-safe rule lives in SQLite:
+    UNIQUE(scanner, symbol, pick_date)
+
+    So the same scanner/symbol/date can be saved repeatedly without creating duplicates.
+    This is safe for background loops that run every 45 seconds.
+    """
+    if not isinstance(result, dict):
+        return {"ok": False, "saved": 0, "skipped": 0, "reason": "result is not a dict"}
+
+    rows = result.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return {"ok": True, "saved": 0, "skipped": 0, "reason": "no rows"}
+
+    resolved_scanner = (
+        str(result.get("scanner_id") or scanner_id or "").strip()
+        or "unknown_scanner"
+    )
+
+    pick_date = (
+        result.get("trade_day")
+        or result.get("trade_date")
+        or result.get("session_date")
+        or datetime.now(ET).strftime("%Y-%m-%d")
+    )
+    pick_date = str(pick_date)[:10]
+
+    timeframe = (
+        result.get("timeframe")
+        or result.get("confirm_timeframe")
+        or (result.get("meta") or {}).get("timeframe")
+        or None
+    )
+
+    try:
+        saved = save_scanner_picks(
+            scanner=resolved_scanner,
+            pick_date=pick_date,
+            rows=rows,
+            timeframe=str(timeframe).lower() if timeframe else None,
+        )
+        print(
+            f"[scanner-picks] auto-saved source={source} scanner={resolved_scanner} "
+            f"date={pick_date} rows={len(rows)} saved={saved.get('saved')} skipped={saved.get('skipped')}",
+            flush=True,
+        )
+        return saved
+    except Exception as exc:
+        # Never let scanner-pick logging break live scanner results.
+        print(
+            f"[scanner-picks] auto-save failed source={source} scanner={resolved_scanner}: {exc}",
+            flush=True,
+        )
+        traceback.print_exc()
+        return {"ok": False, "saved": 0, "skipped": 0, "error": str(exc)}
 
 
 # === AUTO TRADE STATE (paper-first guarded execution) ===
@@ -2409,6 +2469,7 @@ async def run_background_scanner_loop() -> None:
             )
 
             scanner_cache = result
+            auto_save_scanner_result(SCANNER_ID, result, source="background")
             scanner_last_run = datetime.now(timezone.utc)
             scanner_last_error = None
             scanner_last_status = "running"
@@ -3201,6 +3262,7 @@ async def scanner_cache_refresh(
             hours_back=hours_back,
         )
         scanner_cache = result
+        auto_save_scanner_result(scanner_id, result, source="manual-refresh")
         scanner_last_run = datetime.now(timezone.utc)
         scanner_last_error = None
         scanner_last_status = "running"
@@ -3308,7 +3370,7 @@ async def scanner_v2_run(
 
     try:
         polygon = PolygonService(api_key=POLYGON_API_KEY)
-        return await scanner.run(
+        result = await scanner.run(
             polygon,
             snapshot_store,
             workflow=normalized_workflow,
@@ -3328,6 +3390,8 @@ async def scanner_v2_run(
             min_turnover_pct=min_turnover_pct,
             hours_back=hours_back,
         )
+        auto_save_scanner_result(scanner_id, result, source="scanner-v2-run")
+        return result
     except Exception as exc:
         print("[scanner-v2/run] error:", exc, flush=True)
         traceback.print_exc()
