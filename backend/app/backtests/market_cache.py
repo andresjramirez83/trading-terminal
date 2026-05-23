@@ -57,14 +57,16 @@ def init_db() -> None:
             score REAL,
             payload_json TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
             UNIQUE(scanner, symbol, pick_date)
         )
         """)
 
-        # Auto-migrate existing SQLite files created by the older table shape.
+        # Auto-migrate existing SQLite files created by older table shapes.
         _ensure_column(conn, "scanner_picks", "timeframe", "TEXT")
-        _ensure_column(conn, "scanner_picks", "updated_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
+        # SQLite cannot ALTER TABLE ADD COLUMN with DEFAULT CURRENT_TIMESTAMP.
+        # Keep this as plain TEXT and set it during INSERT/UPDATE.
+        _ensure_column(conn, "scanner_picks", "updated_at", "TEXT")
 
         conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_scanner_picks_scanner_date
@@ -132,7 +134,12 @@ def upsert_candles(symbol: str, timeframe: str, candles: List[Dict[str, Any]]) -
     return len(rows)
 
 
-def get_candles(symbol: str, timeframe: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_candles(
+    symbol: str,
+    timeframe: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     init_db()
     params: List[Any] = [normalize_symbol(symbol), timeframe.lower()]
     where = "WHERE symbol = ? AND timeframe = ?"
@@ -213,9 +220,23 @@ def save_scanner_picks(
     clean_date = str(pick_date or "")[:10]
 
     if not clean_scanner:
-        return {"ok": False, "scanner": clean_scanner, "pick_date": clean_date, "saved": 0, "skipped": len(rows or []), "error": "scanner is required"}
+        return {
+            "ok": False,
+            "scanner": clean_scanner,
+            "pick_date": clean_date,
+            "saved": 0,
+            "skipped": len(rows or []),
+            "error": "scanner is required",
+        }
     if not clean_date:
-        return {"ok": False, "scanner": clean_scanner, "pick_date": clean_date, "saved": 0, "skipped": len(rows or []), "error": "pick_date is required"}
+        return {
+            "ok": False,
+            "scanner": clean_scanner,
+            "pick_date": clean_date,
+            "saved": 0,
+            "skipped": len(rows or []),
+            "error": "pick_date is required",
+        }
 
     for idx, row in enumerate(rows or [], start=1):
         symbol = normalize_symbol(row.get("symbol") or row.get("ticker"))
