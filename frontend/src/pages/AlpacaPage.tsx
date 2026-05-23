@@ -1645,7 +1645,7 @@ function AlpacaPage() {
           <div>
             <div style={sectionTitleStyle}>Auto Trade</div>
             <div style={{ fontSize: 11, opacity: 0.72 }}>
-              {(cfg as any)?.strategy === "five_am_sweep"
+              {(cfg as any)?.strategies?.[0]?.strategy_id === "five_am_sweep"
                 ? "5AM sweep synthetic bracket · paper only"
                 : "Bullish 6-7 sweep · paper guarded"}
             </div>
@@ -1683,11 +1683,22 @@ function AlpacaPage() {
           <div>
             <label style={labelStyle}>Strategy</label>
             <select
-              value={String((cfg as any)?.strategy ?? "six_seven") as AutoTradeStrategy}
-              onChange={(e) => void patchAutoTradeConfig({ strategy: e.target.value as AutoTradeStrategy })}
+              value={String((cfg as any)?.strategies?.[0]?.strategy_id ?? "six_seven_sweep") as AutoTradeStrategy}
+              onChange={(e) =>
+                void patchAutoTradeConfig({
+                  strategies: [
+                    {
+                      enabled: true,
+                      strategy_id: e.target.value as AutoTradeStrategy,
+                      weight: 1,
+                      min_score: 60,
+                    },
+                  ],
+                })
+              }
               style={selectStyle}
             >
-              <option value="six_seven">6/7 Sweep</option>
+              <option value="six_seven_sweep">6/7 Sweep</option>
               <option value="five_am_sweep">5AM Sweep</option>
             </select>
           </div>
@@ -1707,7 +1718,7 @@ function AlpacaPage() {
             </select>
           </div>
 
-          {(cfg as any)?.strategy === "five_am_sweep" ? (
+          {(cfg as any)?.strategies?.[0]?.strategy_id === "five_am_sweep" ? (
             <div>
               <label style={labelStyle}>Target R</label>
               <input
