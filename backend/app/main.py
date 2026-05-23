@@ -48,7 +48,6 @@ from app.services.signal_engine import (
 )
 from app.routes.auto_trade import router as professional_auto_trade_router
 from app.backtests.routes import router as backtest_router
-from app.backtests.market_cache import save_scanner_picks
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 registry = ScannerRegistry()
@@ -447,71 +446,13 @@ scanner_run_count: int = 0
 scanner_last_auto_ah_save_date: Optional[str] = None
 
 
-def auto_save_scanner_result(scanner_id: str, result: Any, *, source: str = "scanner") -> Dict[str, Any]:
-    """Persist scanner rows into backtest scanner_picks table.
-
-    Duplicate-safe rule lives in SQLite:
-    UNIQUE(scanner, symbol, pick_date)
-
-    So the same scanner/symbol/date can be saved repeatedly without creating duplicates.
-    This is safe for background loops that run every 45 seconds.
-    """
-    if not isinstance(result, dict):
-        return {"ok": False, "saved": 0, "skipped": 0, "reason": "result is not a dict"}
-
-    rows = result.get("rows")
-    if not isinstance(rows, list) or not rows:
-        return {"ok": True, "saved": 0, "skipped": 0, "reason": "no rows"}
-
-    resolved_scanner = (
-        str(result.get("scanner_id") or scanner_id or "").strip()
-        or "unknown_scanner"
-    )
-
-    pick_date = (
-        result.get("trade_day")
-        or result.get("trade_date")
-        or result.get("session_date")
-        or datetime.now(ET).strftime("%Y-%m-%d")
-    )
-    pick_date = str(pick_date)[:10]
-
-    timeframe = (
-        result.get("timeframe")
-        or result.get("confirm_timeframe")
-        or (result.get("meta") or {}).get("timeframe")
-        or None
-    )
-
-    try:
-        saved = save_scanner_picks(
-            scanner=resolved_scanner,
-            pick_date=pick_date,
-            rows=rows,
-            timeframe=str(timeframe).lower() if timeframe else None,
-        )
-        print(
-            f"[scanner-picks] auto-saved source={source} scanner={resolved_scanner} "
-            f"date={pick_date} rows={len(rows)} saved={saved.get('saved')} skipped={saved.get('skipped')}",
-            flush=True,
-        )
-        return saved
-    except Exception as exc:
-        # Never let scanner-pick logging break live scanner results.
-        print(
-            f"[scanner-picks] auto-save failed source={source} scanner={resolved_scanner}: {exc}",
-            flush=True,
-        )
-        traceback.print_exc()
-        return {"ok": False, "saved": 0, "skipped": 0, "error": str(exc)}
-
-
 # === AUTO TRADE STATE (paper-first guarded execution) ===
 class AutoTradeConfig(BaseModel):
     enabled: bool = False
     mode: str = "paper"  # hard-guarded to paper unless allow_live=True
     allow_live: bool = False
     source: str = "manual"  # manual | scanner | both
+    strategy: str = "six_seven"  # six_seven | five_am_sweep
     timeframe: str = "1m"
     sizing_mode: str = "dollars"  # dollars | shares
     trade_amount: float = 500.0
@@ -520,6 +461,8 @@ class AutoTradeConfig(BaseModel):
     min_profit_range: float = 0.15
     sweep_buffer_pct: float = 0.001
     stop_buffer_pct: float = 0.002
+    target_r: float = 2.0
+    entry_timeout_minutes: int = 12
     poll_seconds: int = 10
     extended_hours: bool = False
     max_symbols: int = 12
@@ -536,6 +479,7 @@ class AutoTradeConfigUpdate(BaseModel):
     mode: Optional[str] = None
     allow_live: Optional[bool] = None
     source: Optional[str] = None
+    strategy: Optional[str] = None
     timeframe: Optional[str] = None
     sizing_mode: Optional[str] = None
     trade_amount: Optional[float] = None
@@ -544,6 +488,8 @@ class AutoTradeConfigUpdate(BaseModel):
     min_profit_range: Optional[float] = None
     sweep_buffer_pct: Optional[float] = None
     stop_buffer_pct: Optional[float] = None
+    target_r: Optional[float] = None
+    entry_timeout_minutes: Optional[int] = None
     poll_seconds: Optional[int] = None
     extended_hours: Optional[bool] = None
     max_symbols: Optional[int] = None
@@ -601,6 +547,10 @@ def _apply_auto_trade_update(update: AutoTradeConfigUpdate) -> None:
             value = str(value or "manual").lower().strip()
             if value not in {"manual", "scanner", "both"}:
                 raise HTTPException(status_code=400, detail="source must be manual, scanner, or both")
+        if key == "strategy":
+            value = str(value or "six_seven").lower().strip()
+            if value not in {"six_seven", "five_am_sweep"}:
+                raise HTTPException(status_code=400, detail="strategy must be six_seven or five_am_sweep")
         if key == "timeframe":
             value = str(value or "1m").lower().strip()
             if value not in {"1m", "5m", "15m"}:
@@ -613,8 +563,10 @@ def _apply_auto_trade_update(update: AutoTradeConfigUpdate) -> None:
             value = str(value or "off").lower().strip()
             if value not in {"off", "scale_trail"}:
                 raise HTTPException(status_code=400, detail="runner_mode must be off or scale_trail")
-        if key in {"trade_amount", "min_profit_range", "sweep_buffer_pct", "stop_buffer_pct", "trail_buffer_pct"}:
+        if key in {"trade_amount", "min_profit_range", "sweep_buffer_pct", "stop_buffer_pct", "trail_buffer_pct", "target_r"}:
             value = max(0.0, float(value))
+        if key == "entry_timeout_minutes":
+            value = max(1, int(value))
         if key == "scale_out_pct":
             value = max(0.1, min(0.9, float(value)))
         if key in {"fixed_shares", "max_active_trades", "poll_seconds", "max_symbols", "max_signal_age_bars", "trail_lookback_bars"}:
@@ -744,6 +696,114 @@ def _find_bullish_six_seven_signal(symbol: str, timeframe: str) -> Optional[Dict
     }
 
 
+
+def _find_bullish_five_am_sweep_signal(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    """Find 5AM Pacific low sweep reclaim.
+
+    Long-only first version:
+    - 5:00-6:00 AM Pacific range = 8:00-9:00 AM Eastern.
+    - Price sweeps below the 5AM low.
+    - Candle closes back above the 5AM low.
+    - Entry = reclaim candle close.
+    - Stop = sweep candle low minus buffer.
+    - Target = entry + target_r * risk.
+    """
+    normalized_tf = str(timeframe or "15m").lower().strip()
+    if normalized_tf not in {"1m", "5m", "15m"}:
+        normalized_tf = "15m"
+
+    bars = fetch_signal_bars(symbol, normalized_tf)
+    if len(bars) < 20:
+        return None
+
+    latest_day = _bar_et_datetime(bars[-1]).date()
+    day_bars = [b for b in bars if _bar_et_datetime(b).date() == latest_day]
+    if not day_bars:
+        return None
+
+    range_bars = []
+    after_bars = []
+    for bar in day_bars:
+        dt = _bar_et_datetime(bar)
+        hhmm = dt.hour * 100 + dt.minute
+        if 800 <= hhmm < 900:
+            range_bars.append(bar)
+        elif hhmm >= 900:
+            after_bars.append(bar)
+
+    if not range_bars or not after_bars:
+        return None
+
+    range_low = min(_safe_price(b.get("low")) for b in range_bars)
+    range_high = max(_safe_price(b.get("high")) for b in range_bars)
+    if range_low <= 0 or range_high <= 0 or range_high <= range_low:
+        return None
+
+    threshold = range_low * (1.0 - float(auto_trade_config.sweep_buffer_pct))
+    sweep_low: Optional[float] = None
+    signal_bar_index: Optional[int] = None
+    signal_bar: Optional[Dict[str, Any]] = None
+
+    for idx, bar in enumerate(after_bars):
+        low = _safe_price(bar.get("low"))
+        close = _safe_price(bar.get("close"))
+        if low < threshold:
+            sweep_low = low if sweep_low is None else min(sweep_low, low)
+        if sweep_low is not None and close > range_low:
+            signal_bar_index = idx
+            signal_bar = bar
+            break
+
+    if signal_bar is None or signal_bar_index is None or sweep_low is None:
+        return None
+
+    bars_since = len(after_bars) - 1 - signal_bar_index
+    if bars_since > max(1, int(auto_trade_config.max_signal_age_bars)):
+        return None
+
+    entry_price = _safe_price(signal_bar.get("close"))
+    stop_price = round(float(sweep_low) * (1.0 - float(auto_trade_config.stop_buffer_pct)), 4)
+    risk = entry_price - stop_price
+    if risk <= 0:
+        return None
+
+    if risk < float(auto_trade_config.min_profit_range):
+        return {
+            "symbol": symbol.upper(),
+            "tradable": False,
+            "skip_reason": f"risk too small: ${risk:.2f} < ${float(auto_trade_config.min_profit_range):.2f}",
+            "entry_price": round(entry_price, 4),
+            "stop_price": stop_price,
+            "risk": round(risk, 4),
+        }
+
+    target_price = round(entry_price + risk * float(auto_trade_config.target_r), 4)
+    signal_dt = _bar_et_datetime(signal_bar)
+    raw_time = int(float(signal_bar.get("time", signal_bar.get("t", 0)) or 0))
+    signal_id = f"five_am_low_sweep::{symbol.upper()}::{latest_day.isoformat()}::{raw_time}"
+
+    return {
+        "symbol": symbol.upper(),
+        "tradable": True,
+        "signal_id": signal_id,
+        "setup": "bullish_5am_low_sweep_reclaim",
+        "strategy": "five_am_sweep",
+        "timeframe": normalized_tf,
+        "signal_time": signal_dt.isoformat(),
+        "entry_price": round(entry_price, 4),
+        "target_price": target_price,
+        "stop_price": stop_price,
+        "range_low": round(range_low, 4),
+        "range_high": round(range_high, 4),
+        "sweep_low": round(float(sweep_low), 4),
+        "risk": round(risk, 4),
+        "target_r": float(auto_trade_config.target_r),
+        "bars_since_signal": bars_since,
+        "synthetic_bracket": True,
+        "extended_hours": True,
+    }
+
+
 def _auto_trade_active_count(positions: List[Dict[str, Any]], orders: List[Dict[str, Any]]) -> int:
     open_orders = [o for o in orders or [] if str(o.get("status") or "").lower() not in {"filled", "canceled", "expired", "rejected"}]
     open_positions = []
@@ -772,9 +832,19 @@ def _auto_trade_required_qty(entry_price: float, buying_power: float) -> int:
 
 
 def _auto_trade_try_execute(symbol: str) -> Dict[str, Any]:
-    signal = _find_bullish_six_seven_signal(symbol, auto_trade_config.timeframe)
+    strategy = str(auto_trade_config.strategy or "six_seven").lower().strip()
+
+    if strategy == "five_am_sweep":
+        if auto_trade_config.mode != "paper":
+            return {"symbol": symbol.upper(), "action": "skip", "reason": "5AM sweep strategy is paper-only for now"}
+        signal = _find_bullish_five_am_sweep_signal(symbol, "15m")
+        no_signal_reason = "no fresh bullish 5AM low sweep reclaim"
+    else:
+        signal = _find_bullish_six_seven_signal(symbol, auto_trade_config.timeframe)
+        no_signal_reason = "no fresh bullish 6-7 sweep"
+
     if not signal:
-        return {"symbol": symbol.upper(), "action": "none", "reason": "no fresh bullish 6-7 sweep"}
+        return {"symbol": symbol.upper(), "action": "none", "reason": no_signal_reason}
     if not signal.get("tradable"):
         return {"symbol": symbol.upper(), "action": "skip", "reason": signal.get("skip_reason"), "signal": signal}
 
@@ -801,7 +871,44 @@ def _auto_trade_try_execute(symbol: str) -> Dict[str, Any]:
     if qty <= 0:
         return {"symbol": symbol.upper(), "action": "skip", "reason": "insufficient buying power", "buying_power": buying_power, "signal": signal}
 
-    client_order_id = f"autotrade_{symbol.upper()}_{int(datetime.now(timezone.utc).timestamp())}"
+    client_order_id = f"autotrade_{strategy}_{symbol.upper()}_{int(datetime.now(timezone.utc).timestamp())}"
+
+    if strategy == "five_am_sweep":
+        order = service.place_order(
+            symbol=symbol,
+            side="buy",
+            order_type="limit",
+            time_in_force="day",
+            qty=qty,
+            limit_price=entry_price,
+            extended_hours=True,
+            client_order_id=client_order_id,
+        )
+        auto_trade_runner_states[symbol.upper()] = {
+            "phase": "five_am_entry_submitted",
+            "strategy": "five_am_sweep",
+            "symbol": symbol.upper(),
+            "signal_id": signal_id,
+            "entry_order_id": order.get("id"),
+            "entry_price": entry_price,
+            "target_price": float(signal["target_price"]),
+            "stop_price": float(signal["stop_price"]),
+            "qty": qty,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=max(1, int(auto_trade_config.entry_timeout_minutes)))).isoformat(),
+            "extended_hours": True,
+            "signal": signal,
+        }
+        auto_trade_fired_signal_ids[symbol.upper()] = signal_id
+        return {
+            "symbol": symbol.upper(),
+            "action": "ordered",
+            "qty": qty,
+            "order": order,
+            "signal": signal,
+            "strategy": strategy,
+            "synthetic_bracket": True,
+        }
 
     if auto_trade_config.runner_mode == "scale_trail" and qty >= 2:
         # Runner mode: place the entry only. Once it fills, the loop submits
@@ -879,6 +986,172 @@ def _auto_trade_position_qty(positions: List[Dict[str, Any]], symbol: str) -> fl
     return 0.0
 
 
+
+def _auto_trade_latest_price(symbol: str, service: AlpacaService) -> float:
+    try:
+        price = _safe_price(service.get_last_trade(symbol))
+        if price > 0:
+            return price
+    except Exception:
+        pass
+    try:
+        last = fetch_signal_bars(symbol, "1m")[-1]
+        return _safe_price(last.get("close"))
+    except Exception:
+        return 0.0
+
+
+def _auto_trade_place_extended_exit(
+    service: AlpacaService,
+    *,
+    symbol: str,
+    qty: int,
+    side: str,
+    limit_price: float,
+    reason: str,
+) -> Dict[str, Any]:
+    return service.place_order(
+        symbol=symbol,
+        side=side,
+        order_type="limit",
+        time_in_force="day",
+        qty=qty,
+        limit_price=round(float(limit_price), 4),
+        extended_hours=True,
+        client_order_id=f"autotrade_{reason}_{symbol}_{int(datetime.now(timezone.utc).timestamp())}",
+    )
+
+
+def _auto_trade_manage_five_am_state(service: AlpacaService, symbol: str, state: Dict[str, Any], positions: List[Dict[str, Any]]) -> bool:
+    phase = str(state.get("phase") or "")
+    if not phase.startswith("five_am_"):
+        return False
+
+    now = datetime.now(timezone.utc)
+
+    if phase == "five_am_entry_submitted":
+        order_id = str(state.get("entry_order_id") or "")
+        if not order_id:
+            state["phase"] = "error"
+            state["error"] = "missing entry order id"
+            return True
+
+        try:
+            order = service.get_order(order_id, nested=True)
+        except Exception as exc:
+            state["last_order_check_error"] = str(exc)
+            return True
+
+        status = str(order.get("status") or "").lower()
+        if status in {"canceled", "expired", "rejected"}:
+            state["phase"] = status
+            state["closed_at"] = now.isoformat()
+            _auto_trade_log({"event": "five_am_entry_not_filled", "symbol": symbol, "status": status, "state": dict(state)})
+            return True
+
+        expires_at_raw = str(state.get("expires_at") or "")
+        try:
+            expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            expires_at = now + timedelta(minutes=1)
+
+        if status != "filled" and now >= expires_at:
+            try:
+                service.cancel_order(order_id)
+            except Exception as exc:
+                state["cancel_error"] = str(exc)
+            state["phase"] = "entry_timeout_cancelled"
+            state["closed_at"] = now.isoformat()
+            _auto_trade_log({"event": "five_am_entry_timeout_cancelled", "symbol": symbol, "state": dict(state)})
+            return True
+
+        filled_qty = int(float(order.get("filled_qty") or 0))
+        if status == "filled" or filled_qty > 0:
+            qty = max(1, filled_qty or int(float(state.get("qty") or 0)))
+            state["phase"] = "five_am_synthetic_active"
+            state["filled_qty"] = qty
+            state["filled_at"] = now.isoformat()
+            _auto_trade_log({"event": "five_am_entry_filled", "symbol": symbol, "state": dict(state)})
+        return True
+
+    if phase == "five_am_synthetic_active":
+        qty = int(float(state.get("filled_qty") or state.get("qty") or 0))
+        if qty <= 0:
+            state["phase"] = "error"
+            state["error"] = "missing filled qty"
+            return True
+
+        pos_qty = _auto_trade_position_qty(positions, symbol)
+        if pos_qty <= 0:
+            state["phase"] = "closed"
+            state["closed_at"] = now.isoformat()
+            _auto_trade_log({"event": "five_am_position_closed_external", "symbol": symbol, "state": dict(state)})
+            return True
+
+        current = _auto_trade_latest_price(symbol, service)
+        target = float(state.get("target_price") or 0)
+        stop = float(state.get("stop_price") or 0)
+        if current <= 0 or target <= 0 or stop <= 0:
+            return True
+
+        if current >= target:
+            order = _auto_trade_place_extended_exit(
+                service,
+                symbol=symbol,
+                qty=min(qty, int(pos_qty)),
+                side="sell",
+                limit_price=target,
+                reason="five_am_target",
+            )
+            state["phase"] = "five_am_exit_submitted"
+            state["exit_reason"] = "target"
+            state["exit_order_id"] = order.get("id")
+            state["exit_price"] = target
+            state["exit_submitted_at"] = now.isoformat()
+            _auto_trade_log({"event": "five_am_target_exit_submitted", "symbol": symbol, "order": order, "state": dict(state)})
+            return True
+
+        if current <= stop:
+            aggressive_limit = max(0.01, current * 0.995)
+            order = _auto_trade_place_extended_exit(
+                service,
+                symbol=symbol,
+                qty=min(qty, int(pos_qty)),
+                side="sell",
+                limit_price=aggressive_limit,
+                reason="five_am_stop",
+            )
+            state["phase"] = "five_am_exit_submitted"
+            state["exit_reason"] = "stop"
+            state["exit_order_id"] = order.get("id")
+            state["exit_price"] = aggressive_limit
+            state["exit_submitted_at"] = now.isoformat()
+            _auto_trade_log({"event": "five_am_stop_exit_submitted", "symbol": symbol, "order": order, "state": dict(state)})
+            return True
+
+        state["last_price"] = current
+        state["last_checked_at"] = now.isoformat()
+        return True
+
+    if phase == "five_am_exit_submitted":
+        order_id = str(state.get("exit_order_id") or "")
+        if not order_id:
+            return True
+        try:
+            order = service.get_order(order_id, nested=True)
+            status = str(order.get("status") or "").lower()
+            state["last_exit_status"] = status
+            if status == "filled":
+                state["phase"] = "closed"
+                state["closed_at"] = now.isoformat()
+                _auto_trade_log({"event": "five_am_exit_filled", "symbol": symbol, "order": order, "state": dict(state)})
+        except Exception as exc:
+            state["last_exit_check_error"] = str(exc)
+        return True
+
+    return True
+
+
 def _auto_trade_manage_runner_states() -> None:
     """Manage filled runner-mode entries and raise runner stops.
 
@@ -896,6 +1169,9 @@ def _auto_trade_manage_runner_states() -> None:
     for symbol, state in list(auto_trade_runner_states.items()):
         phase = str(state.get("phase") or "")
         try:
+            if _auto_trade_manage_five_am_state(service, symbol, state, positions):
+                continue
+
             if phase == "entry_submitted":
                 order_id = str(state.get("entry_order_id") or "")
                 if not order_id:
@@ -2469,7 +2745,6 @@ async def run_background_scanner_loop() -> None:
             )
 
             scanner_cache = result
-            auto_save_scanner_result(SCANNER_ID, result, source="background")
             scanner_last_run = datetime.now(timezone.utc)
             scanner_last_error = None
             scanner_last_status = "running"
@@ -3262,7 +3537,6 @@ async def scanner_cache_refresh(
             hours_back=hours_back,
         )
         scanner_cache = result
-        auto_save_scanner_result(scanner_id, result, source="manual-refresh")
         scanner_last_run = datetime.now(timezone.utc)
         scanner_last_error = None
         scanner_last_status = "running"
@@ -3370,7 +3644,7 @@ async def scanner_v2_run(
 
     try:
         polygon = PolygonService(api_key=POLYGON_API_KEY)
-        result = await scanner.run(
+        return await scanner.run(
             polygon,
             snapshot_store,
             workflow=normalized_workflow,
@@ -3390,8 +3664,6 @@ async def scanner_v2_run(
             min_turnover_pct=min_turnover_pct,
             hours_back=hours_back,
         )
-        auto_save_scanner_result(scanner_id, result, source="scanner-v2-run")
-        return result
     except Exception as exc:
         print("[scanner-v2/run] error:", exc, flush=True)
         traceback.print_exc()
