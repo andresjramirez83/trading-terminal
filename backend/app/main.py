@@ -47,6 +47,7 @@ from app.services.signal_engine import (
     signal_state_to_dict,
 )
 from app.routes.auto_trade import router as professional_auto_trade_router
+from app.backtests.routes import router as backtest_router
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 registry = ScannerRegistry()
@@ -72,6 +73,7 @@ app.add_middleware(
 # Professional auto-trade API: shared SQLite state + dedicated worker execution.
 # Registered before legacy in-main endpoints so web workers never own trade state.
 app.include_router(professional_auto_trade_router)
+app.include_router(backtest_router)
 
 
 class Candle(BaseModel):
