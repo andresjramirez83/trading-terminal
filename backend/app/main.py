@@ -3283,25 +3283,67 @@ async def fetch_chart_bars_async(
     limit_bars: Optional[int],
     session: str,
 ) -> tuple[List[Candle], date]:
+    """Fetch chart bars with a safe previous-session fallback.
+
+    The normal live window can be empty before 04:00 ET, on market holidays,
+    or right after a weekend. Polygon is working in those cases, but the
+    current-day window has no candles yet. If the first request returns no
+    bars, walk backward through prior trading days until bars are found.
+    """
     if is_daily_timeframe(timeframe):
         # Pull 1m data and aggregate it into live 1D candles. This makes the
         # current day form in real time instead of waiting for Polygon's
         # completed daily aggregate.
-        intraday_bars, _ = await fetch_bars_range_async(
+        intraday_bars, used_day = await fetch_bars_range_async(
             symbol,
             "1m",
             lookback=lookback or DEFAULT_LOOKBACK_BY_TIMEFRAME.get("1d", "6m"),
             limit_bars=None,
         )
+
+        # Holiday / premarket-before-04:00 fallback for daily aggregation too.
+        if not intraday_bars:
+            probe = used_day
+            for _ in range(7):
+                probe = previous_trading_day(probe - timedelta(days=1))
+                intraday_bars, used_day = await fetch_bars_range_async(
+                    symbol,
+                    "1m",
+                    lookback=lookback or DEFAULT_LOOKBACK_BY_TIMEFRAME.get("1d", "6m"),
+                    end_day=probe,
+                    limit_bars=None,
+                )
+                if intraday_bars:
+                    break
+
         daily_bars = aggregate_intraday_to_daily_bars(intraday_bars, session=session, limit_bars=limit_bars)
         return daily_bars, daily_session_trading_date(daily_bars)
 
-    return await fetch_bars_range_async(
+    bars, used_day = await fetch_bars_range_async(
         symbol,
         timeframe,
         lookback=lookback,
         limit_bars=limit_bars,
     )
+
+    # If the current live window has no candles, fall back to the most recent
+    # prior trading day. This fixes blank charts before premarket opens and on
+    # market holidays without changing frontend behavior.
+    if not bars:
+        probe = used_day
+        for _ in range(7):
+            probe = previous_trading_day(probe - timedelta(days=1))
+            bars, used_day = await fetch_bars_range_async(
+                symbol,
+                timeframe,
+                lookback=lookback,
+                end_day=probe,
+                limit_bars=limit_bars,
+            )
+            if bars:
+                break
+
+    return bars, used_day
 
 
 @app.get("/bars", response_model=BarsResponse)
