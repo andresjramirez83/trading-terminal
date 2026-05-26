@@ -9,7 +9,7 @@ AutoTradeSource = Literal["manual", "scanner", "both"]
 SizingMode = Literal["dollars", "shares"]
 RunnerMode = Literal["off", "scale_trail"]
 EntryTriggerMode = Literal["reclaim_close", "sweep_touch"]
-StrategyId = Literal["six_seven_sweep"]
+StrategyId = Literal["six_seven_sweep", "five_am_sweep"]
 
 
 class StrategyConfig(BaseModel):
@@ -32,6 +32,7 @@ class AutoTradeConfig(BaseModel):
     min_profit_range: float = 0.15
     sweep_buffer_pct: float = 0.001
     stop_buffer_pct: float = 0.002
+    target_r: float = 2.0
     poll_seconds: int = 10
     extended_hours: bool = False
     max_symbols: int = 12
@@ -60,6 +61,7 @@ class AutoTradeConfigUpdate(BaseModel):
     min_profit_range: Optional[float] = None
     sweep_buffer_pct: Optional[float] = None
     stop_buffer_pct: Optional[float] = None
+    target_r: Optional[float] = None
     poll_seconds: Optional[int] = None
     extended_hours: Optional[bool] = None
     max_symbols: Optional[int] = None

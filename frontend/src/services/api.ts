@@ -659,6 +659,14 @@ export async function cancelAlpacaOrder(
 export type AutoTradeSource = "manual" | "scanner" | "both";
 export type AutoTradeSizingMode = "dollars" | "shares";
 export type AutoTradeRunnerMode = "off" | "scale_trail";
+export type AutoTradeStrategy = "six_seven_sweep" | "five_am_sweep";
+
+export type AutoTradeStrategyConfig = {
+  enabled: boolean;
+  strategy_id: AutoTradeStrategy;
+  weight: number;
+  min_score: number;
+};
 
 export type AutoTradeConfig = {
   enabled: boolean;
@@ -673,12 +681,15 @@ export type AutoTradeConfig = {
   min_profit_range: number;
   sweep_buffer_pct: number;
   stop_buffer_pct: number;
+  target_r?: number;
   poll_seconds: number;
   extended_hours: boolean;
   max_symbols: number;
   require_flat_account: boolean;
   max_signal_age_bars: number;
   runner_mode: AutoTradeRunnerMode;
+  strategies?: AutoTradeStrategyConfig[];
+  entry_trigger_mode?: "reclaim_close" | "sweep_touch" | string;
   scale_out_pct: number;
   trail_lookback_bars: number;
   trail_buffer_pct: number;
