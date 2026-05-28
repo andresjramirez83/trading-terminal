@@ -1,4 +1,3 @@
-import { API_BASE_URL } from "../config";
 import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import ChartPanel, { type OverlayVisibility, type TrendlineControlAction } from "../components/ChartPanel";
@@ -21,6 +20,7 @@ import {
   startAutoTrade,
   stopAutoTrade,
   checkAutoTradeOnce,
+  queueOverniteHailMaryPlan,
   API_BASE,
   type SharedChartRange,
   type AutoTradeStatus,
@@ -48,9 +48,13 @@ const STUDY_OPTIONS: Array<{ key: keyof OverlayVisibility; label: string }> = [
   { key: "sixSevenSweep", label: "6-7 Sweep Entry/Target" },
   { key: "volumeSignals", label: "Volume Signals" },
   { key: "volumeProfile", label: "Volume Profile" },
+  { key: "shortSqueezeEstimate", label: "Short Squeeze Estimate" },
   { key: "previousRthHighLow", label: "Previous Day RTH High/Low" },
   { key: "bodyBreakDots", label: "Black Dots" },
   { key: "closeAbovePrevCloseDots", label: "White Dots" },
+  { key: "atrExpansionCandles", label: "ATR Expansion Candles" },
+  { key: "resistanceBreakoutConfirm", label: "Resistance Breakout Confirm" },
+  { key: "fvgFlip", label: "FVG / IFVG Flip" },
   { key: "trendlineCloseAlerts", label: "Trendline Close Alerts" },
   { key: "adaptiveRunnerRsi", label: "Adaptive Runner RSI" },
 ];
@@ -69,9 +73,13 @@ const ALL_STUDIES_ON: OverlayVisibility = {
   sixSevenSweep: true,
   volumeSignals: true,
   volumeProfile: true,
+  shortSqueezeEstimate: true,
   previousRthHighLow: true,
   bodyBreakDots: true,
   closeAbovePrevCloseDots: true,
+  atrExpansionCandles: true,
+  resistanceBreakoutConfirm: true,
+  fvgFlip: true,
   trendlineCloseAlerts: true,
   adaptiveRunnerRsi: true,
 };
@@ -90,9 +98,13 @@ const ALL_STUDIES_OFF: OverlayVisibility = {
   sixSevenSweep: false,
   volumeSignals: false,
   volumeProfile: false,
+  shortSqueezeEstimate: false,
   previousRthHighLow: false,
   bodyBreakDots: false,
   closeAbovePrevCloseDots: false,
+  atrExpansionCandles: false,
+  resistanceBreakoutConfirm: false,
+  fvgFlip: false,
   trendlineCloseAlerts: false,
   adaptiveRunnerRsi: false,
 };
@@ -106,7 +118,9 @@ const OVERLAY_PRESETS: Record<OverlayPreset, OverlayVisibility> = {
     vwap: true,
     sessionBands: true,
     trendlines: true,
+    trendlineCloseAlerts: true,
     previousRthHighLow: true,
+    volumeProfile: true,
   },
   confirmation: {
     ...ALL_STUDIES_OFF,
@@ -114,13 +128,28 @@ const OVERLAY_PRESETS: Record<OverlayPreset, OverlayVisibility> = {
     compression: true,
     choch: true,
     projections: true,
+    trendlines: true,
+    trendlineCloseAlerts: true,
+    significantCandles: true,
+    volumeSignals: true,
+    volumeProfile: true,
+    bodyBreakDots: true,
+    closeAbovePrevCloseDots: true,
+    atrExpansionCandles: true,
+    resistanceBreakoutConfirm: true,
+    fvgFlip: true,
   },
 };
 
-const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_OFF;
+// IMPORTANT:
+// The previous Alpaca page defaulted every study OFF and stored that state under
+// *.v2.defaultOff. That parent visibility object overrides ChartPanel, which is
+// why only projections / 6-7 sweep appeared after ChartPanel was fixed.
+// Use a fresh default-ON key so old localStorage cannot silently disable studies.
+const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_ON;
 
-const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility.v2.defaultOff";
-const CHART_STUDY_VISIBILITY_STORAGE_KEY = "alpacaChartStudyVisibilityByTimeframe.v2.defaultOff";
+const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility.v3.defaultOn";
+const CHART_STUDY_VISIBILITY_STORAGE_KEY = "alpacaChartStudyVisibilityByTimeframe.v3.defaultOn";
 type ChartTimeframe = Exclude<ExpandedChartKey, null>;
 type ChartStudyVisibilityMap = Record<ChartTimeframe, OverlayVisibility>;
 type ChartPresetMap = Record<ChartTimeframe, OverlayPreset>;
@@ -474,6 +503,10 @@ function AlpacaPage() {
   const [autoTradeStatus, setAutoTradeStatus] = useState<AutoTradeStatus | null>(null);
   const [autoTradeBusy, setAutoTradeBusy] = useState(false);
   const [autoTradeError, setAutoTradeError] = useState<string>("");
+  const [hailMaryEntryPrice, setHailMaryEntryPrice] = useState<string>("");
+  const [hailMaryStopPrice, setHailMaryStopPrice] = useState<string>("");
+  const [hailMaryTargetPrice, setHailMaryTargetPrice] = useState<string>("");
+  const [hailMaryMessage, setHailMaryMessage] = useState<string>("");
   const brokerLoadInFlightRef = useRef(false);
   const orderPriceLocksRef = useRef<Record<string, { price: number; kind: string; expiresAt: number }>>({});
   // Order cancel quarantine: Alpaca can return a just-canceled order in the next
@@ -1632,12 +1665,66 @@ function AlpacaPage() {
   );
 
 
+  const queueOverniteHailMary = useCallback(async () => {
+    const cfg = autoTradeStatus?.config;
+    const entry = normalizeAlpacaOrderPrice(parsePositiveNumber(hailMaryEntryPrice));
+    const stop = normalizeAlpacaOrderPrice(parsePositiveNumber(hailMaryStopPrice));
+    const target = normalizeAlpacaOrderPrice(parsePositiveNumber(hailMaryTargetPrice));
+    const symbolToTrade = normalizeSingleSymbol(symbol);
+
+    setAutoTradeError("");
+    setHailMaryMessage("");
+
+    if (!symbolToTrade) {
+      setAutoTradeError("Select a symbol first.");
+      return;
+    }
+    if (entry <= 0 || stop <= 0 || target <= 0) {
+      setAutoTradeError("Enter entry, stop, and target prices.");
+      return;
+    }
+    if (stop >= entry) {
+      setAutoTradeError("Stop must be below entry for a long Overnite Hail Mary trade.");
+      return;
+    }
+    if (target <= entry) {
+      setAutoTradeError("Target must be above entry for a long Overnite Hail Mary trade.");
+      return;
+    }
+
+    const sizingMode = cfg?.sizing_mode ?? "dollars";
+    const payload = {
+      symbol: symbolToTrade,
+      entry_price: entry,
+      stop_price: stop,
+      target_price: target,
+      qty: sizingMode === "shares" ? Number(cfg?.fixed_shares ?? 0) : undefined,
+      trade_amount: sizingMode === "dollars" ? Number(cfg?.trade_amount ?? 0) : undefined,
+      note: "Queued from Alpaca Auto Trade panel",
+    };
+
+    setAutoTradeBusy(true);
+    try {
+      const status = await queueOverniteHailMaryPlan(payload);
+      setAutoTradeStatus(status);
+      setHailMaryMessage(`Queued ${symbolToTrade}: entry ${entry} / stop ${stop} / target ${target}`);
+      await loadBrokerData();
+    } catch (err) {
+      setAutoTradeError(err instanceof Error ? err.message : "Failed to queue Overnite Hail Mary plan");
+    } finally {
+      setAutoTradeBusy(false);
+    }
+  }, [autoTradeStatus?.config, hailMaryEntryPrice, hailMaryStopPrice, hailMaryTargetPrice, loadBrokerData, symbol]);
+
+
   const renderAutoTradePanel = () => {
     const cfg = autoTradeStatus?.config;
     const enabled = Boolean(cfg?.enabled);
     const lastSkip = autoTradeStatus?.last_skip;
     const lastSignal = autoTradeStatus?.last_signal;
     const lastOrder = autoTradeStatus?.last_order;
+    const selectedStrategy = String((cfg as any)?.strategies?.[0]?.strategy_id ?? "six_seven_sweep") as AutoTradeStrategy;
+    const isOverniteHailMary = selectedStrategy === "overnite_hail_mary";
 
     return (
       <section style={{ ...subPanelStyle, border: enabled ? "1px solid rgba(34,197,94,0.42)" : subPanelStyle.border }}>
@@ -1645,9 +1732,11 @@ function AlpacaPage() {
           <div>
             <div style={sectionTitleStyle}>Auto Trade</div>
             <div style={{ fontSize: 11, opacity: 0.72 }}>
-              {(cfg as any)?.strategies?.[0]?.strategy_id === "five_am_sweep"
-                ? "5AM sweep synthetic bracket · paper only"
-                : "Bullish 6-7 sweep · paper guarded"}
+              {isOverniteHailMary
+                ? "Overnite Hail Mary · manual entry/stop/target only"
+                : selectedStrategy === "five_am_sweep"
+                  ? "5AM sweep synthetic bracket · paper only"
+                  : "Bullish 6-7 sweep · paper guarded"}
             </div>
           </div>
           <button
@@ -1683,23 +1772,27 @@ function AlpacaPage() {
           <div>
             <label style={labelStyle}>Strategy</label>
             <select
-              value={String((cfg as any)?.strategies?.[0]?.strategy_id ?? "six_seven_sweep") as AutoTradeStrategy}
-              onChange={(e) =>
+              value={selectedStrategy}
+              onChange={(e) => {
+                const nextStrategy = e.target.value as AutoTradeStrategy;
                 void patchAutoTradeConfig({
+                  source: nextStrategy === "overnite_hail_mary" ? "manual" : cfg?.source ?? "manual",
+                  extended_hours: true,
                   strategies: [
                     {
                       enabled: true,
-                      strategy_id: e.target.value as AutoTradeStrategy,
+                      strategy_id: nextStrategy,
                       weight: 1,
                       min_score: 60,
                     },
                   ],
-                })
-              }
+                });
+              }}
               style={selectStyle}
             >
               <option value="six_seven_sweep">6/7 Sweep</option>
               <option value="five_am_sweep">5AM Sweep</option>
+              <option value="overnite_hail_mary">Overnite Hail Mary</option>
             </select>
           </div>
         </div>
@@ -1718,7 +1811,7 @@ function AlpacaPage() {
             </select>
           </div>
 
-          {(cfg as any)?.strategies?.[0]?.strategy_id === "five_am_sweep" ? (
+          {selectedStrategy === "five_am_sweep" ? (
             <div>
               <label style={labelStyle}>Target R</label>
               <input
@@ -1742,28 +1835,69 @@ function AlpacaPage() {
                   fontSize: 12,
                 }}
               >
-                Bullish reclaim
+                {isOverniteHailMary ? "Manual price plan" : "Bullish reclaim"}
               </div>
             </div>
           )}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 8 }}>
-          <div>
-            <label style={labelStyle}>Entry Trigger</label>
-            <select
-              value={String((cfg as any)?.entry_trigger_mode ?? "reclaim_close")}
-              onChange={(e) => void patchAutoTradeConfig({ entry_trigger_mode: e.target.value })}
-              style={selectStyle}
-            >
-              <option value="reclaim_close">Reclaim Close</option>
-              <option value="sweep_touch">Sweep Touch (Aggressive)</option>
-            </select>
-            <div style={{ marginTop: 4, fontSize: 11, opacity: 0.7, lineHeight: 1.25 }}>
-              Reclaim Close waits for candle close back above the blue line. Sweep Touch enters as soon as the low sweep is detected.
+        {!isOverniteHailMary ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 8 }}>
+            <div>
+              <label style={labelStyle}>Entry Trigger</label>
+              <select
+                value={String((cfg as any)?.entry_trigger_mode ?? "reclaim_close")}
+                onChange={(e) => void patchAutoTradeConfig({ entry_trigger_mode: e.target.value })}
+                style={selectStyle}
+              >
+                <option value="reclaim_close">Reclaim Close</option>
+                <option value="sweep_touch">Sweep Touch (Aggressive)</option>
+              </select>
+              <div style={{ marginTop: 4, fontSize: 11, opacity: 0.7, lineHeight: 1.25 }}>
+                Reclaim Close waits for candle close back above the blue line. Sweep Touch enters as soon as the low sweep is detected.
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 8 }}>
+            <div>
+              <label style={labelStyle}>Entry Limit</label>
+              <input
+                type="number"
+                min="0"
+                step="0.0001"
+                value={hailMaryEntryPrice}
+                onChange={(e) => setHailMaryEntryPrice(e.target.value)}
+                style={inputStyle}
+                placeholder="0.82"
+              />
+            </div>
+            <div>
+              <label style={labelStyle}>Stop Loss</label>
+              <input
+                type="number"
+                min="0"
+                step="0.0001"
+                value={hailMaryStopPrice}
+                onChange={(e) => setHailMaryStopPrice(e.target.value)}
+                style={inputStyle}
+                placeholder="0.74"
+              />
+            </div>
+            <div>
+              <label style={labelStyle}>Target</label>
+              <input
+                type="number"
+                min="0"
+                step="0.0001"
+                value={hailMaryTargetPrice}
+                onChange={(e) => setHailMaryTargetPrice(e.target.value)}
+                style={inputStyle}
+                placeholder="1.05"
+              />
+            </div>
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
           <div>
@@ -1827,6 +1961,23 @@ function AlpacaPage() {
           Lock out if any position/open order exists
         </label>
 
+        {isOverniteHailMary ? (
+          <div style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              onClick={queueOverniteHailMary}
+              disabled={autoTradeBusy}
+              style={{ ...primaryButtonStyle, width: "100%", background: "#7c3aed", border: "1px solid rgba(221,214,254,0.55)" }}
+            >
+              Queue Overnite Hail Mary
+            </button>
+            <div style={{ marginTop: 5, fontSize: 11, opacity: 0.72, lineHeight: 1.25 }}>
+              Queues one manual limit entry for {symbol}. Backend manages synthetic stop/target after fill. No 6/7 or 5AM signal is used.
+            </div>
+            {hailMaryMessage ? <div style={{ marginTop: 6, color: "#86efac", fontSize: 12 }}>{hailMaryMessage}</div> : null}
+          </div>
+        ) : null}
+
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button type="button" onClick={() => void loadAutoTradeStatus(false)} style={{ ...secondaryButtonStyle, flex: 1 }}>
             Refresh
@@ -1840,6 +1991,9 @@ function AlpacaPage() {
           <div>Status: <strong>{autoTradeStatus?.status ?? "N/A"}</strong>{autoTradeStatus?.running ? " · loop running" : ""}</div>
           {lastSignal ? <div>Last signal: {lastSignal.symbol} entry {lastSignal.entry_price} → target {lastSignal.target_price}</div> : null}
           {lastOrder ? <div style={{ color: "#86efac" }}>Last order: {lastOrder.symbol} qty {lastOrder.qty}</div> : null}
+          {Array.isArray((autoTradeStatus as any)?.queued_manual_plans) && (autoTradeStatus as any).queued_manual_plans.length > 0 ? (
+            <div style={{ color: "#c4b5fd" }}>Queued plans: {(autoTradeStatus as any).queued_manual_plans.length}</div>
+          ) : null}
           {lastSkip ? <div style={{ color: "#fbbf24" }}>Last skip: {lastSkip.symbol ?? "—"} · {lastSkip.reason}</div> : null}
           <div style={{ opacity: 0.68 }}>Mode is forced to paper unless backend live lock is explicitly changed.</div>
         </div>
@@ -1903,7 +2057,7 @@ function AlpacaPage() {
           <option value="confirmation">Confirmation</option>
         </select>
 
-        <div style={{ position: "relative", flex: "0 0 auto" }}>
+        <div style={{ position: "relative", flex: "0 0 auto", zIndex: 100000 }}>
           <button
             type="button"
             onClick={(e) => {
@@ -1928,24 +2082,27 @@ function AlpacaPage() {
           {openStudiesMenu === activeTimeframe ? (
             <div
               onClick={(e) => e.stopPropagation()}
+              onWheel={(e) => e.stopPropagation()}
               style={{
-                position: "absolute",
-                top: "calc(100% + 8px)",
-                left: 0,
-                zIndex: 99999,
-                width: 330,
-                maxHeight: "min(420px, calc(100vh - 150px))",
+                position: "fixed",
+                top: 96,
+                right: 24,
+                zIndex: 2147483647,
+                width: "min(380px, calc(100vw - 32px))",
+                maxHeight: "min(620px, calc(100vh - 120px))",
                 overflowY: "auto",
+                overscrollBehavior: "contain",
+                WebkitOverflowScrolling: "touch",
                 padding: 12,
                 borderRadius: 12,
                 background: "#061936",
                 border: "1px solid rgba(0,229,255,0.28)",
-                boxShadow: "0 18px 45px rgba(0,0,0,0.55)",
+                boxShadow: "0 18px 45px rgba(0,0,0,0.65)",
                 color: "#ffffff",
                 pointerEvents: "auto",
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ position: "sticky", top: -12, zIndex: 2, display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, padding: "10px 0 8px", background: "#061936" }}>
                 <div style={{ fontSize: 13, fontWeight: 900 }}>Chart Studies</div>
                 <div style={{ fontSize: 11, opacity: 0.75 }}>{countVisibleStudies(chartStudyVisibility[activeTimeframe] ?? DEFAULT_VISIBILITY)} / {STUDY_OPTIONS.length} on</div>
               </div>

@@ -589,9 +589,16 @@ export async function fetchAlpacaPositions(mode: AlpacaMode = "paper") {
 
 export async function fetchAlpacaOrders(
   mode: AlpacaMode = "paper",
-  status: "open" | "closed" | "all" = "open"
+  status: "open" | "closed" | "all" = "open",
+  nested = true
 ) {
-  const res = await fetch(`${API_BASE}/alpaca/orders?mode=${mode}&status=${status}`);
+  const params = new URLSearchParams({
+    mode,
+    status,
+    nested: String(nested),
+    limit: "100",
+  });
+  const res = await fetch(`${API_BASE}/alpaca/orders?${params.toString()}`);
   return parseJson(res);
 }
 
@@ -659,7 +666,8 @@ export async function cancelAlpacaOrder(
 export type AutoTradeSource = "manual" | "scanner" | "both";
 export type AutoTradeSizingMode = "dollars" | "shares";
 export type AutoTradeRunnerMode = "off" | "scale_trail";
-export type AutoTradeStrategy = "six_seven_sweep" | "five_am_sweep";
+export type AutoTradeEntryTriggerMode = "reclaim_close" | "sweep_touch";
+export type AutoTradeStrategy = "six_seven_sweep" | "five_am_sweep" | "overnite_hail_mary";
 
 export type AutoTradeStrategyConfig = {
   enabled: boolean;
@@ -681,18 +689,18 @@ export type AutoTradeConfig = {
   min_profit_range: number;
   sweep_buffer_pct: number;
   stop_buffer_pct: number;
-  target_r?: number;
+  target_r: number;
   poll_seconds: number;
   extended_hours: boolean;
   max_symbols: number;
   require_flat_account: boolean;
   max_signal_age_bars: number;
   runner_mode: AutoTradeRunnerMode;
-  strategies?: AutoTradeStrategyConfig[];
-  entry_trigger_mode?: "reclaim_close" | "sweep_touch" | string;
+  entry_trigger_mode: AutoTradeEntryTriggerMode;
   scale_out_pct: number;
   trail_lookback_bars: number;
   trail_buffer_pct: number;
+  strategies: AutoTradeStrategyConfig[];
 };
 
 export type AutoTradeStatus = {
@@ -705,6 +713,9 @@ export type AutoTradeStatus = {
   last_signal?: any;
   last_order?: any;
   runner_states?: Record<string, any>;
+  pending_entries?: any[];
+  active_trades?: any[];
+  queued_manual_plans?: any[];
   history?: any[];
 };
 
@@ -741,6 +752,40 @@ export async function stopAutoTrade(): Promise<AutoTradeStatus> {
 export async function checkAutoTradeOnce(): Promise<any> {
   const res = await fetch(`${API_BASE}/auto-trade/check-once`, { method: "POST" });
   return parseJson<any>(res);
+}
+
+export type ManualTradePlanRequest = {
+  symbol: string;
+  entry_price: number;
+  stop_price: number;
+  target_price: number;
+  qty?: number;
+  trade_amount?: number;
+  strategy_id?: AutoTradeStrategy | string;
+  setup?: string;
+  note?: string;
+};
+
+export async function queueOverniteHailMaryPlan(payload: ManualTradePlanRequest): Promise<AutoTradeStatus> {
+  const res = await fetch(`${API_BASE}/auto-trade/overnite-hail-mary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...payload,
+      strategy_id: "overnite_hail_mary",
+      setup: "overnite_hail_mary_limit_entry_stop_target",
+    }),
+  });
+  return parseJson<AutoTradeStatus>(res);
+}
+
+export async function queueManualTradePlan(payload: ManualTradePlanRequest): Promise<AutoTradeStatus> {
+  const res = await fetch(`${API_BASE}/auto-trade/manual-plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson<AutoTradeStatus>(res);
 }
 
 /* =========================

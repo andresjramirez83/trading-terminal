@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 AutoTradeMode = Literal["paper", "live"]
 AutoTradeSource = Literal["manual", "scanner", "both"]
 SizingMode = Literal["dollars", "shares"]
 RunnerMode = Literal["off", "scale_trail"]
 EntryTriggerMode = Literal["reclaim_close", "sweep_touch"]
-StrategyId = Literal["six_seven_sweep", "five_am_sweep"]
+StrategyId = Literal["six_seven_sweep", "five_am_sweep", "overnite_hail_mary"]
 
 
 class StrategyConfig(BaseModel):
@@ -33,14 +33,12 @@ class AutoTradeConfig(BaseModel):
     sweep_buffer_pct: float = 0.001
     stop_buffer_pct: float = 0.002
     target_r: float = 2.0
-    poll_seconds: int = 10
-    extended_hours: bool = False
+    poll_seconds: int = 5
+    extended_hours: bool = True
     max_symbols: int = 12
     require_flat_account: bool = True
     max_signal_age_bars: int = 3
     runner_mode: RunnerMode = "off"
-    # reclaim_close = safer default: wait for candle close back above range low.
-    # sweep_touch = aggressive: fire as soon as a candle sweeps below range low; does not wait for reclaim close.
     entry_trigger_mode: EntryTriggerMode = "reclaim_close"
     scale_out_pct: float = 0.50
     trail_lookback_bars: int = 2
@@ -90,6 +88,56 @@ class TradeSignal(BaseModel):
     profit_range: float
     qty: Optional[int] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ManualTradePlan(BaseModel):
+    """Manual synthetic bracket request.
+
+    The API stores this as a queued plan. The dedicated auto-trade worker is the
+    only process that submits the entry and manages the synthetic stop/target.
+    """
+
+    symbol: str
+    entry_price: float
+    stop_price: float
+    target_price: float
+    qty: Optional[int] = None
+    trade_amount: Optional[float] = None
+    strategy_id: str = "overnite_hail_mary"
+    setup: str = "overnite_hail_mary_limit_entry_stop_target"
+    note: Optional[str] = None
+
+    @validator("strategy_id")
+    def clean_strategy_id(cls, value: str) -> str:
+        cleaned = str(value or "overnite_hail_mary").strip()
+        return cleaned or "overnite_hail_mary"
+
+    @validator("symbol")
+    def clean_symbol(cls, value: str) -> str:
+        symbol = "".join(ch for ch in str(value or "").upper().strip() if ch.isalpha() or ch == ".")
+        if not symbol:
+            raise ValueError("symbol is required")
+        return symbol
+
+    @validator("entry_price", "stop_price", "target_price")
+    def positive_price(cls, value: float) -> float:
+        if float(value) <= 0:
+            raise ValueError("prices must be greater than zero")
+        return float(value)
+
+    @validator("target_price")
+    def target_above_entry(cls, value: float, values: Dict[str, Any]) -> float:
+        entry = float(values.get("entry_price") or 0)
+        if entry > 0 and float(value) <= entry:
+            raise ValueError("target_price must be above entry_price for long trades")
+        return float(value)
+
+    @validator("stop_price")
+    def stop_below_entry(cls, value: float, values: Dict[str, Any]) -> float:
+        entry = float(values.get("entry_price") or 0)
+        if entry > 0 and float(value) >= entry:
+            raise ValueError("stop_price must be below entry_price for long trades")
+        return float(value)
 
 
 class EngineEvent(BaseModel):
