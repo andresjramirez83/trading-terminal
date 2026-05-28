@@ -26,7 +26,7 @@ class AutoTradeConfig(BaseModel):
     source: AutoTradeSource = "manual"
     timeframe: Literal["1m", "5m", "15m"] = "1m"
     sizing_mode: SizingMode = "dollars"
-    trade_amount: float = 500.0
+    trade_amount: float 
     fixed_shares: int = 100
     max_active_trades: int = 1
     min_profit_range: float = 0.15
@@ -105,8 +105,9 @@ class ManualTradePlan(BaseModel):
     entry_price: float
     stop_price: float
     target_price: float
+    strategy_id: StrategyId = "overnite_hail_mary"
     mode: AutoTradeMode = "paper"
     sizing_mode: SizingMode = "dollars"
-    trade_amount: float = 500.0
+    trade_amount: float 
     fixed_shares: int = 0
     extended_hours: bool = True
