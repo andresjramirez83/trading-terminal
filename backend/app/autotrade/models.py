@@ -99,3 +99,14 @@ class EngineEvent(BaseModel):
     strategy_id: Optional[str] = None
     message: Optional[str] = None
     data: Dict[str, Any] = Field(default_factory=dict)
+
+class ManualTradePlan(BaseModel):
+    symbol: str
+    entry_price: float
+    stop_price: float
+    target_price: float
+    mode: AutoTradeMode = "paper"
+    sizing_mode: SizingMode = "dollars"
+    trade_amount: float = 500.0
+    fixed_shares: int = 0
+    extended_hours: bool = True
