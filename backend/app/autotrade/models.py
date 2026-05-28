@@ -106,8 +106,9 @@ class ManualTradePlan(BaseModel):
     stop_price: float
     target_price: float
     strategy_id: StrategyId = "overnite_hail_mary"
+    setup: str = "overnite_hail_mary_limit_entry_stop_target"
     mode: AutoTradeMode = "paper"
     sizing_mode: SizingMode = "dollars"
-    trade_amount: float 
+    trade_amount: float
     fixed_shares: int = 0
     extended_hours: bool = True
