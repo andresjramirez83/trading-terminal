@@ -19,9 +19,8 @@ from app.strategies.registry import StrategyRegistry
 class AutoTradeEngine:
     """Dedicated single-owner trading engine.
 
-    Run this from app.workers.auto_trade_worker, not inside Gunicorn workers.
-    FastAPI can have multiple workers because shared state lives in SQLite and
-    only this process submits orders.
+    FastAPI only queues plans/config. This worker submits entries and manages
+    synthetic stop/target exits.
     """
 
     def __init__(self, store: Optional[AutoTradeStore] = None) -> None:
@@ -29,14 +28,8 @@ class AutoTradeEngine:
         self.strategy_registry = StrategyRegistry()
         self.stop_requested = False
 
-
     @staticmethod
     def _alpaca_price(price: Any) -> float:
-        """Normalize to Alpaca price increment rules.
-
-        Alpaca rejects sub-penny prices: >= $1 uses cents, < $1 allows 4 decimals.
-        Use this for stored targets/stops and target-reached comparisons.
-        """
         try:
             value = float(price)
         except Exception:
@@ -52,6 +45,7 @@ class AutoTradeEngine:
             while not self.stop_requested:
                 cfg = self.store.get_config()
                 try:
+                    await self.manage_active_synthetic_trades(cfg)
                     if not cfg.enabled:
                         self.store.set_worker_status({"running": True, "status": "disabled", "last_error": None})
                         await asyncio.sleep(1)
@@ -69,9 +63,15 @@ class AutoTradeEngine:
 
     async def run_cycle(self, cfg: AutoTradeConfig) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        symbols = resolve_symbols(cfg)
         self.store.prune_old_fired_signals()
+        await self.cleanup_orphaned_exit_orders(cfg)
         await self.manage_pending_entries(cfg)
+
+        manual_done = await self.process_manual_trade_plans(cfg)
+        if manual_done:
+            return
+
+        symbols = resolve_symbols(cfg)
         if not symbols:
             self.store.set_worker_status({
                 "running": True,
@@ -94,65 +94,282 @@ class AutoTradeEngine:
             return
 
         best = self.rank_signals(signals)[0]
-        if self.store.signal_was_fired(best.signal_id):
+        await self.submit_signal(cfg, best, now)
+
+    async def process_manual_trade_plans(self, cfg: AutoTradeConfig) -> bool:
+        plans = self.store.list_manual_trade_plans()
+        if not plans:
+            return False
+
+        now = datetime.now(timezone.utc).isoformat()
+        item = plans[0]
+        payload = dict(item.get("payload") or {})
+        plan_id = str(item.get("plan_id") or payload.get("signal_id") or "")
+
+        manual_cfg = cfg.copy(update={
+            "mode": payload.get("mode", cfg.mode),
+            "sizing_mode": payload.get("sizing_mode", cfg.sizing_mode),
+            "trade_amount": float(payload.get("trade_amount") or cfg.trade_amount),
+            "fixed_shares": int(payload.get("fixed_shares") or cfg.fixed_shares),
+            "extended_hours": bool(payload.get("extended_hours", cfg.extended_hours)),
+            "runner_mode": "off",
+            "min_profit_range": 0.0,
+        })
+
+        signal = TradeSignal(
+            strategy_id=str(payload.get("strategy_id") or "overnite_hail_mary"),
+            symbol=str(payload.get("symbol") or "").upper(),
+            side="buy",
+            setup=str(payload.get("setup") or "overnite_hail_mary_limit_entry_stop_target"),
+            signal_id=plan_id,
+            timeframe=str(payload.get("timeframe") or "manual"),
+            signal_time=str(payload.get("signal_time") or now),
+            entry_price=float(payload.get("entry_price")),
+            target_price=float(payload.get("target_price")),
+            stop_price=float(payload.get("stop_price")),
+            score=float(payload.get("score") or 100.0),
+            profit_range=max(0.0, float(payload.get("target_price")) - float(payload.get("entry_price"))),
+            metadata={"manual_plan": payload},
+        )
+
+        try:
+            await self.submit_signal(manual_cfg, signal, now)
+            self.store.delete_manual_trade_plan(plan_id)
+            return True
+        except Exception as exc:
+            self.store.set_worker_status({
+                "running": True,
+                "status": "manual_plan_error",
+                "last_check": now,
+                "last_error": str(exc),
+                "last_skip": {"reason": "manual plan failed", "plan": payload},
+            })
+            self.store.log_event("manual_plan_error", {"error": str(exc), "traceback": traceback.format_exc(), "plan": payload}, signal.symbol, signal.strategy_id)
+            raise
+
+    async def submit_signal(self, cfg: AutoTradeConfig, signal: TradeSignal, now: str) -> None:
+        if self.store.signal_was_fired(signal.signal_id):
             self.store.set_worker_status({
                 "running": True,
                 "status": "watching",
                 "last_check": now,
-                "last_skip": {"reason": "best signal already handled", "signal": best.dict()},
-                "last_signal": best.dict(),
+                "last_skip": {"reason": "signal already handled", "signal": signal.dict()},
+                "last_signal": signal.dict(),
                 "last_error": None,
             })
             return
 
-        approved, reason, qty = await asyncio.to_thread(self.risk_check, cfg, best)
+        approved, reason, qty = await asyncio.to_thread(self.risk_check, cfg, signal)
         if not approved:
             self.store.set_worker_status({
                 "running": True,
                 "status": "blocked",
                 "last_check": now,
-                "last_skip": {"reason": reason, "signal": best.dict()},
-                "last_signal": best.dict(),
+                "last_skip": {"reason": reason, "signal": signal.dict()},
+                "last_signal": signal.dict(),
                 "last_error": None,
             })
-            self.store.log_event("skip", {"reason": reason, "signal": best.dict()}, best.symbol, best.strategy_id)
+            self.store.log_event("skip", {"reason": reason, "signal": signal.dict()}, signal.symbol, signal.strategy_id)
             return
 
-        order = await asyncio.to_thread(self.execute, cfg, best, qty)
+        order = await asyncio.to_thread(self.execute, cfg, signal, qty)
         order_id = str((order or {}).get("id") or "")
         if order_id:
-            self.store.upsert_pending_entry(order_id, {
+            pending_payload = {
                 "order_id": order_id,
-                "symbol": best.symbol,
-                "strategy_id": best.strategy_id,
-                "signal_id": best.signal_id,
-                "entry_price": best.entry_price,
-                "target_price": self._alpaca_price(best.target_price),
-                "stop_price": self._alpaca_price(best.stop_price),
+                "symbol": signal.symbol,
+                "strategy_id": signal.strategy_id,
+                "signal_id": signal.signal_id,
+                "entry_price": self._alpaca_price(signal.entry_price),
+                "target_price": self._alpaca_price(signal.target_price),
+                "stop_price": self._alpaca_price(signal.stop_price),
                 "qty": qty,
                 "submitted_at": datetime.now(timezone.utc).isoformat(),
-                "reason": "cancel_if_target_reached_before_entry_fill",
+                "extended_hours": bool(cfg.extended_hours),
+                "mode": cfg.mode,
+                "reason": "synthetic_entry_waiting_for_fill",
+            }
+            self.store.upsert_pending_entry(order_id, pending_payload)
+            self.store.upsert_runner_state(signal.symbol, {
+                "phase": "entry_submitted",
+                **pending_payload,
             })
-        self.store.mark_signal_fired(best.signal_id, best.symbol, best.strategy_id)
+        self.store.mark_signal_fired(signal.signal_id, signal.symbol, signal.strategy_id)
         self.store.set_worker_status({
             "running": True,
             "status": "ordered",
             "last_check": now,
-            "last_signal": best.dict(),
+            "last_signal": signal.dict(),
             "last_order": order,
             "last_skip": None,
             "last_error": None,
         })
-        self.store.log_event("ordered", {"qty": qty, "order": order, "signal": best.dict()}, best.symbol, best.strategy_id)
+        self.store.log_event("ordered", {"qty": qty, "order": order, "signal": signal.dict()}, signal.symbol, signal.strategy_id)
+
+    async def manage_active_synthetic_trades(self, cfg: AutoTradeConfig) -> None:
+        states = self.store.get_runner_states()
+        if not states:
+            return
+
+        alpaca = AlpacaService(mode=cfg.mode)
+        polygon = PolygonService()
+
+        for symbol, state in list(states.items()):
+            phase = str(state.get("phase") or "")
+            strategy_id = str(state.get("strategy_id") or "")
+            if strategy_id not in {"overnite_hail_mary", "six_seven_sweep", "five_am_sweep"}:
+                continue
+
+            if phase == "entry_submitted":
+                await self._promote_filled_entry_to_active(alpaca, symbol, state)
+                continue
+
+            if phase != "active_synthetic":
+                continue
+
+            qty = int(float(state.get("filled_qty") or state.get("qty") or 0))
+            stop = self._alpaca_price(state.get("stop_price"))
+            target = self._alpaca_price(state.get("target_price"))
+            if qty <= 0 or stop <= 0 or target <= 0:
+                continue
+
+            last_price = 0.0
+            try:
+                last_price = self._safe_float(await polygon.get_last_trade(symbol))
+            except Exception:
+                last_price = 0.0
+            if last_price <= 0:
+                continue
+
+            reason = None
+            if last_price <= stop:
+                reason = "stop_loss"
+            elif last_price >= target:
+                reason = "target_hit"
+            if reason is None:
+                continue
+
+            order_type = "limit" if bool(state.get("extended_hours", cfg.extended_hours)) else "market"
+            limit_price = None
+            if order_type == "limit":
+                if reason == "target_hit":
+                    limit_price = target
+                else:
+                    limit_price = self._alpaca_price(max(0.0001, last_price * 0.98))
+
+            try:
+                order = alpaca.place_order(
+                    symbol=symbol,
+                    side="sell",
+                    order_type=order_type,
+                    time_in_force="day",
+                    qty=qty,
+                    limit_price=limit_price,
+                    extended_hours=bool(state.get("extended_hours", cfg.extended_hours)),
+                    client_order_id=f"autotrade_exit_{reason}_{symbol}_{int(time.time())}",
+                )
+                self.store.delete_runner_state(symbol)
+                self.store.log_event(
+                    "synthetic_exit_submitted",
+                    {"reason": reason, "last_price": last_price, "state": state, "order": order},
+                    symbol,
+                    strategy_id,
+                )
+            except Exception as exc:
+                self.store.log_event(
+                    "synthetic_exit_error",
+                    {"reason": reason, "last_price": last_price, "state": state, "error": str(exc)},
+                    symbol,
+                    strategy_id,
+                )
+
+    async def _promote_filled_entry_to_active(self, alpaca: AlpacaService, symbol: str, state: Dict[str, Any]) -> None:
+        order_id = str(state.get("order_id") or state.get("entry_order_id") or "")
+        if not order_id:
+            self.store.delete_runner_state(symbol)
+            return
+
+        order = alpaca.get_order(order_id, nested=True)
+        status = str(order.get("status") or "").lower()
+        filled_qty = self._safe_float(order.get("filled_qty"))
+        if status in {"canceled", "cancelled", "expired", "rejected"}:
+            self.store.delete_runner_state(symbol)
+            self.store.delete_pending_entry(order_id)
+            self.store.log_event("synthetic_entry_closed", {"order_status": status, "state": state}, symbol, str(state.get("strategy_id") or ""))
+            return
+        if status != "filled" and filled_qty <= 0:
+            return
+
+        qty = int(filled_qty or self._safe_float(state.get("qty")))
+        if qty <= 0:
+            return
+
+        next_state = dict(state)
+        next_state.update({
+            "phase": "active_synthetic",
+            "filled_qty": qty,
+            "filled_at": datetime.now(timezone.utc).isoformat(),
+        })
+        self.store.delete_pending_entry(order_id)
+        self.store.upsert_runner_state(symbol, next_state)
+        self.store.log_event("synthetic_entry_active", {"order": order, "state": next_state}, symbol, str(state.get("strategy_id") or ""))
+
+    async def cleanup_orphaned_exit_orders(self, cfg: AutoTradeConfig) -> None:
+        try:
+            alpaca = AlpacaService(mode=cfg.mode)
+            positions = alpaca.get_positions()
+            open_orders = alpaca.get_orders(status="open", limit=500, nested=True)
+        except Exception as exc:
+            self.store.log_event("orphan_cleanup_error", {"error": str(exc)})
+            return
+
+        positioned_symbols = set()
+        for pos in positions or []:
+            symbol = str(pos.get("symbol") or "").upper()
+            qty = self._safe_float(pos.get("qty"))
+            if symbol and abs(qty) > 0:
+                positioned_symbols.add(symbol)
+
+        for order in open_orders or []:
+            try:
+                order_id = str(order.get("id") or "")
+                symbol = str(order.get("symbol") or "").upper()
+                side = str(order.get("side") or "").lower()
+                order_class = str(order.get("order_class") or order.get("orderClass") or "").lower()
+                position_intent = str(order.get("position_intent") or order.get("positionIntent") or "").lower()
+                legs = order.get("legs")
+                status = str(order.get("status") or "").lower()
+
+                if not order_id or not symbol:
+                    continue
+                if status in {"filled", "canceled", "cancelled", "expired", "rejected"}:
+                    continue
+                if symbol in positioned_symbols:
+                    continue
+                if side != "sell":
+                    continue
+                if not ("close" in position_intent or order_class in {"bracket", "oco", "oto"}):
+                    continue
+                if isinstance(legs, list) and len(legs) > 0:
+                    continue
+
+                alpaca.cancel_order(order_id)
+                self.store.delete_pending_entry(order_id)
+                self.store.log_event(
+                    "orphan_exit_order_cancelled",
+                    {"order_id": order_id, "symbol": symbol, "order": order},
+                    symbol,
+                    str(order.get("client_order_id") or order_class or ""),
+                )
+            except Exception as exc:
+                self.store.log_event(
+                    "orphan_exit_cancel_error",
+                    {"order": order, "error": str(exc)},
+                    str((order or {}).get("symbol") or "").upper(),
+                    str((order or {}).get("client_order_id") or ""),
+                )
 
     async def manage_pending_entries(self, cfg: AutoTradeConfig) -> None:
-        """Cancel stale unfilled entries when the target has already been reached.
-
-        This prevents a late fill after price already hit the planned target. Example:
-        entry limit is sitting at the blue line, price rips straight to target, and the
-        order never filled. The worker cancels that pending entry instead of leaving a
-        bad chase/reversal fill waiting on the book.
-        """
         pending = self.store.list_pending_entries()
         if not pending:
             return
@@ -176,12 +393,12 @@ class AutoTradeEngine:
                 filled_qty = self._safe_float(order.get("filled_qty"))
 
                 if status in {"filled"} or filled_qty > 0:
-                    self.store.delete_pending_entry(order_id)
-                    self.store.log_event("pending_entry_filled", {"order": order, "pending": payload}, symbol, str(payload.get("strategy_id") or ""))
+                    await self._promote_filled_entry_to_active(alpaca, symbol, payload)
                     continue
 
                 if status in {"canceled", "expired", "rejected"}:
                     self.store.delete_pending_entry(order_id)
+                    self.store.delete_runner_state(symbol)
                     self.store.log_event("pending_entry_closed", {"order_status": status, "pending": payload}, symbol, str(payload.get("strategy_id") or ""))
                     continue
 
@@ -194,6 +411,7 @@ class AutoTradeEngine:
 
                 alpaca.cancel_order(order_id)
                 self.store.delete_pending_entry(order_id)
+                self.store.delete_runner_state(symbol)
                 self.store.log_event(
                     "pending_entry_cancelled_target_reached",
                     {

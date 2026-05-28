@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, ConfigDict, Field
 
 AutoTradeMode = Literal["paper", "live"]
 AutoTradeSource = Literal["manual", "scanner", "both"]
@@ -26,7 +27,7 @@ class AutoTradeConfig(BaseModel):
     source: AutoTradeSource = "manual"
     timeframe: Literal["1m", "5m", "15m"] = "1m"
     sizing_mode: SizingMode = "dollars"
-    trade_amount: float 
+    trade_amount: float = 500.0
     fixed_shares: int = 100
     max_active_trades: int = 1
     min_profit_range: float = 0.15
@@ -100,13 +101,29 @@ class EngineEvent(BaseModel):
     message: Optional[str] = None
     data: Dict[str, Any] = Field(default_factory=dict)
 
+
 class ManualTradePlan(BaseModel):
+    """Manual entry/stop/target plan for Overnite Hail Mary.
+
+    Keep this permissive so route code can safely attach metadata without
+    Pydantic assignment errors.
+    """
+    model_config = ConfigDict(extra="allow")
+
     symbol: str
     entry_price: float
     stop_price: float
     target_price: float
+
     strategy_id: StrategyId = "overnite_hail_mary"
     setup: str = "overnite_hail_mary_limit_entry_stop_target"
+    signal_id: Optional[str] = None
+    timeframe: str = "manual"
+    signal_time: Optional[str] = None
+    score: float = 100.0
+    profit_range: Optional[float] = None
+    qty: Optional[int] = None
+
     mode: AutoTradeMode = "paper"
     sizing_mode: SizingMode = "dollars"
     trade_amount: float

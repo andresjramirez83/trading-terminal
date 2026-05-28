@@ -14,11 +14,7 @@ DEFAULT_DB_PATH = DEFAULT_STATE_DIR / "autotrade.sqlite3"
 
 
 class AutoTradeStore:
-    """SQLite-backed state shared by FastAPI workers and the dedicated auto-trade worker.
-
-    This removes split-brain state from Gunicorn memory. Web workers only read/write
-    config/status; the dedicated worker owns signal scanning and order execution.
-    """
+    """SQLite-backed state shared by FastAPI workers and the dedicated auto-trade worker."""
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path or DEFAULT_DB_PATH)
@@ -81,6 +77,18 @@ class AutoTradeStore:
                     symbol TEXT NOT NULL,
                     strategy_id TEXT NOT NULL,
                     signal_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manual_trade_plans (
+                    plan_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL,
                     payload TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
@@ -261,6 +269,45 @@ class AutoTradeStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM pending_entries WHERE order_id = ?", (order_id,))
 
+    def enqueue_manual_trade_plan(self, plan_id: str, payload: Dict[str, Any]) -> None:
+        symbol = str(payload.get("symbol") or "").upper()
+        strategy_id = str(payload.get("strategy_id") or "overnite_hail_mary")
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO manual_trade_plans(plan_id, symbol, strategy_id, payload, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(plan_id) DO UPDATE SET "
+                "symbol=excluded.symbol, strategy_id=excluded.strategy_id, payload=excluded.payload, updated_at=excluded.updated_at",
+                (plan_id, symbol, strategy_id, json.dumps(payload, default=str), now, now),
+            )
+
+    def list_manual_trade_plans(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT plan_id, symbol, strategy_id, payload, created_at, updated_at "
+                "FROM manual_trade_plans ORDER BY created_at ASC"
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except Exception:
+                payload = {}
+            out.append({
+                "plan_id": row["plan_id"],
+                "symbol": row["symbol"],
+                "strategy_id": row["strategy_id"],
+                "payload": payload,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            })
+        return out
+
+    def delete_manual_trade_plan(self, plan_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM manual_trade_plans WHERE plan_id = ?", (plan_id,))
+
     def status_payload(self) -> Dict[str, Any]:
         cfg = self.get_config()
         worker = self.get_worker_status()
@@ -278,5 +325,6 @@ class AutoTradeStore:
             "last_signal": worker.get("last_signal"),
             "last_order": worker.get("last_order"),
             "runner_states": self.get_runner_states(),
+            "manual_trade_plans": self.list_manual_trade_plans(),
             "history": events,
         }
