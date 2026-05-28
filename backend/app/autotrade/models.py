@@ -9,7 +9,7 @@ AutoTradeSource = Literal["manual", "scanner", "both"]
 SizingMode = Literal["dollars", "shares"]
 RunnerMode = Literal["off", "scale_trail"]
 EntryTriggerMode = Literal["reclaim_close", "sweep_touch"]
-StrategyId = Literal["six_seven_sweep", "five_am_sweep"]
+StrategyId = Literal["six_seven_sweep", "five_am_sweep", "overnite_hail_mary"]
 
 
 class StrategyConfig(BaseModel):
