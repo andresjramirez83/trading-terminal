@@ -289,7 +289,27 @@ class AutoTradeEngine:
             self.store.delete_runner_state(symbol)
             return
 
-        order = alpaca.get_order(order_id, nested=True)
+        try:
+            order = alpaca.get_order(order_id, nested=True)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "order not found" in msg or "40410000" in msg:
+                strategy_id = str(state.get("strategy_id") or "")
+                self.store.delete_pending_entry(order_id)
+                self.store.delete_runner_state(symbol)
+                self.store.log_event(
+                    "stale_entry_order_cleared",
+                    {
+                        "order_id": order_id,
+                        "reason": "alpaca_order_not_found",
+                        "error": str(exc),
+                        "state": state,
+                    },
+                    symbol,
+                    strategy_id,
+                )
+                return
+            raise
         status = str(order.get("status") or "").lower()
         filled_qty = self._safe_float(order.get("filled_qty"))
         if status in {"canceled", "cancelled", "expired", "rejected"}:
@@ -388,7 +408,27 @@ class AutoTradeEngine:
                 continue
 
             try:
-                order = alpaca.get_order(order_id, nested=True)
+                try:
+                    order = alpaca.get_order(order_id, nested=True)
+                except RuntimeError as exc:
+                    msg = str(exc).lower()
+                    if "order not found" in msg or "40410000" in msg:
+                        self.store.delete_pending_entry(order_id)
+                        self.store.delete_runner_state(symbol)
+                        self.store.log_event(
+                            "stale_pending_entry_cleared",
+                            {
+                                "order_id": order_id,
+                                "symbol": symbol,
+                                "reason": "alpaca_order_not_found",
+                                "error": str(exc),
+                                "pending": payload,
+                            },
+                            symbol,
+                            str(payload.get("strategy_id") or ""),
+                        )
+                        continue
+                    raise
                 status = str(order.get("status") or "").lower()
                 filled_qty = self._safe_float(order.get("filled_qty"))
 
