@@ -35,6 +35,7 @@ export type OverlayVisibility = {
   liquiditySweeps?: boolean;
   volumeSignals?: boolean;
   volumeProfile?: boolean;
+  shortSqueezeEstimate?: boolean;
   previousRthHighLow?: boolean;
   bodyBreakDots?: boolean;
   closeAbovePrevCloseDots?: boolean;
@@ -44,6 +45,7 @@ export type OverlayVisibility = {
   fvgFlip?: boolean;
   adaptiveRunnerRsi?: boolean;
   sixSevenSweep?: boolean;
+  fiveAmSweep?: boolean;
 };
 
 export type TrendlineControlAction =
@@ -304,6 +306,14 @@ type VolumeProfileOverlay = {
   label: string;
 };
 
+type ShortSqueezeEstimate = {
+  estimatedShortAvg: number | null;
+  pressureZone: number | null;
+  squeezeTrigger: number | null;
+  score: number;
+  label: string;
+};
+
 type KeyLevelLabelOverlay = {
   id: string;
   shortLabel: string;
@@ -393,6 +403,7 @@ type LegendState = {
   vwap: number | null;
   tradingDate: string | null;
   compressionLabel: string | null;
+  shortSqueeze: ShortSqueezeEstimate | null;
   session: SessionStats;
 };
 
@@ -553,6 +564,7 @@ type LineVisibilityState = {
   liquiditySweeps: boolean;
   volumeSignals: boolean;
   volumeProfile: boolean;
+  shortSqueezeEstimate: boolean;
   previousRthHighLow: boolean;
   trendlineCloseAlerts: boolean;
   bodyBreakDots: boolean;
@@ -562,32 +574,61 @@ type LineVisibilityState = {
   fvgFlip: boolean;
   adaptiveRunnerRsi: boolean;
   sixSevenSweep: boolean;
+  fiveAmSweep: boolean;
 };
 
-const CHART_LINE_VISIBILITY_STORAGE_KEY = "trading-terminal.chart.lineVisibility.v4.sixSevenVisible";
+const CHART_LINE_VISIBILITY_STORAGE_KEY = "trading-terminal.chart.lineVisibility.v5.syncedWithStudyDropdown";
+
+const LINE_VISIBILITY_KEYS: Array<keyof LineVisibilityState> = [
+  "pmh",
+  "vwap",
+  "compression",
+  "choch",
+  "sessionBands",
+  "projections",
+  "trendlines",
+  "fakeEngulfing",
+  "significantCandles",
+  "liquiditySweeps",
+  "volumeSignals",
+  "volumeProfile",
+  "shortSqueezeEstimate",
+  "previousRthHighLow",
+  "trendlineCloseAlerts",
+  "bodyBreakDots",
+  "closeAbovePrevCloseDots",
+  "atrExpansionCandles",
+  "resistanceBreakoutConfirm",
+  "fvgFlip",
+  "adaptiveRunnerRsi",
+  "sixSevenSweep",
+  "fiveAmSweep",
+];
 
 const DEFAULT_LINE_VISIBILITY: LineVisibilityState = {
-  pmh: false,
-  vwap: false,
-  compression: false,
-  choch: false,
-  sessionBands: false,
-  projections: false,
-  trendlines: false,
-  fakeEngulfing: false,
-  significantCandles: false,
-  liquiditySweeps: false,
-  volumeSignals: false,
-  volumeProfile: false,
-  previousRthHighLow: false,
-  trendlineCloseAlerts: false,
-  bodyBreakDots: false,
-  closeAbovePrevCloseDots: false,
-  atrExpansionCandles: false,
-  resistanceBreakoutConfirm: false,
-  fvgFlip: false,
-  adaptiveRunnerRsi: false,
+  pmh: true,
+  vwap: true,
+  compression: true,
+  choch: true,
+  sessionBands: true,
+  projections: true,
+  trendlines: true,
+  fakeEngulfing: true,
+  significantCandles: true,
+  liquiditySweeps: true,
+  volumeSignals: true,
+  volumeProfile: true,
+  shortSqueezeEstimate: true,
+  previousRthHighLow: true,
+  trendlineCloseAlerts: true,
+  bodyBreakDots: true,
+  closeAbovePrevCloseDots: true,
+  atrExpansionCandles: true,
+  resistanceBreakoutConfirm: true,
+  fvgFlip: true,
+  adaptiveRunnerRsi: true,
   sixSevenSweep: true,
+  fiveAmSweep: true,
 };
 
 const DAILY_SESSION_MODE_STORAGE_KEY = "trading-terminal.dailySessionMode.v1";
@@ -785,6 +826,81 @@ function formatCompactVolume(value: number): string {
   if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return `${Math.round(value)}`;
+}
+
+function computeShortSqueezeEstimate(bars: Candle[], vwapValues: number[] = []): ShortSqueezeEstimate | null {
+  const validBars = bars.filter((bar) =>
+    Number.isFinite(bar.open) &&
+    Number.isFinite(bar.high) &&
+    Number.isFinite(bar.low) &&
+    Number.isFinite(bar.close) &&
+    Number.isFinite(bar.volume) &&
+    bar.volume > 0 &&
+    bar.high >= bar.low
+  );
+
+  if (validBars.length < 20) return null;
+
+  const lookbackBars = validBars.slice(-Math.min(validBars.length, 220));
+  const avgVolume = average(lookbackBars.map((bar) => bar.volume));
+  const atrValues = computeRollingAtrValues(lookbackBars, 14);
+  const latestAtr = atrValues.at(-1) ?? Math.max(lookbackBars.at(-1)!.close * 0.02, 0.01);
+  const weightedZones: Array<{ price: number; weight: number }> = [];
+
+  for (let i = 1; i < lookbackBars.length; i += 1) {
+    const bar = lookbackBars[i];
+    const prev = lookbackBars[i - 1];
+    const body = Math.abs(bar.close - bar.open);
+    const range = Math.max(bar.high - bar.low, bar.close * 0.002, 0.0001);
+    const volumeRatio = avgVolume > 0 ? bar.volume / avgVolume : 1;
+    const isHeavyRed = bar.close < bar.open && volumeRatio >= 1.2 && body / range >= 0.35;
+    const isBreakdown = bar.close < prev.low && volumeRatio >= 1.1;
+    const isFailedBreakdownSeed = bar.low < prev.low && bar.close > prev.close && volumeRatio >= 1.4;
+
+    if (!isHeavyRed && !isBreakdown && !isFailedBreakdownSeed) continue;
+
+    const shortEntryPrice = isFailedBreakdownSeed
+      ? (bar.low + bar.close) / 2
+      : (bar.open + bar.close + bar.low) / 3;
+    const weight = bar.volume * (isBreakdown ? 1.35 : 1) * (isHeavyRed ? 1.2 : 1) * Math.min(2.5, Math.max(0.75, volumeRatio));
+    weightedZones.push({ price: shortEntryPrice, weight });
+  }
+
+  if (weightedZones.length < 3) {
+    const fallback = lookbackBars
+      .slice()
+      .sort((a, b) => b.volume - a.volume)
+      .slice(0, Math.min(8, lookbackBars.length))
+      .map((bar) => ({ price: (bar.high + bar.low + bar.close) / 3, weight: bar.volume }));
+    weightedZones.push(...fallback);
+  }
+
+  const totalWeight = weightedZones.reduce((sum, zone) => sum + zone.weight, 0);
+  if (totalWeight <= 0) return null;
+
+  const estimatedShortAvg = weightedZones.reduce((sum, zone) => sum + zone.price * zone.weight, 0) / totalWeight;
+  const latestClose = lookbackBars.at(-1)!.close;
+  const latestVwap = vwapValues.length > 0 ? vwapValues.at(-1) ?? null : null;
+  const latestVolume = lookbackBars.at(-1)!.volume;
+  const rvol = avgVolume > 0 ? latestVolume / avgVolume : 1;
+  const pressureZone = estimatedShortAvg + latestAtr * 0.35;
+  const squeezeTrigger = estimatedShortAvg + latestAtr * 0.85;
+
+  let score = 0;
+  if (latestClose > estimatedShortAvg) score += 30;
+  if (latestClose > pressureZone) score += 20;
+  if (latestClose > squeezeTrigger) score += 20;
+  if (latestVwap != null && latestClose > latestVwap) score += 15;
+  score += Math.min(15, Math.max(0, (rvol - 1) * 10));
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  return {
+    estimatedShortAvg,
+    pressureZone,
+    squeezeTrigger,
+    score,
+    label: `SHORT AVG ${formatPrice(estimatedShortAvg)} | TRIGGER ${formatPrice(squeezeTrigger)} | SCORE ${score}`,
+  };
 }
 
 function formatVolume(value: number | null): string {
@@ -2011,6 +2127,219 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
   // Lightweight Charts behavior where multiple separated line chunks can visually
   // connect across old setups. Markers can still show older setups; the trade-zone
   // lines stay focused on the latest actionable setup.
+  const segment = segments[segments.length - 1];
+  if (!segment) {
+    return { highLine, lowLine, closeLine };
+  }
+
+  for (let i = segment.startIndex; i <= segment.endIndex && i < bars.length; i++) {
+    const time = toChartTime(bars[i].time);
+    lowLine.push({ time, value: segment.low });
+    closeLine.push({ time, value: segment.target });
+  }
+
+  return {
+    highLine,
+    lowLine,
+    closeLine,
+  };
+}
+
+
+
+type FiveAmSweepLineStudy = {
+  highLine: LinePoint[];
+  lowLine: LinePoint[];
+  closeLine: LinePoint[];
+};
+
+function computeFiveAmSweepSignals(bars: Candle[]): SignalMarkerPoint[] {
+  if (bars.length < 2) return [];
+
+  // 5:00 AM Pacific = 8:00 AM Eastern. This captures the 5AM candle
+  // and then waits for a later low sweep/reclaim, matching the existing 6-7 sweep logic.
+  const CANDLE_START_ET = 800;
+  const CANDLE_END_ET = 805;
+  const SWEEP_BUFFER_PCT = 0.001;
+
+  type RangeState = {
+    date: string;
+    low: number | null;
+    bodyTarget: number | null;
+    ready: boolean;
+    lowSwept: boolean;
+  };
+
+  const signals: SignalMarkerPoint[] = [];
+  let state: RangeState | null = null;
+
+  for (const bar of bars) {
+    const parts = getEtBarParts(bar.time);
+    if (!state || state.date !== parts.date) {
+      state = {
+        date: parts.date,
+        low: null,
+        bodyTarget: null,
+        ready: false,
+        lowSwept: false,
+      };
+    }
+
+    const inCandle = parts.hm >= CANDLE_START_ET && parts.hm < CANDLE_END_ET;
+    const afterCandle = parts.hm >= CANDLE_END_ET;
+
+    if (inCandle) {
+      const bodyHigh = Math.max(bar.open, bar.close);
+      state.low = state.low == null ? bar.low : Math.min(state.low, bar.low);
+      state.bodyTarget = state.bodyTarget == null ? bodyHigh : Math.max(state.bodyTarget, bodyHigh);
+      state.ready = false;
+      state.lowSwept = false;
+      continue;
+    }
+
+    if (afterCandle && state.low != null && state.bodyTarget != null) {
+      state.ready = true;
+    }
+
+    if (!afterCandle || !state.ready || state.low == null || state.bodyTarget == null) {
+      continue;
+    }
+
+    const lowSweep =
+      !state.lowSwept &&
+      bar.low < state.low * (1 - SWEEP_BUFFER_PCT) &&
+      bar.close > state.low;
+
+    if (lowSweep) {
+      const targetPrice = state.bodyTarget;
+      const risk = Math.max(state.low - bar.low, 0);
+      signals.push({
+        time: toChartTime(bar.time),
+        price: bar.low,
+        label: `5AM LOW SWEEP ENTRY ↑ | body tgt ${formatPrice(targetPrice)} | stop ${formatPrice(bar.low)}`,
+        color: "#3b82f6",
+        direction: "up",
+      });
+      signals.push({
+        time: toChartTime(bar.time),
+        price: targetPrice,
+        label: `5AM BODY TARGET ${formatPrice(targetPrice)}${risk > 0 ? ` | R ${formatPrice(risk)}` : ""}`,
+        color: "#93c5fd",
+        direction: "down",
+      });
+      state.lowSwept = true;
+    }
+  }
+
+  return signals.slice(-40);
+}
+
+function computeFiveAmSweepLines(bars: Candle[]): FiveAmSweepLineStudy {
+  const CANDLE_START_ET = 800;
+  const CANDLE_END_ET = 805;
+  const SWEEP_BUFFER_PCT = 0.001;
+
+  type DayRangeState = {
+    date: string;
+    low: number | null;
+    bodyTarget: number | null;
+    lowSwept: boolean;
+  };
+
+  type TradeSegment = {
+    startIndex: number;
+    endIndex: number;
+    low: number;
+    target: number;
+  };
+
+  const segments: TradeSegment[] = [];
+  let state: DayRangeState | null = null;
+  let activeSegment: TradeSegment | null = null;
+
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    const parts = getEtBarParts(bar.time);
+
+    if (!state || state.date !== parts.date) {
+      if (activeSegment) {
+        activeSegment.endIndex = Math.max(activeSegment.startIndex, i - 1);
+        segments.push(activeSegment);
+        activeSegment = null;
+      }
+      state = {
+        date: parts.date,
+        low: null,
+        bodyTarget: null,
+        lowSwept: false,
+      };
+    }
+
+    const inCandle = parts.hm >= CANDLE_START_ET && parts.hm < CANDLE_END_ET;
+    const afterCandle = parts.hm >= CANDLE_END_ET;
+
+    if (inCandle) {
+      const bodyHigh = Math.max(bar.open, bar.close);
+      state.low = state.low == null ? bar.low : Math.min(state.low, bar.low);
+      state.bodyTarget = state.bodyTarget == null ? bodyHigh : Math.max(state.bodyTarget, bodyHigh);
+      state.lowSwept = false;
+      activeSegment = null;
+      continue;
+    }
+
+    if (!afterCandle || state.low == null || state.bodyTarget == null || state.lowSwept) {
+      continue;
+    }
+
+    const lowSweep =
+      bar.low < state.low * (1 - SWEEP_BUFFER_PCT) &&
+      bar.close > state.low;
+
+    if (!lowSweep) {
+      continue;
+    }
+
+    activeSegment = {
+      startIndex: i,
+      endIndex: i,
+      low: state.low,
+      target: state.bodyTarget,
+    };
+    state.lowSwept = true;
+
+    if (bar.high >= state.bodyTarget) {
+      segments.push(activeSegment);
+      activeSegment = null;
+      continue;
+    }
+
+    for (let j = i + 1; j < bars.length; j++) {
+      const nextBar = bars[j];
+      const nextParts = getEtBarParts(nextBar.time);
+      if (nextParts.date !== state.date) {
+        activeSegment.endIndex = Math.max(activeSegment.startIndex, j - 1);
+        segments.push(activeSegment);
+        activeSegment = null;
+        break;
+      }
+      activeSegment.endIndex = j;
+      if (nextBar.high >= state.bodyTarget) {
+        segments.push(activeSegment);
+        activeSegment = null;
+        break;
+      }
+    }
+
+    if (activeSegment) {
+      segments.push(activeSegment);
+      activeSegment = null;
+    }
+  }
+
+  const highLine: LinePoint[] = [];
+  const lowLine: LinePoint[] = [];
+  const closeLine: LinePoint[] = [];
+
   const segment = segments[segments.length - 1];
   if (!segment) {
     return { highLine, lowLine, closeLine };
@@ -4781,6 +5110,9 @@ function normalizeOrderLines(openOrders: ChartOrder[] | undefined, symbol: strin
 
     const template = getOrderTemplate(order);
     const type = String(order.type ?? order.order_type ?? template ?? "limit").toLowerCase();
+    const side = String(order.side ?? "").toLowerCase();
+    const positionIntent = String((order as any).position_intent ?? (order as any).positionIntent ?? "").toLowerCase();
+    const hasNestedLegs = Array.isArray(order.legs) && order.legs.length > 0;
 
     const entryPrice =
       numberFromOrderValue(order.limitPrice) ??
@@ -4801,10 +5133,24 @@ function normalizeOrderLines(openOrders: ChartOrder[] | undefined, symbol: strin
       numberFromOrderValue(order.take_profit?.limit_price) ??
       numberFromOrderValue(order.take_profit?.price);
 
-    const entryKind: ChartOrderLineKind = type.includes("stop") && entryPrice == null ? "stop" : "limit";
-    const entryLabel = template === "market" ? "MKT" : entryKind === "stop" ? "STOP" : template === "bracket" ? "ENTRY" : "LIMIT";
-    const entryLine = makeOrderLine(order, entryKind, entryPrice, entryLabel, 0);
-    if (entryLine) lines.push(entryLine);
+    // A standalone Alpaca sell_to_close/bracket sell order is an exit/TP leg, not an entry.
+    // This fixes orphaned bracket children showing as "SELL ... ENTRY" and prevents them
+    // from being used as the entry anchor for risk/reward boxes.
+    const isClosingSell =
+      side === "sell" &&
+      (positionIntent.includes("close") || template === "bracket" || template === "oco" || takeProfitPrice == null);
+
+    if (isClosingSell && entryPrice != null && !hasNestedLegs) {
+      const exitLabel = type.includes("stop") ? "SL" : "TP";
+      const exitKind: ChartOrderLineKind = type.includes("stop") ? "stop_loss" : "take_profit";
+      const exitLine = makeOrderLine(order, exitKind, entryPrice, exitLabel, 0);
+      if (exitLine) lines.push(exitLine);
+    } else {
+      const entryKind: ChartOrderLineKind = type.includes("stop") && entryPrice == null ? "stop" : "limit";
+      const entryLabel = template === "market" ? "MKT" : entryKind === "stop" ? "STOP" : template === "bracket" ? "ENTRY" : "LIMIT";
+      const entryLine = makeOrderLine(order, entryKind, entryPrice, entryLabel, 0);
+      if (entryLine) lines.push(entryLine);
+    }
 
     const tpLine = makeOrderLine(order, "take_profit", takeProfitPrice, "TP", 1);
     if (tpLine) lines.push(tpLine);
@@ -4814,12 +5160,16 @@ function normalizeOrderLines(openOrders: ChartOrder[] | undefined, symbol: strin
 
     if (Array.isArray(order.legs)) {
       order.legs.forEach((leg, index) => {
+        const legStatus = String(leg.status ?? "open").toLowerCase();
+        if (["filled", "canceled", "cancelled", "expired", "rejected"].includes(legStatus)) return;
+
         const legType = String(leg.type ?? leg.order_type ?? "").toLowerCase();
+        const legSide = String(leg.side ?? "").toLowerCase();
         const legLimit = numberFromOrderValue(leg.limitPrice) ?? numberFromOrderValue(leg.limit_price) ?? numberFromOrderValue(leg.price);
         const legStop = numberFromOrderValue(leg.stopPrice) ?? numberFromOrderValue(leg.stop_price);
         const legKind: ChartOrderLineKind = legType.includes("stop") ? "stop_loss" : "take_profit";
         const legPrice = legKind === "stop_loss" ? legStop ?? legLimit : legLimit ?? legStop;
-        const legLabel = legKind === "stop_loss" ? "SL" : "TP";
+        const legLabel = legKind === "stop_loss" ? "SL" : legSide === "sell" ? "TP" : "LIMIT";
         const legLine = makeOrderLine({ ...leg, id: String(leg.id ?? `${order.id}-leg-${index}`) }, legKind, legPrice, legLabel, index + 10);
         if (legLine) {
           // Keep child/leg lines tied to the parent order id for chart actions.
@@ -5045,6 +5395,9 @@ function ChartPanelComponent({
   const sixSevenHighSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const sixSevenLowSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const sixSevenCloseSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const fiveAmHighSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const fiveAmLowSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const fiveAmCloseSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const projectionPriceLinesRef = useRef<any[]>([]);
   const savedProjectionPriceLinesRef = useRef<SavedProjectionPriceLine[]>([]);
   const selectedSavedProjectionIdRef = useRef<string | null>(null);
@@ -5067,6 +5420,7 @@ function ChartPanelComponent({
   const latestResistanceBreakoutMarkersRef = useRef<SignalMarkerPoint[]>([]);
   const latestAdaptiveRunnerRsiMarkersRef = useRef<SignalMarkerPoint[]>([]);
   const latestSixSevenSweepMarkersRef = useRef<SignalMarkerPoint[]>([]);
+  const latestFiveAmSweepMarkersRef = useRef<SignalMarkerPoint[]>([]);
   const latestChochMarkersRef = useRef<ChochMarkerPoint[]>([]);
   const latestLineVisibilityRef = useRef<LineVisibilityState>({
     pmh: visibility.pmh,
@@ -5080,8 +5434,10 @@ function ChartPanelComponent({
     significantCandles: visibility.significantCandles ?? true,
     liquiditySweeps: visibility.liquiditySweeps ?? true,
     sixSevenSweep: visibility.sixSevenSweep ?? true,
+    fiveAmSweep: visibility.fiveAmSweep ?? true,
     volumeSignals: visibility.volumeSignals ?? true,
     volumeProfile: visibility.volumeProfile ?? false,
+    shortSqueezeEstimate: visibility.shortSqueezeEstimate ?? true,
     previousRthHighLow: visibility.previousRthHighLow ?? true,
     trendlineCloseAlerts: visibility.trendlineCloseAlerts ?? true,
     bodyBreakDots: visibility.bodyBreakDots ?? true,
@@ -5210,6 +5566,7 @@ function ChartPanelComponent({
     vwap: null,
     tradingDate: null,
     compressionLabel: null,
+    shortSqueeze: null,
     session: {
       currentSession: getCurrentEtSessionKind(),
       currentSessionLabel: getSessionLabel(getCurrentEtSessionKind()),
@@ -5250,6 +5607,7 @@ function ChartPanelComponent({
   const [resistanceBreakoutMarkers, setResistanceBreakoutMarkers] = useState<MarkerOverlay[]>([]);
   const [adaptiveRunnerRsiMarkers, setAdaptiveRunnerRsiMarkers] = useState<MarkerOverlay[]>([]);
   const [sixSevenSweepMarkers, setSixSevenSweepMarkers] = useState<MarkerOverlay[]>([]);
+  const [fiveAmSweepMarkers, setFiveAmSweepMarkers] = useState<MarkerOverlay[]>([]);
   const [adaptiveRunnerRsiState, setAdaptiveRunnerRsiState] = useState<AdaptiveRunnerRsiState | null>(null);
   const [trendlineHandleOverlays, setTrendlineHandleOverlays] = useState<TrendlineHandleOverlay[]>([]);
   const [trendlineFocusOverlay, setTrendlineFocusOverlay] = useState<TrendlineFocusOverlay | null>(null);
@@ -5286,10 +5644,58 @@ function ChartPanelComponent({
   const [symbolInput, setSymbolInput] = useState(symbol.toUpperCase());
   const [addWatchlistFeedback, setAddWatchlistFeedback] = useState("");
 
+  // Keep the top Studies dropdown and this chart's internal Function Settings / Line Visibility
+  // panel in sync. The parent page controls the dropdown state, while Line Visibility controls
+  // the actual render gate inside ChartPanel. Without this bridge, the dropdown can say a study
+  // is ON while the internal lineVisibility flag is still OFF from old localStorage or prior
+  // Function Settings clicks.
+  useEffect(() => {
+    setLineVisibility((prev) => {
+      let changed = false;
+      const next: LineVisibilityState = { ...prev };
+      const incoming = visibility as Partial<LineVisibilityState>;
+
+      for (const key of LINE_VISIBILITY_KEYS) {
+        const value = incoming[key];
+        if (typeof value !== "boolean") continue;
+        if (next[key] !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [
+    visibility.pmh,
+    visibility.vwap,
+    visibility.compression,
+    visibility.choch,
+    visibility.sessionBands,
+    visibility.projections,
+    visibility.trendlines,
+    visibility.fakeEngulfing,
+    visibility.significantCandles,
+    visibility.liquiditySweeps,
+    visibility.volumeSignals,
+    visibility.volumeProfile,
+    visibility.shortSqueezeEstimate,
+    visibility.previousRthHighLow,
+    visibility.trendlineCloseAlerts,
+    visibility.bodyBreakDots,
+    visibility.closeAbovePrevCloseDots,
+    visibility.atrExpansionCandles,
+    visibility.resistanceBreakoutConfirm,
+    visibility.fvgFlip,
+    visibility.adaptiveRunnerRsi,
+    visibility.sixSevenSweep,
+    visibility.fiveAmSweep,
+  ]);
+
   // Pro toolbar: keep settings panels derived from the active tool so they cannot desync after
   // persistence restores, order-drag patches, or chart refreshes.
   const trendlineSettingsVisible = drawMode;
-  const projectionSettingsVisible = projectionMode;
+  const projectionSettingsVisible = projectionSettingsOpen;
 
   const [legend, setLegend] = useState<LegendState>({
     last: null,
@@ -5297,6 +5703,7 @@ function ChartPanelComponent({
     vwap: null,
     tradingDate: null,
     compressionLabel: null,
+    shortSqueeze: null,
     session: {
       currentSession: getCurrentEtSessionKind(),
       currentSessionLabel: getSessionLabel(getCurrentEtSessionKind()),
@@ -5325,13 +5732,15 @@ function ChartPanelComponent({
       // Session bands are controlled by the page Studies toggle only.
       // Do not double-hide them behind the internal Line Visibility state because old localStorage can keep them off.
       sessionBands: visibility.sessionBands,
-      projections: visibility.projections && lineVisibility.projections,
+      // Projection tool can enable this locally when FX is selected.
+      projections: visibility.projections || lineVisibility.projections,
       trendlines: visibility.trendlines && lineVisibility.trendlines,
       fakeEngulfing: (visibility.fakeEngulfing ?? true) && lineVisibility.fakeEngulfing,
       significantCandles: (visibility.significantCandles ?? true) && lineVisibility.significantCandles,
       liquiditySweeps: (visibility.liquiditySweeps ?? true) && lineVisibility.liquiditySweeps,
       volumeSignals: (visibility.volumeSignals ?? true) && lineVisibility.volumeSignals,
       volumeProfile: (visibility.volumeProfile ?? true) && lineVisibility.volumeProfile,
+      shortSqueezeEstimate: (visibility.shortSqueezeEstimate ?? true) && lineVisibility.shortSqueezeEstimate,
       previousRthHighLow: (visibility.previousRthHighLow ?? true) && lineVisibility.previousRthHighLow,
       trendlineCloseAlerts: (visibility.trendlineCloseAlerts ?? true) && lineVisibility.trendlineCloseAlerts,
       bodyBreakDots: (visibility.bodyBreakDots ?? true) && lineVisibility.bodyBreakDots,
@@ -5342,6 +5751,7 @@ function ChartPanelComponent({
       adaptiveRunnerRsi: (visibility.adaptiveRunnerRsi ?? true) && lineVisibility.adaptiveRunnerRsi,
       // 6-7 Sweep is controlled by the page Studies toggle. Do not double-hide it behind the internal Line Visibility state.
       sixSevenSweep: visibility.sixSevenSweep ?? true,
+      fiveAmSweep: visibility.fiveAmSweep ?? true,
     }),
     [
       visibility.pmh,
@@ -5356,6 +5766,7 @@ function ChartPanelComponent({
       visibility.liquiditySweeps,
       visibility.volumeSignals,
       visibility.volumeProfile,
+      visibility.shortSqueezeEstimate,
       visibility.previousRthHighLow,
       visibility.trendlineCloseAlerts,
       visibility.bodyBreakDots,
@@ -5365,6 +5776,7 @@ function ChartPanelComponent({
       visibility.fvgFlip,
       visibility.adaptiveRunnerRsi,
       visibility.sixSevenSweep,
+    visibility.fiveAmSweep,
       lineVisibility,
     ]
   );
@@ -5645,6 +6057,7 @@ function ChartPanelComponent({
       setChochMarkers([]);
       setLiquiditySweepMarkers([]);
       setSixSevenSweepMarkers([]);
+      setFiveAmSweepMarkers([]);
       setVolumeProfileOverlays([]);
       setControlState({
         label: "NEUTRAL",
@@ -6612,6 +7025,7 @@ function ChartPanelComponent({
       setChochMarkers([]);
       setLiquiditySweepMarkers([]);
       setSixSevenSweepMarkers([]);
+      setFiveAmSweepMarkers([]);
       setVolumeProfileOverlays([]);
       setKeyLevelLabelOverlays([]);
       setPreviousRthRangeOverlay(null);
@@ -6772,6 +7186,17 @@ function ChartPanelComponent({
     }
     if (legend.last != null && Number.isFinite(legend.last)) {
       pushKeyLevelLabel("last", "LAST", `Last ${formatPrice(legend.last)}`, legend.last, "#dcfce7", "rgba(22,101,52,0.92)", "1px solid rgba(74,222,128,0.72)");
+    }
+    if (latestLineVisibilityRef.current.shortSqueezeEstimate && legend.shortSqueeze?.estimatedShortAvg != null) {
+      pushKeyLevelLabel(
+        "short-squeeze-avg",
+        "SHORT",
+        `Short Avg Est ${formatPrice(legend.shortSqueeze.estimatedShortAvg)}`,
+        legend.shortSqueeze.estimatedShortAvg,
+        "#fed7aa",
+        "rgba(124,45,18,0.94)",
+        "1px solid rgba(251,146,60,0.78)"
+      );
     }
 
     const sortedKeyLevelLabels = nextKeyLevelLabels
@@ -7180,6 +7605,31 @@ function ChartPanelComponent({
       setSixSevenSweepMarkers(nextSixSevenSweepMarkers);
     } else {
       setSixSevenSweepMarkers([]);
+      setFiveAmSweepMarkers([]);
+    }
+
+
+    if (latestLineVisibilityRef.current.fiveAmSweep) {
+      const nextFiveAmSweepMarkers: MarkerOverlay[] = [];
+      for (const marker of latestFiveAmSweepMarkersRef.current) {
+        const x = timeScale.timeToCoordinate(marker.time as Time);
+        const y = candleSeries.priceToCoordinate(marker.price);
+
+        if (x == null || y == null || !Number.isFinite(x) || !Number.isFinite(y)) {
+          continue;
+        }
+
+        nextFiveAmSweepMarkers.push({
+          left: x,
+          top: y,
+          label: marker.label,
+          color: marker.color,
+          direction: marker.direction,
+        });
+      }
+      setFiveAmSweepMarkers(nextFiveAmSweepMarkers);
+    } else {
+      setFiveAmSweepMarkers([]);
     }
 
     if (latestLineVisibilityRef.current.volumeSignals) {
@@ -7639,9 +8089,13 @@ function ChartPanelComponent({
     compressionBottomSeriesRef.current?.setData(compressionBottomData);
 
     const sixSevenLines = computeSixSevenSweepLines(bars);
+    const fiveAmLines = computeFiveAmSweepLines(bars);
     sixSevenHighSeriesRef.current?.setData(effectiveLineVisibility.sixSevenSweep ? sixSevenLines.highLine : []);
     sixSevenLowSeriesRef.current?.setData(effectiveLineVisibility.sixSevenSweep ? sixSevenLines.lowLine : []);
     sixSevenCloseSeriesRef.current?.setData(effectiveLineVisibility.sixSevenSweep ? sixSevenLines.closeLine : []);
+    fiveAmHighSeriesRef.current?.setData(effectiveLineVisibility.fiveAmSweep ? fiveAmLines.highLine : []);
+    fiveAmLowSeriesRef.current?.setData(effectiveLineVisibility.fiveAmSweep ? fiveAmLines.lowLine : []);
+    fiveAmCloseSeriesRef.current?.setData(effectiveLineVisibility.fiveAmSweep ? fiveAmLines.closeLine : []);
 
     if (!effectiveLineVisibility.projections) {
       clearProjectionSelection();
@@ -7667,6 +8121,8 @@ function ChartPanelComponent({
       const liquiditySweepSignals = computeLiquiditySweepSignals(bars);
       const sixSevenSweepSignals = computeSixSevenSweepSignals(bars);
       const sixSevenSweepLines = computeSixSevenSweepLines(bars);
+      const fiveAmSweepSignals = computeFiveAmSweepSignals(bars);
+      const fiveAmSweepLines = computeFiveAmSweepLines(bars);
       const volumeSignalMarkers = computeVolumeSignalMarkers(bars);
       const bodyBreakDotSignals = computeBodyBreakDotSignals(bars);
       const atrBreakoutSignals = computeAtrExpansionAndResistanceBreakoutSignals(
@@ -7710,6 +8166,7 @@ function ChartPanelComponent({
       latestFakeEngulfingMarkersRef.current = fakeEngulfingSignals;
       latestLiquiditySweepMarkersRef.current = liquiditySweepSignals;
       latestSixSevenSweepMarkersRef.current = sixSevenSweepSignals;
+      latestFiveAmSweepMarkersRef.current = fiveAmSweepSignals;
       latestVolumeSignalMarkersRef.current = volumeSignalMarkers;
       latestBodyBreakDotMarkersRef.current = bodyBreakDotSignals.blackDots;
       latestCloseAbovePrevCloseDotMarkersRef.current = bodyBreakDotSignals.whiteDots;
@@ -7785,6 +8242,9 @@ function ChartPanelComponent({
       sixSevenHighSeriesRef.current?.setData(latestLineVisibilityRef.current.sixSevenSweep ? sixSevenSweepLines.highLine : []);
       sixSevenLowSeriesRef.current?.setData(latestLineVisibilityRef.current.sixSevenSweep ? sixSevenSweepLines.lowLine : []);
       sixSevenCloseSeriesRef.current?.setData(latestLineVisibilityRef.current.sixSevenSweep ? sixSevenSweepLines.closeLine : []);
+      fiveAmHighSeriesRef.current?.setData(latestLineVisibilityRef.current.fiveAmSweep ? fiveAmSweepLines.highLine : []);
+      fiveAmLowSeriesRef.current?.setData(latestLineVisibilityRef.current.fiveAmSweep ? fiveAmSweepLines.lowLine : []);
+      fiveAmCloseSeriesRef.current?.setData(latestLineVisibilityRef.current.fiveAmSweep ? fiveAmSweepLines.closeLine : []);
 
       syncTrendlineSeries();
       refreshProjectionFromLatestBar(bars);
@@ -7814,6 +8274,7 @@ function ChartPanelComponent({
 
       const latestVwap =
         vwapValues.length > 0 ? vwapValues[vwapValues.length - 1] : null;
+      const shortSqueeze = computeShortSqueezeEstimate(bars, vwapValues);
 
       const nextLegend: LegendState = {
         last,
@@ -7821,6 +8282,7 @@ function ChartPanelComponent({
         vwap: latestVwap,
         tradingDate,
         compressionLabel: compression?.label ?? null,
+        shortSqueeze,
         session: sessionStats,
       };
 
@@ -8211,6 +8673,34 @@ function ChartPanelComponent({
       crosshairMarkerVisible: false,
     });
 
+
+    const fiveAmHighSeries = chart.addSeries(LineSeries, {
+      color: "#2563eb",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
+    const fiveAmLowSeries = chart.addSeries(LineSeries, {
+      color: "#60a5fa",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
+    const fiveAmCloseSeries = chart.addSeries(LineSeries, {
+      color: "#93c5fd",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dotted,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
     vwapSeries.applyOptions({ autoscaleInfoProvider: () => null });
     pmhSeries.applyOptions({ autoscaleInfoProvider: () => null });
     previousRthHighSeries.applyOptions({ autoscaleInfoProvider: () => null });
@@ -8220,6 +8710,9 @@ function ChartPanelComponent({
     sixSevenHighSeries.applyOptions({ autoscaleInfoProvider: () => null });
     sixSevenLowSeries.applyOptions({ autoscaleInfoProvider: () => null });
     sixSevenCloseSeries.applyOptions({ autoscaleInfoProvider: () => null });
+    fiveAmHighSeries.applyOptions({ autoscaleInfoProvider: () => null });
+    fiveAmLowSeries.applyOptions({ autoscaleInfoProvider: () => null });
+    fiveAmCloseSeries.applyOptions({ autoscaleInfoProvider: () => null });
 
     const getPointFromCoordinates = (x: number, y: number): PendingTrendPoint | null => {
       const chart = chartRef.current;
@@ -8262,8 +8755,9 @@ function ChartPanelComponent({
             ? "support_prediction_wick_range"
             : activeChartFunctionIdRef.current;
         drawProjectionSelection(getChartFunctionDefinition(functionId).buildSelection(nearestBar, barsRef.current));
-        projectionModeRef.current = false;
-        setProjectionMode(false);
+        // Keep FX/projection pick mode armed so multiple projections can be placed without reloading or reselecting the tool.
+        projectionModeRef.current = true;
+        setProjectionMode(true);
         return;
       }
 
@@ -8403,8 +8897,13 @@ function ChartPanelComponent({
       const nearestBar = findNearestBarByTime(barsRef.current, clickedTime);
       if (!nearestBar) return;
 
-      drawProjectionSelection(getChartFunctionDefinition(activeChartFunctionIdRef.current).buildSelection(nearestBar, barsRef.current));
-      setProjectionMode(false);
+      const functionId =
+        activeChartFunctionIdRef.current === "none"
+          ? "support_prediction_wick_range"
+          : activeChartFunctionIdRef.current;
+      drawProjectionSelection(getChartFunctionDefinition(functionId).buildSelection(nearestBar, barsRef.current));
+      projectionModeRef.current = true;
+      setProjectionMode(true);
     };
 
     const setChartInteractionEnabled = (enabled: boolean) => {
@@ -8608,6 +9107,9 @@ function ChartPanelComponent({
     sixSevenHighSeriesRef.current = sixSevenHighSeries;
     sixSevenLowSeriesRef.current = sixSevenLowSeries;
     sixSevenCloseSeriesRef.current = sixSevenCloseSeries;
+    fiveAmHighSeriesRef.current = fiveAmHighSeries;
+    fiveAmLowSeriesRef.current = fiveAmLowSeries;
+    fiveAmCloseSeriesRef.current = fiveAmCloseSeries;
 
     void loadSavedProjectionLinesFromPersistence();
 
@@ -8714,6 +9216,9 @@ function ChartPanelComponent({
       sixSevenHighSeriesRef.current = null;
       sixSevenLowSeriesRef.current = null;
       sixSevenCloseSeriesRef.current = null;
+      fiveAmHighSeriesRef.current = null;
+      fiveAmLowSeriesRef.current = null;
+      fiveAmCloseSeriesRef.current = null;
     };
   }, [symbol, timeframe, renderBars, syncTrendlineSeries, trendlineSnapMode, updateOverlayPositions, getNearestSavedProjectionInteraction, loadSavedProjectionLinesFromPersistence]);
 
@@ -8813,6 +9318,9 @@ function ChartPanelComponent({
         sixSevenHighSeriesRef.current?.setData([]);
         sixSevenLowSeriesRef.current?.setData([]);
         sixSevenCloseSeriesRef.current?.setData([]);
+        fiveAmHighSeriesRef.current?.setData([]);
+        fiveAmLowSeriesRef.current?.setData([]);
+        fiveAmCloseSeriesRef.current?.setData([]);
 
         const chart = chartRef.current;
         if (chart) {
@@ -8828,6 +9336,7 @@ function ChartPanelComponent({
           vwap: null,
           tradingDate: null,
           compressionLabel: null,
+          shortSqueeze: null,
           session: {
             currentSession: getCurrentEtSessionKind(),
             currentSessionLabel: getSessionLabel(getCurrentEtSessionKind()),
@@ -9253,6 +9762,11 @@ function ChartPanelComponent({
 
         <div style={{ ...legendBoxStyle, pointerEvents: "auto", padding: "5px 8px" }}>VWAP: {formatPrice(legend.vwap)}</div>
         <div style={{ ...legendBoxStyle, pointerEvents: "auto", padding: "5px 8px", color: "#86efac" }}>LAST: {formatPrice(legend.last)}</div>
+        {effectiveLineVisibility.shortSqueezeEstimate && legend.shortSqueeze ? (
+          <div style={{ ...legendBoxStyle, pointerEvents: "auto", padding: "5px 8px", color: legend.shortSqueeze.score >= 70 ? "#fb923c" : "#fdba74" }}>
+            {legend.shortSqueeze.label}
+          </div>
+        ) : null}
         <div
           style={{
             ...legendBoxStyle,
@@ -9481,11 +9995,10 @@ function ChartPanelComponent({
               activeChartFunctionIdRef.current = "support_prediction_wick_range";
               setActiveChartFunctionId("support_prediction_wick_range");
             }
-            setProjectionMode((prev) => {
-              const next = !prev;
-              setProjectionSettingsOpen(next);
-              return next;
-            });
+            setLineVisibility((prev) => ({ ...prev, projections: true }));
+            projectionModeRef.current = true;
+            setProjectionMode(true);
+            setProjectionSettingsOpen(true);
           }}
           style={{
             ...chartToolButtonStyle,
@@ -9509,11 +10022,10 @@ function ChartPanelComponent({
               activeChartFunctionIdRef.current = "support_prediction_wick_range";
               setActiveChartFunctionId("support_prediction_wick_range");
             }
-            setProjectionMode((prev) => {
-              const next = !prev;
-              setProjectionSettingsOpen(next);
-              return next;
-            });
+            setLineVisibility((prev) => ({ ...prev, projections: true }));
+            projectionModeRef.current = true;
+            setProjectionMode(true);
+            setProjectionSettingsOpen((prev) => !prev);
           }}
           style={{
             ...chartToolButtonStyle,
@@ -9595,14 +10107,19 @@ function ChartPanelComponent({
             position: "absolute",
             top: compactTools ? 76 : 96,
             left: compactTools ? 54 : 68,
-            zIndex: 13,
+            zIndex: 60,
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            width: 220,
+            width: compactTools ? 280 : 300,
+            maxHeight: "min(620px, calc(100vh - 170px))",
+            overflowY: "auto",
+            overflowX: "hidden",
+            overscrollBehavior: "contain",
+            scrollbarGutter: "stable",
             padding: 10,
             borderRadius: 12,
-            background: "rgba(5, 18, 45, 0.94)",
+            background: "rgba(5, 18, 45, 0.96)",
             border: "1px solid rgba(255,255,255,0.10)",
             boxShadow: "0 8px 24px rgba(0,0,0,0.24)",
             backdropFilter: "blur(6px)",
@@ -9613,14 +10130,11 @@ function ChartPanelComponent({
               Function Settings
             </div>
             <button
-              onClick={() => {
-                setProjectionMode(false);
-                setProjectionSettingsOpen(false);
-              }}
+              onClick={() => setProjectionSettingsOpen(false)}
               style={{ ...toolbarIconButtonStyle, width: 28, height: 28, fontSize: 12 }}
-              title="Turn function tool off"
+              title="Close settings only"
             >
-              ←
+              ×
             </button>
           </div>
 
@@ -9689,21 +10203,15 @@ function ChartPanelComponent({
 
           <button
             onClick={() => {
-              if (!effectiveLineVisibility.projections) {
-                setProjectionMode(false);
-                return;
-              }
               setDrawMode(false);
               setPendingTrendPoint(null);
+              setLineVisibility((prev) => ({ ...prev, projections: true }));
               if (activeChartFunctionIdRef.current === "none") {
                 activeChartFunctionIdRef.current = "support_prediction_wick_range";
                 setActiveChartFunctionId("support_prediction_wick_range");
               }
-              setProjectionMode((prev) => {
-                const next = !prev;
-                setProjectionSettingsOpen(next);
-                return next;
-              });
+              projectionModeRef.current = true;
+              setProjectionMode(true);
             }}
             style={{
               ...toolbarButtonStyle,
@@ -9746,20 +10254,38 @@ function ChartPanelComponent({
             position: "absolute",
             top: 96,
             left: projectionSettingsVisible ? 492 : 68,
-            zIndex: 13,
+            zIndex: 70,
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            width: 220,
+            width: compactTools ? 290 : 320,
+            maxHeight: "min(660px, calc(100vh - 170px))",
+            overflowY: "auto",
+            overflowX: "hidden",
+            overscrollBehavior: "contain",
+            scrollbarGutter: "stable",
             padding: 10,
             borderRadius: 12,
-            background: "rgba(5, 18, 45, 0.94)",
+            background: "rgba(5, 18, 45, 0.96)",
             border: "1px solid rgba(255,255,255,0.10)",
             boxShadow: "0 8px 24px rgba(0,0,0,0.24)",
             backdropFilter: "blur(6px)",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <div
+            style={{
+              position: "sticky",
+              top: -10,
+              zIndex: 2,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              padding: "0 0 8px",
+              background: "rgba(5, 18, 45, 0.98)",
+              borderBottom: "1px solid rgba(255,255,255,0.08)",
+            }}
+          >
             <div style={{ fontSize: 12, fontWeight: 800, color: "#dbeafe", letterSpacing: 0.25 }}>
               Line Visibility
             </div>
@@ -9772,7 +10298,19 @@ function ChartPanelComponent({
             </button>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr",
+              gap: 8,
+              maxHeight: "min(560px, calc(100vh - 245px))",
+              overflowY: "auto",
+              overflowX: "hidden",
+              paddingRight: 6,
+              overscrollBehavior: "contain",
+              scrollbarGutter: "stable",
+            }}
+          >
             {([
               ["pmh", "Premarket High"],
               ["vwap", "VWAP"],
@@ -9786,6 +10324,7 @@ function ChartPanelComponent({
               ["liquiditySweeps", "Liquidity Sweeps"],
               ["volumeSignals", "Volume Signals"],
               ["volumeProfile", "Volume Profile"],
+              ["shortSqueezeEstimate", "Short Squeeze Estimate"],
               ["previousRthHighLow", "Previous Day RTH High/Low"],
               ["bodyBreakDots", "Black Dots: Open/Close Below Prev Body"],
               ["closeAbovePrevCloseDots", "White Dots: Close Above Prev Close"],
@@ -9795,6 +10334,7 @@ function ChartPanelComponent({
               ["fvgFlip", "FVG Flip + Quality"],
               ["adaptiveRunnerRsi", "Adaptive Runner RSI"],
               ["sixSevenSweep", "6-7 Sweep Entry/Target"],
+              ["fiveAmSweep", "5AM Sweep Entry/Target"],
             ] as const).map(([key, label]) => {
               const isOn = lineVisibility[key];
               const disabled =
@@ -9843,7 +10383,6 @@ function ChartPanelComponent({
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <button
               onClick={() => setLineVisibility({
-                ...DEFAULT_LINE_VISIBILITY,
                 pmh: false,
                 vwap: false,
                 compression: false,
@@ -9856,13 +10395,17 @@ function ChartPanelComponent({
                 liquiditySweeps: false,
                 volumeSignals: false,
                 volumeProfile: false,
+                shortSqueezeEstimate: false,
                 previousRthHighLow: false,
+                trendlineCloseAlerts: false,
                 bodyBreakDots: false,
                 closeAbovePrevCloseDots: false,
                 atrExpansionCandles: false,
                 resistanceBreakoutConfirm: false,
-                trendlineCloseAlerts: false,
                 fvgFlip: false,
+                adaptiveRunnerRsi: false,
+                sixSevenSweep: false,
+      fiveAmSweep: false,
               })}
               style={{
                 ...toolbarButtonStyle,
@@ -9909,14 +10452,17 @@ function ChartPanelComponent({
             position: "absolute",
             top: compactTools ? 76 : 96,
             left: compactTools ? 54 : 68,
-            zIndex: 13,
+            zIndex: 60,
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            width: 188,
+            width: compactTools ? 230 : 240,
+            maxHeight: "calc(100% - 120px)",
+            overflowY: "auto",
+            overscrollBehavior: "contain",
             padding: 10,
             borderRadius: 12,
-            background: "rgba(5, 18, 45, 0.94)",
+            background: "rgba(5, 18, 45, 0.96)",
             border: "1px solid rgba(255,255,255,0.10)",
             boxShadow: "0 8px 24px rgba(0,0,0,0.24)",
             backdropFilter: "blur(6px)",
@@ -11260,6 +11806,74 @@ function ChartPanelComponent({
           );
         }) : null}
 
+
+        {effectiveLineVisibility.fiveAmSweep ? fiveAmSweepMarkers.map((marker, idx) => {
+          const labelLane = 2 + getMarkerLabelStack(fiveAmSweepMarkers, marker, idx);
+          const labelGroup = "fiveam";
+          const labelExpanded = isSignalLabelExpanded(labelGroup, marker, idx);
+
+          return (
+            <div key={`${marker.label}-${idx}-${marker.left}-five-am-sweep`}>
+              <div
+                style={
+                  marker.direction === "up"
+                    ? {
+                        position: "absolute",
+                        left: marker.left - 8,
+                        top: marker.top + 6,
+                        width: 0,
+                        height: 0,
+                        borderLeft: "8px solid transparent",
+                        borderRight: "8px solid transparent",
+                        borderTop: `14px solid ${marker.color}`,
+                        filter: "drop-shadow(0 0 8px rgba(255,255,255,0.45))",
+                        pointerEvents: "none",
+                        zIndex: 12,
+                      }
+                    : {
+                        position: "absolute",
+                        left: marker.left - 8,
+                        top: marker.top - 20,
+                        width: 0,
+                        height: 0,
+                        borderLeft: "8px solid transparent",
+                        borderRight: "8px solid transparent",
+                        borderBottom: `14px solid ${marker.color}`,
+                        filter: "drop-shadow(0 0 8px rgba(255,255,255,0.45))",
+                        pointerEvents: "none",
+                        zIndex: 12,
+                      }
+                }
+              />
+              <div
+                style={{
+                  position: "absolute",
+                  left: marker.left + 10,
+                  top: marker.direction === "up" ? marker.top + 18 + labelLane * 16 : marker.top - 34 - labelLane * 16,
+                  padding: "2px 7px",
+                  borderRadius: 7,
+                  background: "rgba(15,23,42,0.94)",
+                  border: `1px solid ${marker.color}`,
+                  color: "#f8fafc",
+                  fontSize: 10,
+                  fontWeight: 900,
+                  whiteSpace: "nowrap",
+                  cursor: "pointer",
+                  pointerEvents: "auto",
+                  zIndex: 15,
+                }}
+                title={getSignalLabelTitle(labelGroup, marker, idx)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleSignalLabel(labelGroup, marker, idx);
+                }}
+              >
+                {labelExpanded ? marker.label : marker.label.includes("LOW") ? "5AM LOW" : marker.label.includes("HIGH") ? "5AM HIGH" : "5AM TGT"}
+              </div>
+            </div>
+          );
+        }) : null}
+
         {effectiveLineVisibility.adaptiveRunnerRsi ? adaptiveRunnerRsiMarkers.map((marker, idx) => {
           const labelLane = 2 + getMarkerLabelStack(adaptiveRunnerRsiMarkers, marker, idx);
           const labelGroup = "adaptiversi";
@@ -11588,15 +12202,52 @@ const legendBoxStyle: CSSProperties = {
   backdropFilter: "blur(4px)",
 };
 
+const VISIBILITY_KEYS: Array<keyof OverlayVisibility> = [
+  "pmh",
+  "vwap",
+  "compression",
+  "choch",
+  "sessionBands",
+  "projections",
+  "trendlines",
+  "fakeEngulfing",
+  "significantCandles",
+  "liquiditySweeps",
+  "volumeSignals",
+  "volumeProfile",
+  "shortSqueezeEstimate",
+  "previousRthHighLow",
+  "bodyBreakDots",
+  "closeAbovePrevCloseDots",
+  "atrExpansionCandles",
+  "resistanceBreakoutConfirm",
+  "trendlineCloseAlerts",
+  "fvgFlip",
+  "adaptiveRunnerRsi",
+  "sixSevenSweep",
+  "fiveAmSweep",
+];
+
 const sameVisibility = (a: OverlayVisibility, b: OverlayVisibility) =>
-  a.pmh === b.pmh &&
-  a.vwap === b.vwap &&
-  a.compression === b.compression &&
-  a.choch === b.choch &&
-  a.sessionBands === b.sessionBands &&
-  a.projections === b.projections &&
-  a.trendlines === b.trendlines &&
-  (a.trendlineCloseAlerts ?? true) === (b.trendlineCloseAlerts ?? true);
+  VISIBILITY_KEYS.every((key) => Boolean(a[key]) === Boolean(b[key]));
+
+const sameOpenOrders = (a: ChartOrder[] | undefined, b: ChartOrder[] | undefined) => {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (left === right) continue;
+    if (String(left?.id ?? "") !== String(right?.id ?? "")) return false;
+    if (String(left?.status ?? "") !== String(right?.status ?? "")) return false;
+    if (String(left?.side ?? "") !== String(right?.side ?? "")) return false;
+    if (String(left?.type ?? left?.order_type ?? "") !== String(right?.type ?? right?.order_type ?? "")) return false;
+    if (String(left?.limit_price ?? left?.limitPrice ?? left?.price ?? "") !== String(right?.limit_price ?? right?.limitPrice ?? right?.price ?? "")) return false;
+    if (String(left?.stop_price ?? left?.stopPrice ?? "") !== String(right?.stop_price ?? right?.stopPrice ?? "")) return false;
+    if (String(left?.qty ?? "") !== String(right?.qty ?? "")) return false;
+  }
+  return true;
+};
 
 const sameTrendlineAction = (a: TrendlineControlAction | undefined, b: TrendlineControlAction | undefined) =>
   (a?.type ?? "none") === (b?.type ?? "none");
@@ -11608,7 +12259,7 @@ export default memo(ChartPanelComponent, (prev, next) =>
   sameTrendlineAction(prev.trendlineAction, next.trendlineAction) &&
   prev.trendlineSnapMode === next.trendlineSnapMode &&
   prev.showInChartWatchlistAdder === next.showInChartWatchlistAdder &&
-  prev.openOrders === next.openOrders &&
+  sameOpenOrders(prev.openOrders, next.openOrders) &&
   prev.onCancelOrder === next.onCancelOrder &&
   prev.onReplaceOrderPrice === next.onReplaceOrderPrice
 );

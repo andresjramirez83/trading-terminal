@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import logging
 from collections import defaultdict
 from contextlib import suppress
 from typing import DefaultDict, Optional, Set
@@ -11,6 +12,12 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
 POLYGON_WS_URL = "wss://socket.polygon.io/stocks"
+logger = logging.getLogger(__name__)
+DEBUG_POLYGON_WS = os.getenv("DEBUG_POLYGON_WS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+def _debug(message: str) -> None:
+    if DEBUG_POLYGON_WS:
+        logger.info(message)
 
 
 class PolygonWSManager:
@@ -37,7 +44,7 @@ class PolygonWSManager:
 
             self._connecting = True
             try:
-                print("[polygon_ws] opening shared Polygon connection", flush=True)
+                _debug("[polygon_ws] opening shared Polygon connection")
                 self._ws = await websockets.connect(
                     POLYGON_WS_URL,
                     ping_interval=20,
@@ -55,7 +62,7 @@ class PolygonWSManager:
                 saw_error = None
                 for _ in range(10):
                     auth_raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
-                    print(f"[polygon_ws] auth raw: {auth_raw}", flush=True)
+                    _debug(f"[polygon_ws] auth raw: {auth_raw}")
                     auth_msgs = json.loads(auth_raw)
                     if not isinstance(auth_msgs, list):
                         auth_msgs = [auth_msgs]
@@ -95,7 +102,7 @@ class PolygonWSManager:
                 subscribe_params = f"T.{normalized_symbol},A.{normalized_symbol},AM.{normalized_symbol}"
                 await self._ws.send(json.dumps({"action": "subscribe", "params": subscribe_params}))
                 self._subscriptions.add(normalized_symbol)
-                print(f"[polygon_ws] subscribed shared: {subscribe_params}", flush=True)
+                _debug(f"[polygon_ws] subscribed shared: {subscribe_params}")
 
     async def unsubscribe_client(self, frontend_ws: WebSocket) -> None:
         async with self._lock:
@@ -117,7 +124,7 @@ class PolygonWSManager:
                     unsubscribe_params = f"T.{symbol},A.{symbol},AM.{symbol}"
                     await self._ws.send(json.dumps({"action": "unsubscribe", "params": unsubscribe_params}))
                     self._subscriptions.discard(symbol)
-                    print(f"[polygon_ws] unsubscribed shared: {unsubscribe_params}", flush=True)
+                    _debug(f"[polygon_ws] unsubscribed shared: {unsubscribe_params}")
 
     async def _listen_loop(self) -> None:
         try:
@@ -131,7 +138,7 @@ class PolygonWSManager:
                 per_symbol: DefaultDict[str, list] = defaultdict(list)
                 for msg in msgs:
                     if msg.get("ev") == "status":
-                        print(f"[polygon_ws] status: {msg}", flush=True)
+                        _debug(f"[polygon_ws] status: {msg}")
                         continue
 
                     symbol = str(msg.get("sym", "")).upper()
@@ -144,7 +151,7 @@ class PolygonWSManager:
 
                 await self._broadcast(per_symbol)
         except Exception as exc:
-            print(f"[polygon_ws] shared listen failed: {exc}", flush=True)
+            logger.warning("[polygon_ws] shared listen failed: %s", exc)
         finally:
             await self._reset_connection_state()
 
@@ -164,7 +171,7 @@ class PolygonWSManager:
                 except WebSocketDisconnect:
                     stale_clients.append(client)
                 except Exception as exc:
-                    print(f"[polygon_ws] send_text failed for {symbol}: {exc}", flush=True)
+                    _debug(f"[polygon_ws] send_text failed for {symbol}: {exc}")
                     stale_clients.append(client)
 
         for client in stale_clients:
@@ -190,13 +197,13 @@ polygon_ws_manager = PolygonWSManager()
 
 async def forward_polygon_minute_aggregates(frontend_ws: WebSocket, symbol: str) -> None:
     await polygon_ws_manager.subscribe_client(frontend_ws, symbol)
-    print(f"[polygon_ws] frontend attached to shared stream for {symbol.upper().strip()}", flush=True)
+    _debug(f"[polygon_ws] frontend attached to shared stream for {symbol.upper().strip()}")
 
     try:
         while True:
             await frontend_ws.receive_text()
     except WebSocketDisconnect:
-        print(f"[polygon_ws] frontend disconnected for {symbol.upper().strip()}", flush=True)
+        _debug(f"[polygon_ws] frontend disconnected for {symbol.upper().strip()}")
         raise
     finally:
         await polygon_ws_manager.unsubscribe_client(frontend_ws)

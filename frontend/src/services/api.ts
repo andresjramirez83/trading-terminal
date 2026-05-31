@@ -81,8 +81,21 @@ type BarsCacheEntry = {
 };
 
 const BARS_CACHE_TTL_MS = 45_000;
+const MAX_BARS_CACHE_ENTRIES = 120;
 const barsCache = new Map<string, BarsCacheEntry>();
 const barsInflight = new Map<string, Promise<BarsResponse>>();
+
+function pruneBarsCache(now = Date.now()): void {
+  for (const [key, entry] of Array.from(barsCache.entries())) {
+    if (entry.expiresAt <= now) barsCache.delete(key);
+  }
+
+  while (barsCache.size > MAX_BARS_CACHE_ENTRIES) {
+    const oldestKey = barsCache.keys().next().value;
+    if (!oldestKey) break;
+    barsCache.delete(oldestKey);
+  }
+}
 
 function normalizeLookback(timeframe: string, requested?: string): string {
   if (requested) return requested;
@@ -171,6 +184,7 @@ export async function fetchBars(
 
   const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${options?.date ?? ""}|${normalizedLookback}|${normalizedSession ?? ""}|${limit}`;
   const now = Date.now();
+  pruneBarsCache(now);
 
   if (!options?.forceRefresh) {
     const cached = barsCache.get(cacheKey);
@@ -195,6 +209,7 @@ export async function fetchBars(
         expiresAt: Date.now() + BARS_CACHE_TTL_MS,
         data,
       });
+      pruneBarsCache();
       return data;
     })
     .finally(() => {

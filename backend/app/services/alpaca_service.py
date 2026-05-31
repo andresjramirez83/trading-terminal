@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -15,6 +16,14 @@ ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 AlpacaMode = Literal["paper", "live"]
+
+logger = logging.getLogger(__name__)
+DEBUG_ALPACA = os.getenv("DEBUG_ALPACA", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+def _debug(message: str) -> None:
+    if DEBUG_ALPACA:
+        logger.info(message)
+
 
 _SHARED_SESSIONS: Dict[str, requests.Session] = {}
 
@@ -49,9 +58,7 @@ class AlpacaService:
         self.key_id, self.secret_key = self._resolve_credentials(mode)
         self.session = get_shared_session(mode)
 
-        # Keep startup logs light. Printing secrets/lengths on every request slows the terminal
-        # and can leak sensitive info in screenshots.
-        print(f"ALPACA SERVICE INIT mode={self.mode} base_url={self.base_url} key_present={bool(self.key_id)}", flush=True)
+        _debug(f"ALPACA SERVICE INIT mode={self.mode} base_url={self.base_url} key_present={bool(self.key_id)}")
 
         if not self.key_id or not self.secret_key:
             raise RuntimeError(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,9 +12,23 @@ import httpx
 
 ET = ZoneInfo("America/New_York")
 
+logger = logging.getLogger(__name__)
+DEBUG_POLYGON = os.getenv("DEBUG_POLYGON", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+def _debug(message: str) -> None:
+    if DEBUG_POLYGON:
+        logger.info(message)
+
+def _clone_bars(bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Prevent callers from mutating the cached list/dicts.
+    return [dict(row) for row in bars]
+
+
 
 class PolygonService:
     _shared_client: Optional[httpx.AsyncClient] = None
+    _bars_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+    _bars_cache_max_items: int = 256
 
     @classmethod
     def _client(cls, timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -98,7 +114,7 @@ class PolygonService:
                 # Some Polygon plans do not support the active endpoint. A 404 here
                 # is expected and should not spam logs every scanner cycle.
                 if "HTTP 404" not in str(exc):
-                    print(f"POLYGON ACTIVE SNAPSHOT FAILED {path}: {exc}", flush=True)
+                    _debug(f"POLYGON ACTIVE SNAPSHOT FAILED {path}: {exc}")
                 continue
 
         return []
@@ -108,7 +124,7 @@ class PolygonService:
             data = await self._get("/v2/snapshot/locale/us/markets/stocks/losers")
             return (data.get("tickers") or [])[:limit]
         except Exception as exc:
-            print(f"POLYGON LOSERS SNAPSHOT FAILED: {exc}", flush=True)
+            _debug(f"POLYGON LOSERS SNAPSHOT FAILED: {exc}")
             return []
 
     async def get_ticker_snapshot(self, symbol: str) -> Dict[str, Any]:
@@ -122,7 +138,7 @@ class PolygonService:
             price = results.get("p")
             return float(price) if price is not None else None
         except Exception as exc:
-            print(f"POLYGON LAST TRADE FAILED {symbol}: {exc}", flush=True)
+            _debug(f"POLYGON LAST TRADE FAILED {symbol}: {exc}")
             return None
 
     async def get_ticker_details(self, symbol: str) -> Dict[str, Any]:
@@ -133,7 +149,7 @@ class PolygonService:
             # Scanner candidates can include tickers that no longer have details.
             # Treat Polygon 404s as normal misses instead of noisy errors.
             if "HTTP 404" not in str(exc):
-                print(f"POLYGON TICKER DETAILS FAILED {symbol}: {exc}", flush=True)
+                _debug(f"POLYGON TICKER DETAILS FAILED {symbol}: {exc}")
             return {}
 
     def _ms_to_dates(self, start_ms: int, end_ms: int) -> Tuple[str, str]:
@@ -166,7 +182,7 @@ class PolygonService:
             data = await self._get(ms_path, params=params)
             return data.get("results") or []
         except Exception as ms_exc:
-            print(f"POLYGON AGGS MS FAILED {symbol} {multiplier}{timespan}: {ms_exc}", flush=True)
+            _debug(f"POLYGON AGGS MS FAILED {symbol} {multiplier}{timespan}: {ms_exc}")
 
             from_date, to_date = self._ms_to_dates(start_ms, end_ms)
             date_path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
@@ -176,7 +192,7 @@ class PolygonService:
                 results = data.get("results") or []
                 return [bar for bar in results if start_ms <= int(bar.get("t", 0)) <= end_ms]
             except Exception as date_exc:
-                print(f"POLYGON AGGS DATE FALLBACK FAILED {symbol} {multiplier}{timespan}: {date_exc}", flush=True)
+                _debug(f"POLYGON AGGS DATE FALLBACK FAILED {symbol} {multiplier}{timespan}: {date_exc}")
                 raise RuntimeError(
                     f"Polygon aggs failed for {symbol} {multiplier}{timespan}. "
                     f"MS error: {ms_exc}. Date fallback error: {date_exc}"
@@ -243,7 +259,7 @@ class PolygonService:
         if tf in {"1d", "day", "daily", "d"}:
             return 1, "day", timedelta(days=365), "1d"
 
-        print(f"POLYGON GET_BARS UNKNOWN TIMEFRAME {timeframe!r}; defaulting to 1m", flush=True)
+        _debug(f"POLYGON GET_BARS UNKNOWN TIMEFRAME {timeframe!r}; defaulting to 1m")
         return 1, "minute", timedelta(days=3), "1m"
 
     def _normalize_daily_session(self, session: Optional[str]) -> str:
@@ -314,16 +330,59 @@ class PolygonService:
         return out
 
 
+    def _bars_cache_ttl_seconds(self, normalized_tf: str) -> float:
+        # Keep live charts responsive without hammering Polygon or flooding worker logs.
+        if normalized_tf == "1m":
+            return 8.0
+        if normalized_tf == "5m":
+            return 15.0
+        if normalized_tf == "15m":
+            return 30.0
+        if normalized_tf == "30m":
+            return 45.0
+        if normalized_tf == "1h":
+            return 60.0
+        if normalized_tf == "1d":
+            return 90.0
+        return 15.0
+
+    def _get_cached_bars(self, key: str) -> Optional[List[Dict[str, Any]]]:
+        cached = self._bars_cache.get(key)
+        if cached is None:
+            return None
+        expires_at, bars = cached
+        if expires_at <= time.time():
+            self._bars_cache.pop(key, None)
+            return None
+        return _clone_bars(bars)
+
+    def _set_cached_bars(self, key: str, ttl_seconds: float, bars: List[Dict[str, Any]]) -> None:
+        if len(self._bars_cache) >= self._bars_cache_max_items:
+            now = time.time()
+            expired = [k for k, (expires_at, _) in self._bars_cache.items() if expires_at <= now]
+            for k in expired:
+                self._bars_cache.pop(k, None)
+            if len(self._bars_cache) >= self._bars_cache_max_items:
+                oldest_key = min(self._bars_cache.items(), key=lambda item: item[1][0])[0]
+                self._bars_cache.pop(oldest_key, None)
+        self._bars_cache[key] = (time.time() + max(1.0, ttl_seconds), _clone_bars(bars))
+
     async def get_bars(self, symbol: str, timeframe: str = "1m", session: str = "regular") -> List[Dict[str, Any]]:
         symbol = symbol.upper().strip()
         multiplier, timespan, lookback, normalized_tf = self._timeframe_config(timeframe)
-
         now = datetime.now(timezone.utc)
         start = now - lookback
+        ttl = self._bars_cache_ttl_seconds(normalized_tf)
+        normalized_session = self._normalize_daily_session(session) if normalized_tf == "1d" else str(session or "regular").lower().strip()
+        cache_bucket = int(time.time() // ttl)
+        cache_key = f"{symbol}|{normalized_tf}|{normalized_session}|{cache_bucket}"
+
+        cached = self._get_cached_bars(cache_key)
+        if cached is not None:
+            return cached
 
         # Daily charts are built from 1m bars so today's candle forms live.
         if normalized_tf == "1d":
-            normalized_session = self._normalize_daily_session(session)
             raw = await self.get_aggs(
                 symbol=symbol,
                 multiplier=1,
@@ -336,19 +395,11 @@ class PolygonService:
             )
             intraday = self._normalize_aggs(raw)
             bars = self._aggregate_to_daily(intraday, normalized_session)
-            print(
-                f"POLYGON GET_BARS RESULT {symbol} 1d session={normalized_session}: "
-                f"raw_1m={len(raw)} daily={len(bars)}",
-                flush=True,
-            )
-            return bars
+            _debug(f"POLYGON GET_BARS RESULT {symbol} 1d session={normalized_session}: raw_1m={len(raw)} daily={len(bars)}")
+            self._set_cached_bars(cache_key, ttl, bars)
+            return _clone_bars(bars)
 
-        print(
-            f"POLYGON GET_BARS {symbol} tf={timeframe} normalized={normalized_tf} "
-            f"range={start.isoformat()} -> {now.isoformat()}",
-            flush=True,
-        )
-
+        _debug(f"POLYGON GET_BARS {symbol} tf={timeframe} normalized={normalized_tf} range={start.isoformat()} -> {now.isoformat()}")
         raw = await self.get_aggs(
             symbol=symbol,
             multiplier=multiplier,
@@ -361,8 +412,9 @@ class PolygonService:
         )
 
         bars = self._normalize_aggs(raw)
-        print(f"POLYGON GET_BARS RESULT {symbol} {normalized_tf}: raw={len(raw)} normalized={len(bars)}", flush=True)
-        return bars
+        _debug(f"POLYGON GET_BARS RESULT {symbol} {normalized_tf}: raw={len(raw)} normalized={len(bars)}")
+        self._set_cached_bars(cache_key, ttl, bars)
+        return _clone_bars(bars)
 
     async def get_recent_1m_bars(self, symbol: str, hours_back: int = 48) -> List[Dict[str, Any]]:
         now = datetime.now(timezone.utc)
