@@ -1,5 +1,7 @@
 {
   "selectedSymbol": "HCAI",
+  "timeframe": "5m",
+  "activeChart": "5m",
   "watchlist": [],
   "manualWatchlist": [
     "BAND",
@@ -13,5 +15,7 @@
     "KALV",
     "SAGT"
   ],
-  "updatedAt": 1777581944161.0
+  "studyVisibility": {},
+  "chartRanges": {},
+  "updatedAt": 1779767397266.0
 }

@@ -1,19 +1,32 @@
-node_modules/
-frontend/node_modules/
-
-.env
-.env.*
-backend/.env
-frontend/.env
-
+# Python
 __pycache__/
-*.pyc
-
+*.py[cod]
+*.pyo
+*.pyd
 .venv/
 venv/
+.env
+.env.*
+!.env.example
 
+# Local runtime data / databases
+backend/app/data/**/*.sqlite
+backend/app/data/**/*.sqlite3
+backend/app/data/**/*.db
+backend/app/data/**/*.db-wal
+backend/app/data/**/*.db-shm
+backend/app/data/**/*.sqlite3-wal
+backend/app/data/**/*.sqlite3-shm
+backend/app/data/autotrade/*.sqlite3*
+
+# Node
+node_modules/
 dist/
 build/
+.vite/
 
+# OS / editor
 .DS_Store
+Thumbs.db
 .vscode/
+.idea/

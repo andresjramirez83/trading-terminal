@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from app.autotrade.models import AutoTradeConfig, TradeSignal
 
 ET = ZoneInfo("America/New_York")
+
+
+ENTRY_TIMEFRAME = "5m"
+DEFAULT_ENTRY_OFFSET = 0.03
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -31,19 +35,36 @@ def _bar_ms(bar: Dict[str, Any]) -> int:
 
 
 def _bar_et_datetime(bar: Dict[str, Any]) -> datetime:
-    return datetime.fromtimestamp(_bar_ms(bar) / 1000, ET)
+    return datetime.fromtimestamp(_bar_ms(bar) / 1000, tz=timezone.utc).astimezone(ET)
+
+
+def _entry_offset(config: AutoTradeConfig) -> float:
+    """Price offset above sweep low. Default is $0.03."""
+    for name in ("entry_offset", "entry_offset_dollars", "entry_offset_price", "sweep_entry_offset"):
+        raw = getattr(config, name, None)
+        value = _safe_float(raw, 0.0)
+        if value > 0:
+            return value
+    cents = _safe_float(getattr(config, "entry_offset_cents", None), 0.0)
+    if cents > 0:
+        return cents / 100.0
+    return DEFAULT_ENTRY_OFFSET
 
 
 class FiveAmSweepStrategy:
-    """5AM Pacific low-sweep reclaim strategy.
+    """5AM Pacific low-sweep retest strategy.
 
     Rules:
     - Build the 5:00-6:00 AM Pacific range, which is 8:00-9:00 AM Eastern.
-    - Watch bars after 9:00 AM Eastern.
-    - Long signal when price sweeps below the range low and closes back above it.
-    - Entry is the reclaim candle close.
-    - Stop is the sweep low minus stop_buffer_pct.
-    - Target is entry + target_r * risk.
+    - Use 5-minute bars so validation is based on a 5m candle close.
+    - Target is the highest body price inside the range: max(open, close), not the wick.
+    - Watch after 6:00 AM Pacific / 9:00 AM Eastern.
+    - Sweep: price trades below the range low by sweep_buffer_pct.
+    - Default mode: wait for a 5m candle to close inside the sweep zone, then wait for a retest.
+      Sweep zone = sweep_low through range_low.
+    - Entry is sweep_low + entry offset, default $0.03.
+    - Aggressive mode: entry can trigger immediately on sweep touch.
+    - Stop is below sweep_low by stop_buffer_pct.
     """
 
     id = "five_am_sweep"
@@ -51,7 +72,7 @@ class FiveAmSweepStrategy:
 
     async def scan(self, *, symbol: str, polygon: Any, config: AutoTradeConfig) -> List[TradeSignal]:
         symbol_u = symbol.upper().strip()
-        timeframe = "15m"
+        timeframe = ENTRY_TIMEFRAME
 
         try:
             raw_bars = await polygon.get_bars(symbol_u, timeframe, session="extended")
@@ -68,7 +89,12 @@ class FiveAmSweepStrategy:
         bars: List[Dict[str, Any]],
         config: AutoTradeConfig,
     ) -> Optional[TradeSignal]:
-        clean_bars = [b for b in bars if _bar_ms(b) > 0]
+        clean_bars = [
+            b for b in bars
+            if _bar_ms(b) > 0
+            and _safe_float(b.get("high", b.get("h"))) > 0
+            and _safe_float(b.get("close", b.get("c"))) > 0
+        ]
         if len(clean_bars) < 20:
             return None
 
@@ -92,27 +118,49 @@ class FiveAmSweepStrategy:
             return None
 
         range_low = min(_safe_float(b.get("low", b.get("l"))) for b in range_bars)
-        range_high = max(_safe_float(b.get("high", b.get("h"))) for b in range_bars)
-        if range_low <= 0 or range_high <= 0 or range_high <= range_low:
+        body_target = max(
+            max(_safe_float(b.get("open", b.get("o"))), _safe_float(b.get("close", b.get("c"))))
+            for b in range_bars
+        )
+        if range_low <= 0 or body_target <= range_low:
             return None
 
+        entry_offset = _entry_offset(config)
         sweep_buffer_pct = float(getattr(config, "sweep_buffer_pct", 0.001) or 0.001)
         stop_buffer_pct = float(getattr(config, "stop_buffer_pct", 0.002) or 0.002)
         max_age = max(1, int(getattr(config, "max_signal_age_bars", 3) or 3))
-        target_r = max(0.25, float(getattr(config, "target_r", 2.0) or 2.0))
+        min_profit_range = float(getattr(config, "min_profit_range", 0.0) or 0.0)
+        trigger_mode = str(getattr(config, "entry_trigger_mode", "reclaim_retest") or "reclaim_retest").lower().strip()
 
         threshold = range_low * (1.0 - sweep_buffer_pct)
         sweep_low: Optional[float] = None
+        validation_index: Optional[int] = None
         signal_index: Optional[int] = None
         signal_bar: Optional[Dict[str, Any]] = None
 
         for idx, bar in enumerate(after_bars):
             low = _safe_float(bar.get("low", bar.get("l")))
+            high = _safe_float(bar.get("high", bar.get("h")))
             close = _safe_float(bar.get("close", bar.get("c")))
-            if low < threshold:
-                sweep_low = low if sweep_low is None else min(sweep_low, low)
 
-            if sweep_low is not None and close > range_low:
+            if low < threshold:
+                sweep_low = low if sweep_low is None else min(float(sweep_low), low)
+                if trigger_mode == "sweep_touch":
+                    signal_index = idx
+                    signal_bar = bar
+                    break
+
+            if sweep_low is None:
+                continue
+
+            entry_price_raw = float(sweep_low) + entry_offset
+            closed_inside_sweep_zone = float(sweep_low) <= close <= range_low
+            if validation_index is None and closed_inside_sweep_zone:
+                validation_index = idx
+                continue
+
+            # Default rule: after a 5m close inside the sweep zone, wait for price to retest entry.
+            if validation_index is not None and idx > validation_index and low <= entry_price_raw <= high:
                 signal_index = idx
                 signal_bar = bar
                 break
@@ -124,48 +172,45 @@ class FiveAmSweepStrategy:
         if bars_since > max_age:
             return None
 
-        entry_price = _safe_float(signal_bar.get("close", signal_bar.get("c")))
-        stop_price = float(sweep_low) * (1.0 - stop_buffer_pct)
+        entry_price = round(float(sweep_low) + entry_offset, 4)
+        target_price = round(body_target, 4)
+        stop_price = round(float(sweep_low) * (1.0 - stop_buffer_pct), 4)
         risk = entry_price - stop_price
-        if entry_price <= 0 or stop_price <= 0 or risk <= 0:
-            return None
-
-        target_price = entry_price + risk * target_r
         profit_range = target_price - entry_price
-        if profit_range <= 0:
+        if entry_price <= 0 or stop_price <= 0 or target_price <= entry_price or risk <= 0:
+            return None
+        if profit_range < min_profit_range:
             return None
 
         signal_dt = _bar_et_datetime(signal_bar)
         signal_id = f"five_am_sweep::{symbol}::{latest_day.isoformat()}::{_bar_ms(signal_bar)}"
-
-        score = 72.0
-        # Small quality bump for reclaiming closer to/above the 5AM range high.
-        if entry_price >= range_high:
-            score = 82.0
-        elif entry_price > (range_low + range_high) / 2.0:
-            score = 76.0
+        score = 60.0 + min(25.0, profit_range / max(entry_price, 0.01) * 250.0) - min(10.0, bars_since * 2.0)
 
         return TradeSignal(
             strategy_id=self.id,
             symbol=symbol,
             side="buy",
-            setup="bullish_5am_low_sweep_reclaim",
+            setup="bullish_5am_low_sweep_touch" if trigger_mode == "sweep_touch" else "bullish_5am_low_sweep_zone_retest",
             signal_id=signal_id,
             timeframe=timeframe,
             signal_time=signal_dt.isoformat(),
-            entry_price=round(entry_price, 4),
-            target_price=round(target_price, 4),
-            stop_price=round(stop_price, 4),
-            score=score,
+            entry_price=entry_price,
+            target_price=target_price,
+            stop_price=stop_price,
+            score=round(max(0.0, min(100.0, score)), 2),
             profit_range=round(profit_range, 4),
             metadata={
                 "range_low": round(range_low, 4),
-                "range_high": round(range_high, 4),
+                "body_target": target_price,
                 "sweep_low": round(float(sweep_low), 4),
+                "entry_offset": round(entry_offset, 4),
                 "risk": round(risk, 4),
-                "target_r": target_r,
                 "bars_since_signal": bars_since,
-                "session": "5:00-6:00 AM Pacific / 8:00-9:00 AM Eastern",
+                "entry_trigger_mode": trigger_mode,
+                "entry_trigger_rule": "aggressive_sweep_touch_no_close_confirmation" if trigger_mode == "sweep_touch" else "5m_close_inside_sweep_zone_then_retest_entry",
+                "target_rule": "highest_body_open_or_close_no_wicks",
+                "range_window_et": "08:00-09:00",
+                "range_window_pt": "05:00-06:00",
                 "extended_hours": True,
             },
         )

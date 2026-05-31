@@ -1037,16 +1037,17 @@ function AlpacaPage() {
     setAutoTradeError("");
     try {
       const isOn = Boolean(autoTradeStatus?.config?.enabled);
+      const nextMode = autoTradeStatus?.config?.mode === "live" && autoTradeStatus?.config?.allow_live ? "live" : "paper";
       const next = isOn
         ? await stopAutoTrade()
-        : await startAutoTrade({ enabled: true, mode: "paper" });
+        : await startAutoTrade({ enabled: true, mode: nextMode, allow_live: nextMode === "live" });
       setAutoTradeStatus(next);
     } catch (err) {
       setAutoTradeError(err instanceof Error ? err.message : "Failed to toggle auto trade");
     } finally {
       setAutoTradeBusy(false);
     }
-  }, [autoTradeStatus?.config?.enabled]);
+  }, [autoTradeStatus?.config?.allow_live, autoTradeStatus?.config?.enabled, autoTradeStatus?.config?.mode]);
 
   const runAutoTradeCheckOnce = useCallback(async () => {
     setAutoTradeBusy(true);
@@ -1692,6 +1693,8 @@ function AlpacaPage() {
       return;
     }
 
+    const autoTradeConfigIsLive = cfg?.mode === "live" && cfg?.allow_live;
+    const desiredAutoTradeMode: AlpacaMode = autoTradeConfigIsLive || mode === "live" ? "live" : "paper";
     const sizingMode = cfg?.sizing_mode ?? "dollars";
     const payload = {
       symbol: symbolToTrade,
@@ -1700,21 +1703,26 @@ function AlpacaPage() {
       target_price: target,
       qty: sizingMode === "shares" ? Number(cfg?.fixed_shares ?? 0) : undefined,
       trade_amount: sizingMode === "dollars" ? Number(cfg?.trade_amount ?? 0) : undefined,
+      mode: desiredAutoTradeMode,
       note: "Queued from Alpaca Auto Trade panel",
     };
 
     setAutoTradeBusy(true);
     try {
+      if (desiredAutoTradeMode === "live" && !autoTradeConfigIsLive) {
+        const armedStatus = await updateAutoTradeConfig({ enabled: true, mode: "live", allow_live: true });
+        setAutoTradeStatus(armedStatus);
+      }
       const status = await queueOverniteHailMaryPlan(payload);
       setAutoTradeStatus(status);
-      setHailMaryMessage(`Queued ${symbolToTrade}: entry ${entry} / stop ${stop} / target ${target}`);
+      setHailMaryMessage(`Queued ${symbolToTrade} ${payload.mode.toUpperCase()}: entry ${entry} / stop ${stop} / target ${target}`);
       await loadBrokerData();
     } catch (err) {
       setAutoTradeError(err instanceof Error ? err.message : "Failed to queue Overnite Hail Mary plan");
     } finally {
       setAutoTradeBusy(false);
     }
-  }, [autoTradeStatus?.config, hailMaryEntryPrice, hailMaryStopPrice, hailMaryTargetPrice, loadBrokerData, symbol]);
+  }, [autoTradeStatus?.config, hailMaryEntryPrice, hailMaryStopPrice, hailMaryTargetPrice, loadBrokerData, mode, symbol]);
 
 
   const renderAutoTradePanel = () => {
@@ -1725,6 +1733,9 @@ function AlpacaPage() {
     const lastOrder = autoTradeStatus?.last_order;
     const selectedStrategy = String((cfg as any)?.strategies?.[0]?.strategy_id ?? "six_seven_sweep") as AutoTradeStrategy;
     const isOverniteHailMary = selectedStrategy === "overnite_hail_mary";
+    const autoTradeMode = cfg?.mode === "live" && cfg?.allow_live ? "live" : "paper";
+    const queuedOrderMode: AlpacaMode = autoTradeMode === "live" || mode === "live" ? "live" : "paper";
+    const autoTradeModeLabel = queuedOrderMode === "live" ? "LIVE / REAL MONEY" : "PAPER";
 
     return (
       <section style={{ ...subPanelStyle, border: enabled ? "1px solid rgba(34,197,94,0.42)" : subPanelStyle.border }}>
@@ -1732,11 +1743,11 @@ function AlpacaPage() {
           <div>
             <div style={sectionTitleStyle}>Auto Trade</div>
             <div style={{ fontSize: 11, opacity: 0.72 }}>
-              {isOverniteHailMary
+              {`${isOverniteHailMary
                 ? "Overnite Hail Mary · manual entry/stop/target only"
                 : selectedStrategy === "five_am_sweep"
-                  ? "5AM sweep synthetic bracket · paper only"
-                  : "Bullish 6-7 sweep · paper guarded"}
+                  ? "5AM sweep synthetic bracket"
+                  : "Bullish 6-7 sweep"} · ${autoTradeModeLabel}`}
             </div>
           </div>
           <button
@@ -1995,7 +2006,9 @@ function AlpacaPage() {
             <div style={{ color: "#c4b5fd" }}>Queued plans: {(autoTradeStatus as any).queued_manual_plans.length}</div>
           ) : null}
           {lastSkip ? <div style={{ color: "#fbbf24" }}>Last skip: {lastSkip.symbol ?? "—"} · {lastSkip.reason}</div> : null}
-          <div style={{ opacity: 0.68 }}>Mode is forced to paper unless backend live lock is explicitly changed.</div>
+          <div style={{ opacity: 0.72, color: queuedOrderMode === "live" ? "#86efac" : "#cbd5e1" }}>
+            Auto-trade order mode: <strong>{autoTradeModeLabel}</strong>
+          </div>
         </div>
       </section>
     );

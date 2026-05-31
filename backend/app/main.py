@@ -15,7 +15,8 @@ from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDis
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-print("RUNNING MAIN FROM:", __file__, flush=True)
+if os.getenv("DEBUG_STARTUP", "false").strip().lower() in {"1", "true", "yes", "on"}:
+    print("RUNNING MAIN FROM:", __file__, flush=True)
 load_dotenv(override=True)
 
 try:
@@ -50,6 +51,9 @@ from app.routes.auto_trade import router as professional_auto_trade_router
 from app.backtests.routes import router as backtest_router
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
+
+DEBUG_BARS = os.getenv("DEBUG_BARS", "false").strip().lower() in {"1", "true", "yes", "on"}
+DEBUG_BACKGROUND = os.getenv("DEBUG_BACKGROUND", "false").strip().lower() in {"1", "true", "yes", "on"}
 registry = ScannerRegistry()
 snapshot_store = ScannerSnapshotStore()
 
@@ -169,11 +173,13 @@ def acquire_background_worker_lock() -> bool:
         BACKGROUND_LOCK_HANDLE.write(f"pid={os.getpid()} started={datetime.now(timezone.utc).isoformat()}\n")
         BACKGROUND_LOCK_HANDLE.flush()
         BACKGROUND_LOCK_HELD = True
-        print(f"[background-lock] acquired by pid={os.getpid()}", flush=True)
+        if DEBUG_BACKGROUND:
+            print(f"[background-lock] acquired by pid={os.getpid()}", flush=True)
         return True
     except BlockingIOError:
         BACKGROUND_LOCK_HELD = False
-        print(f"[background-lock] another worker owns scanner/alerts; pid={os.getpid()} serving API only", flush=True)
+        if DEBUG_BACKGROUND:
+            print(f"[background-lock] another worker owns scanner/alerts; pid={os.getpid()} serving API only", flush=True)
         return False
     except Exception as exc:
         BACKGROUND_LOCK_HELD = False
@@ -1318,8 +1324,14 @@ async def run_auto_trade_loop() -> None:
         await asyncio.sleep(max(3, int(auto_trade_config.poll_seconds)))
 
 
+LEGACY_AUTO_TRADE_ENABLED = os.getenv("LEGACY_AUTO_TRADE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
 def start_auto_trade_task_if_needed() -> None:
     global auto_trade_task
+    if not LEGACY_AUTO_TRADE_ENABLED:
+        # Professional auto-trade is owned by app.routes.auto_trade + dedicated worker.
+        # Keep legacy endpoints readable, but do not start the old in-Gunicorn loop unless explicitly enabled.
+        return
     if auto_trade_task and not auto_trade_task.done():
         return
     try:
@@ -1673,15 +1685,8 @@ def fill_intraday_tail_to_extended_close(
             )
         current_ms += step_ms
 
-    if tail:
-        print(
-            f"[bars] filled AH tail timeframe={timeframe} "
-            f"from={datetime.fromtimestamp(next_ms / 1000, ET).strftime('%H:%M')} "
-            f"to={datetime.fromtimestamp(target_ms / 1000, ET).strftime('%H:%M')} "
-            f"count={len(tail)}",
-            flush=True,
-        )
-
+    # Intentionally do not print every synthetic AH tail fill. This path can run
+    # constantly while charts are open and used to flood journald.
     return bars + tail
 
 
@@ -3884,12 +3889,15 @@ def cancel_alpaca_order(order_id: str, mode: str = Query("paper")):
 def alpaca_orders(
     mode: str = Query("paper"),
     status: str = Query("open"),
-    limit: int = Query(25, ge=1, le=200),
+    limit: int = Query(100, ge=1, le=500),
+    nested: bool = Query(True),
 ):
-    print("ALPACA ORDERS ROUTE HIT:", mode, status, limit, flush=True)
+    print("ALPACA ORDERS ROUTE HIT:", mode, status, limit, "nested=", nested, flush=True)
     try:
         service = get_alpaca_service(mode)
-        result = service.get_orders(status=status, limit=limit)
+        # Always prefer nested bracket data for chart rendering so the UI can draw
+        # entry, take-profit, and stop-loss lines from one broker snapshot.
+        result = service.get_orders(status=status, limit=limit, nested=nested)
         print("ALPACA ORDERS SUCCESS", flush=True)
         return result
     except Exception as exc:

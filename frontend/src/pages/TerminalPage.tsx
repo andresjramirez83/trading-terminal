@@ -40,11 +40,16 @@ const STUDY_OPTIONS: Array<{ key: keyof OverlayVisibility; label: string }> = [
   { key: "significantCandles", label: "Significant Candle Dots" },
   { key: "liquiditySweeps", label: "Liquidity Sweeps" },
   { key: "sixSevenSweep", label: "6-7 Sweep Entry/Target" },
+  { key: "fiveAmSweep", label: "5AM Sweep Entry/Target" },
   { key: "volumeSignals", label: "Volume Signals" },
   { key: "volumeProfile", label: "Volume Profile" },
+  { key: "shortSqueezeEstimate", label: "Short Squeeze Estimate" },
   { key: "previousRthHighLow", label: "Previous Day RTH High/Low" },
   { key: "bodyBreakDots", label: "Black Dots" },
   { key: "closeAbovePrevCloseDots", label: "White Dots" },
+  { key: "atrExpansionCandles", label: "ATR Expansion Candles" },
+  { key: "resistanceBreakoutConfirm", label: "Resistance Breakout Confirm" },
+  { key: "fvgFlip", label: "FVG / IFVG Flip" },
   { key: "trendlineCloseAlerts", label: "Trendline Close Alerts" },
   { key: "adaptiveRunnerRsi", label: "Adaptive Runner RSI" },
 ];
@@ -61,11 +66,16 @@ const ALL_STUDIES_ON: OverlayVisibility = {
   significantCandles: true,
   liquiditySweeps: true,
   sixSevenSweep: true,
+  fiveAmSweep: true,
   volumeSignals: true,
   volumeProfile: true,
+  shortSqueezeEstimate: true,
   previousRthHighLow: true,
   bodyBreakDots: true,
   closeAbovePrevCloseDots: true,
+  atrExpansionCandles: true,
+  resistanceBreakoutConfirm: true,
+  fvgFlip: true,
   trendlineCloseAlerts: true,
   adaptiveRunnerRsi: true,
 };
@@ -82,16 +92,21 @@ const ALL_STUDIES_OFF: OverlayVisibility = {
   significantCandles: false,
   liquiditySweeps: false,
   sixSevenSweep: false,
+  fiveAmSweep: false,
   volumeSignals: false,
   volumeProfile: false,
+  shortSqueezeEstimate: false,
   previousRthHighLow: false,
   bodyBreakDots: false,
   closeAbovePrevCloseDots: false,
+  atrExpansionCandles: false,
+  resistanceBreakoutConfirm: false,
+  fvgFlip: false,
   trendlineCloseAlerts: false,
   adaptiveRunnerRsi: false,
 };
 
-const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_OFF;
+const DEFAULT_VISIBILITY: OverlayVisibility = ALL_STUDIES_ON;
 
 const PRESETS: Record<OverlayPreset, OverlayVisibility> = {
   clean: ALL_STUDIES_OFF,
@@ -102,7 +117,9 @@ const PRESETS: Record<OverlayPreset, OverlayVisibility> = {
     vwap: true,
     sessionBands: true,
     trendlines: true,
+    trendlineCloseAlerts: true,
     previousRthHighLow: true,
+    volumeProfile: true,
   },
   confirmation: {
     ...ALL_STUDIES_OFF,
@@ -112,12 +129,17 @@ const PRESETS: Record<OverlayPreset, OverlayVisibility> = {
     projections: true,
     trendlines: true,
     significantCandles: true,
+    volumeSignals: true,
+    volumeProfile: true,
     bodyBreakDots: true,
     closeAbovePrevCloseDots: true,
+    atrExpansionCandles: true,
+    resistanceBreakoutConfirm: true,
+    fvgFlip: true,
   },
 };
 
-const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility.v2.defaultOff";
+const SHARED_STUDY_VISIBILITY_STORAGE_KEY = "sharedChartStudyVisibility.v3.defaultOn";
 
 function normalizeOverlayVisibility(value: Partial<OverlayVisibility> | null | undefined): OverlayVisibility {
   return {
@@ -1525,26 +1547,32 @@ export default function TerminalPage() {
                   {openStudiesMenu ? (
                     <div
                       onClick={(e) => e.stopPropagation()}
+                      onWheel={(e) => e.stopPropagation()}
                       style={{
-                        position: "absolute",
-                        top: "calc(100% + 8px)",
-                        left: 0,
-                        zIndex: 99999,
-                        width: 270,
+                        position: "fixed",
+                        top: 96,
+                        right: 24,
+                        zIndex: 2147483647,
+                        width: "min(380px, calc(100vw - 32px))",
+                        maxHeight: "min(620px, calc(100vh - 120px))",
+                        overflowY: "auto",
+                        overscrollBehavior: "contain",
+                        WebkitOverflowScrolling: "touch",
                         padding: 12,
                         borderRadius: 12,
                         background: "#061936",
                         border: "1px solid rgba(0,229,255,0.28)",
-                        boxShadow: "0 18px 45px rgba(0,0,0,0.55)",
+                        boxShadow: "0 18px 45px rgba(0,0,0,0.65)",
                         color: "#ffffff",
+                        pointerEvents: "auto",
                       }}
                     >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                      <div style={{ position: "sticky", top: -12, zIndex: 2, display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, padding: "10px 0 8px", background: "#061936" }}>
                         <div style={{ fontSize: 13, fontWeight: 900 }}>Chart Studies</div>
                         <div style={{ fontSize: 11, opacity: 0.75 }}>{visibleStudiesCount} / {STUDY_OPTIONS.length} on</div>
                       </div>
 
-                      <div style={{ display: "grid", gap: 8 }}>
+                      <div style={{ display: "grid", gap: 8, paddingBottom: 8 }}>
                         {STUDY_OPTIONS.map((study) => (
                           <label
                             key={study.key}
@@ -1572,7 +1600,7 @@ export default function TerminalPage() {
                         ))}
                       </div>
 
-                      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      <div style={{ position: "sticky", bottom: -12, display: "flex", gap: 8, marginTop: 12, paddingTop: 10, paddingBottom: 2, background: "linear-gradient(180deg, rgba(6,25,54,0.70), #061936 35%)" }}>
                         <button type="button" onClick={showAllStudies} style={{ ...topToolButtonStyle, flex: 1 }}>
                           Show All
                         </button>
