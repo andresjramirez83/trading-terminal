@@ -178,6 +178,7 @@ class AlpacaService:
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
         extended_hours: bool = False,
+        position_intent: Optional[str] = None,
         client_order_id: Optional[str] = None,
         order_class: Optional[str] = None,   # "bracket", "oco", "oto"
         take_profit: Optional[Dict[str, Any]] = None,
@@ -199,6 +200,8 @@ class AlpacaService:
             payload["limit_price"] = limit_price
         if stop_price is not None and order_type in {"stop", "stop_limit"}:
             payload["stop_price"] = stop_price
+        if position_intent:
+            payload["position_intent"] = position_intent
         if client_order_id:
             payload["client_order_id"] = client_order_id
 

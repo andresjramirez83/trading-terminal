@@ -214,6 +214,18 @@ class AutoTradeEngine:
         alpaca = AlpacaService(mode=cfg.mode)
         polygon = PolygonService()
 
+        try:
+            positions = alpaca.get_positions()
+        except Exception as exc:
+            self.store.log_event("synthetic_position_check_error", {"error": str(exc)})
+            positions = []
+
+        try:
+            open_orders = alpaca.get_orders(status="open", limit=500, nested=True)
+        except Exception as exc:
+            self.store.log_event("synthetic_open_order_check_error", {"error": str(exc)})
+            open_orders = []
+
         for symbol, state in list(states.items()):
             phase = str(state.get("phase") or "")
             strategy_id = str(state.get("strategy_id") or "")
@@ -233,6 +245,32 @@ class AutoTradeEngine:
             if qty <= 0 or stop <= 0 or target <= 0:
                 continue
 
+            live_qty = int(self._position_qty_for(positions, symbol))
+            if live_qty <= 0:
+                self.store.delete_runner_state(symbol)
+                self.store.log_event(
+                    "synthetic_state_cleared_no_position",
+                    {"reason": "no live position to exit", "state": state},
+                    symbol,
+                    strategy_id,
+                )
+                continue
+
+            reserved_exit_qty = int(self._open_closing_qty_for(open_orders, symbol))
+            available_exit_qty = max(0, live_qty - reserved_exit_qty)
+            if available_exit_qty <= 0:
+                self.store.log_event(
+                    "synthetic_exit_waiting_existing_order",
+                    {"live_qty": live_qty, "reserved_exit_qty": reserved_exit_qty, "state": state},
+                    symbol,
+                    strategy_id,
+                )
+                continue
+
+            exit_qty = min(qty, available_exit_qty)
+            if exit_qty <= 0:
+                continue
+
             last_price = 0.0
             try:
                 last_price = self._safe_float(await polygon.get_last_trade(symbol))
@@ -249,12 +287,14 @@ class AutoTradeEngine:
             if reason is None:
                 continue
 
-            order_type = "limit" if bool(state.get("extended_hours", cfg.extended_hours)) else "market"
+            use_extended = bool(state.get("extended_hours", cfg.extended_hours))
+            order_type = "limit" if use_extended else "market"
             limit_price = None
             if order_type == "limit":
                 if reason == "target_hit":
                     limit_price = target
                 else:
+                    # Use a slightly marketable limit for synthetic stops in extended hours.
                     limit_price = self._alpaca_price(max(0.0001, last_price * 0.98))
 
             try:
@@ -263,25 +303,97 @@ class AutoTradeEngine:
                     side="sell",
                     order_type=order_type,
                     time_in_force="day",
-                    qty=qty,
+                    qty=exit_qty,
                     limit_price=limit_price,
-                    extended_hours=bool(state.get("extended_hours", cfg.extended_hours)),
+                    extended_hours=use_extended,
+                    position_intent="sell_to_close",
                     client_order_id=f"autotrade_exit_{reason}_{symbol}_{int(time.time())}",
                 )
                 self.store.delete_runner_state(symbol)
                 self.store.log_event(
                     "synthetic_exit_submitted",
-                    {"reason": reason, "last_price": last_price, "state": state, "order": order},
+                    {
+                        "reason": reason,
+                        "last_price": last_price,
+                        "requested_qty": qty,
+                        "live_qty": live_qty,
+                        "reserved_exit_qty": reserved_exit_qty,
+                        "exit_qty": exit_qty,
+                        "state": state,
+                        "order": order,
+                    },
                     symbol,
                     strategy_id,
                 )
             except Exception as exc:
+                error_text = str(exc)
+                if "not allowed to short" in error_text.lower():
+                    refreshed_positions = []
+                    try:
+                        refreshed_positions = alpaca.get_positions()
+                    except Exception:
+                        refreshed_positions = positions
+                    refreshed_qty = int(self._position_qty_for(refreshed_positions, symbol))
+                    if refreshed_qty <= 0:
+                        self.store.delete_runner_state(symbol)
+                        self.store.log_event(
+                            "synthetic_state_cleared_after_short_reject",
+                            {"reason": "alpaca reported short risk and no live position remains", "state": state, "error": error_text},
+                            symbol,
+                            strategy_id,
+                        )
+                        continue
+                    repaired_state = dict(state)
+                    repaired_state["qty"] = refreshed_qty
+                    repaired_state["filled_qty"] = refreshed_qty
+                    repaired_state["last_exit_error"] = error_text
+                    repaired_state["last_reconciled_at"] = datetime.now(timezone.utc).isoformat()
+                    self.store.upsert_runner_state(symbol, repaired_state)
+                    self.store.log_event(
+                        "synthetic_exit_qty_reconciled",
+                        {"reason": reason, "live_qty": refreshed_qty, "state": repaired_state, "error": error_text},
+                        symbol,
+                        strategy_id,
+                    )
+                    continue
+
                 self.store.log_event(
                     "synthetic_exit_error",
-                    {"reason": reason, "last_price": last_price, "state": state, "error": str(exc)},
+                    {"reason": reason, "last_price": last_price, "state": state, "error": error_text},
                     symbol,
                     strategy_id,
                 )
+
+
+    def _position_qty_for(self, positions: List[Dict[str, Any]], symbol: str) -> float:
+        symbol_u = str(symbol or "").upper()
+        for pos in positions or []:
+            if str(pos.get("symbol") or "").upper() != symbol_u:
+                continue
+            return abs(self._safe_float(pos.get("qty")))
+        return 0.0
+
+    def _open_closing_qty_for(self, orders: List[Dict[str, Any]], symbol: str) -> float:
+        symbol_u = str(symbol or "").upper()
+        total = 0.0
+        terminal = {"filled", "canceled", "cancelled", "expired", "rejected"}
+        for order in orders or []:
+            if str(order.get("symbol") or "").upper() != symbol_u:
+                continue
+            if str(order.get("status") or "").lower() in terminal:
+                continue
+            side = str(order.get("side") or "").lower()
+            intent = str(order.get("position_intent") or order.get("positionIntent") or "").lower()
+            order_class = str(order.get("order_class") or order.get("orderClass") or "").lower()
+            if side != "sell":
+                continue
+            if "close" not in intent and order_class not in {"bracket", "oco", "oto"}:
+                # Plain sell orders still reserve long shares at Alpaca. Count them to avoid overselling.
+                pass
+            qty = self._safe_float(order.get("qty"))
+            filled = self._safe_float(order.get("filled_qty"))
+            total += max(0.0, qty - filled)
+        return total
 
     async def _promote_filled_entry_to_active(self, alpaca: AlpacaService, symbol: str, state: Dict[str, Any]) -> None:
         order_id = str(state.get("order_id") or state.get("entry_order_id") or "")
