@@ -330,6 +330,72 @@ class PolygonService:
         return out
 
 
+
+    def _aggregate_intraday_from_1m(
+        self,
+        bars: List[Dict[str, Any]],
+        bucket_minutes: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build live 5m/15m/30m candles from 1m candles.
+
+        Polygon's native multi-minute aggregates may lag until the full bucket
+        completes. Building from 1m bars lets the chart display the current,
+        still-forming higher-timeframe candle.
+        """
+        if not bars or bucket_minutes <= 1:
+            return _clone_bars(bars)
+
+        grouped: Dict[int, Dict[str, Any]] = {}
+
+        for bar in sorted(bars, key=lambda item: int(item.get("time", item.get("t", 0)) or 0)):
+            try:
+                ts = int(bar.get("time", bar.get("t", 0)) or 0)
+                o = float(bar.get("open", bar.get("o", 0)) or 0)
+                h = float(bar.get("high", bar.get("h", 0)) or 0)
+                l = float(bar.get("low", bar.get("l", 0)) or 0)
+                c = float(bar.get("close", bar.get("c", 0)) or 0)
+                v = float(bar.get("volume", bar.get("v", 0)) or 0)
+            except Exception:
+                continue
+
+            if ts <= 0 or h <= 0 or l <= 0 or c <= 0:
+                continue
+
+            dt = datetime.fromtimestamp(ts / 1000, timezone.utc)
+            bucket_minute = (dt.minute // bucket_minutes) * bucket_minutes
+            bucket_dt = dt.replace(minute=bucket_minute, second=0, microsecond=0)
+            bucket_ts = int(bucket_dt.timestamp() * 1000)
+
+            row = grouped.get(bucket_ts)
+            if row is None:
+                grouped[bucket_ts] = {
+                    "time": bucket_ts,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": v,
+                    "t": bucket_ts,
+                    "o": o,
+                    "h": h,
+                    "l": l,
+                    "c": c,
+                    "v": v,
+                }
+                continue
+
+            row["high"] = max(float(row["high"]), h)
+            row["low"] = min(float(row["low"]), l)
+            row["close"] = c
+            row["volume"] = float(row["volume"]) + v
+            row["h"] = row["high"]
+            row["l"] = row["low"]
+            row["c"] = row["close"]
+            row["v"] = row["volume"]
+
+        return [row for _, row in sorted(grouped.items(), key=lambda item: item[0])]
+
     def _bars_cache_ttl_seconds(self, normalized_tf: str) -> float:
         # Keep live charts responsive without hammering Polygon or flooding worker logs.
         if normalized_tf == "1m":
@@ -380,6 +446,29 @@ class PolygonService:
         cached = self._get_cached_bars(cache_key)
         if cached is not None:
             return cached
+
+        # Build intraday higher-timeframe candles from 1m bars so the current,
+        # still-forming 5m/15m/30m candle appears on the chart immediately.
+        if normalized_tf in {"5m", "15m", "30m"}:
+            raw = await self.get_aggs(
+                symbol=symbol,
+                multiplier=1,
+                timespan="minute",
+                start_ms=int(start.timestamp() * 1000),
+                end_ms=int(now.timestamp() * 1000),
+                adjusted="true",
+                sort="asc",
+                limit=50000,
+            )
+            one_minute = self._normalize_aggs(raw)
+            bucket_minutes = {"5m": 5, "15m": 15, "30m": 30}[normalized_tf]
+            bars = self._aggregate_intraday_from_1m(one_minute, bucket_minutes)
+            _debug(
+                f"POLYGON GET_BARS RESULT {symbol} {normalized_tf}: "
+                f"raw_1m={len(raw)} aggregated={len(bars)}"
+            )
+            self._set_cached_bars(cache_key, ttl, bars)
+            return _clone_bars(bars)
 
         # Daily charts are built from 1m bars so today's candle forms live.
         if normalized_tf == "1d":

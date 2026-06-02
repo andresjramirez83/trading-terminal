@@ -68,6 +68,15 @@ type Stats = {
 
 export type ChartVisibleLogicalRange = { from: number; to: number };
 
+type SharedChartTimeAnchor = {
+  time: UTCTimestamp;
+  timeframe: string;
+  updatedAt: number;
+};
+
+const SHARED_CHART_TIME_ANCHORS = new Map<string, SharedChartTimeAnchor>();
+const SHARED_CHART_TIME_ANCHOR_MAX_AGE_MS = 60 * 60 * 1000;
+
 type Props = {
   symbol: string;
   timeframe: string;
@@ -75,6 +84,7 @@ type Props = {
   onStatsUpdate: (stats: Stats) => void;
   initialVisibleLogicalRange?: ChartVisibleLogicalRange | null;
   onVisibleLogicalRangeChange?: (range: ChartVisibleLogicalRange) => void;
+  onTimeframeChange?: (timeframe: string) => void;
   trendlineAction?: TrendlineControlAction;
   trendlineSnapMode?: TrendlineSnapMode;
   onTrendlineActionHandled?: () => void;
@@ -2043,7 +2053,7 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
 
     if (!state || state.date !== parts.date) {
       if (activeSegment) {
-        activeSegment.endIndex = Math.max(activeSegment.startIndex, i - 1);
+        (activeSegment as any).endIndex = Math.max(activeSegment.startIndex, i - 1);
         segments.push(activeSegment);
         activeSegment = null;
       }
@@ -2560,7 +2570,7 @@ function chartLookbackForTimeframe(timeframe: string): string {
 
 function chartLimitForTimeframe(timeframe: string): number {
   const tf = String(timeframe || "1m").trim().toLowerCase();
-  if (tf === "1m") return 650;
+  if (tf === "1m") return 300;
   if (tf === "5m") return 550;
   if (tf === "15m") return 450;
   if (tf === "30m") return 400;
@@ -3930,6 +3940,70 @@ function findNearestBarByTime(bars: Candle[], targetTime: UTCTimestamp): Candle 
   return bestBar;
 }
 
+
+function findNearestBarIndexByTime(bars: Candle[], targetTime: UTCTimestamp): number {
+  if (!bars.length) return -1;
+
+  const target = Number(targetTime);
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < bars.length; i += 1) {
+    const barTime = Number(toChartTime(bars[i].time));
+    const distance = Math.abs(barTime - target);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+
+  return bestIndex;
+}
+
+function getTargetVisibleBarsForTimeframe(timeframe: string): number {
+  const tf = (timeframe || "15m").toLowerCase().trim();
+  if (tf === "1m") return 160;
+  if (tf === "5m") return 130;
+  if (tf === "15m") return 95;
+  if (tf === "30m") return 85;
+  if (tf === "1h" || tf === "60m") return 75;
+  if (tf === "1d" || tf === "day") return 120;
+  return 100;
+}
+
+
+const ET_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function etDateKeyFromEpochMs(epochMs: number): string {
+  const parts = ET_DATE_FORMATTER.formatToParts(new Date(epochMs));
+  const year = parts.find((part) => part.type === "year")?.value ?? "0000";
+  const month = parts.find((part) => part.type === "month")?.value ?? "00";
+  const day = parts.find((part) => part.type === "day")?.value ?? "00";
+  return `${year}-${month}-${day}`;
+}
+
+function keepCurrentAndPreviousEtDayForOneMinute(bars: Candle[]): Candle[] {
+  if (bars.length <= 0) return bars;
+
+  const days: string[] = [];
+  const seen = new Set<string>();
+
+  for (const bar of bars) {
+    const day = etDateKeyFromEpochMs(bar.time);
+    if (seen.has(day)) continue;
+    seen.add(day);
+    days.push(day);
+  }
+
+  const allowedDays = new Set(days.slice(-2));
+  return bars.filter((bar) => allowedDays.has(etDateKeyFromEpochMs(bar.time)));
+}
+
 function snapPriceToBarWick(
   bar: Candle,
   clickedPrice: number,
@@ -4854,7 +4928,7 @@ function extendLineToSessionEnd(
     const real = byTime.get(Number(time));
     if (real) {
       out.push(real);
-      lastValue = real.value;
+      lastValue = real.value ?? null;
       continue;
     }
     if (lastValue != null) out.push({ time, value: lastValue });
@@ -5355,6 +5429,7 @@ function ChartPanelComponent({
   onStatsUpdate,
   initialVisibleLogicalRange = null,
   onVisibleLogicalRangeChange,
+  onTimeframeChange,
   trendlineAction = { type: "none" },
   trendlineSnapMode = "auto",
   onTrendlineActionHandled,
@@ -5464,6 +5539,61 @@ function ChartPanelComponent({
   const onVisibleLogicalRangeChangeRef = useRef(onVisibleLogicalRangeChange);
   const initialVisibleLogicalRangeRef = useRef(initialVisibleLogicalRange);
   const visibleRangeNotifyTimerRef = useRef<number | null>(null);
+  const lastAppliedCrossTimeAnchorRef = useRef<string>("");
+  const activeChartTimeframeRef = useRef(timeframeProp || "15m");
+  const getCrossTimeAnchor = useCallback((): SharedChartTimeAnchor | null => {
+    const key = normalizeSymbolKey(symbol);
+    if (!key) return null;
+
+    const anchor = SHARED_CHART_TIME_ANCHORS.get(key);
+    if (!anchor) return null;
+    if (Date.now() - anchor.updatedAt > SHARED_CHART_TIME_ANCHOR_MAX_AGE_MS) return null;
+    if (String(anchor.timeframe || "").toLowerCase() === String(timeframeProp || "").toLowerCase()) return null;
+    if (!Number.isFinite(Number(anchor.time))) return null;
+
+    return anchor;
+  }, [symbol, timeframeProp]);
+  const rememberCurrentVisibleTimeAnchor = useCallback((sourceTimeframe?: string) => {
+    const chart = chartRef.current;
+    const bars = barsRef.current;
+    if (!chart || !bars.length) return;
+
+    const logicalRange = chart.timeScale().getVisibleLogicalRange?.();
+    let anchorIndex = bars.length - 1;
+
+    if (
+      logicalRange &&
+      Number.isFinite(Number(logicalRange.from)) &&
+      Number.isFinite(Number(logicalRange.to)) &&
+      Number(logicalRange.to) > Number(logicalRange.from)
+    ) {
+      const centerLogical = Math.round((Number(logicalRange.from) + Number(logicalRange.to)) / 2);
+      anchorIndex = Math.max(0, Math.min(bars.length - 1, centerLogical));
+    } else {
+      const visibleTimeRange = chart.timeScale().getVisibleRange?.();
+      const visibleFrom = visibleTimeRange ? normalizeClickedTime(visibleTimeRange.from) : null;
+      const visibleTo = visibleTimeRange ? normalizeClickedTime(visibleTimeRange.to) : null;
+      if (visibleFrom != null && visibleTo != null && Number(visibleTo) > Number(visibleFrom)) {
+        const centerTime = Math.round((Number(visibleFrom) + Number(visibleTo)) / 2) as UTCTimestamp;
+        const nearestIndex = findNearestBarIndexByTime(bars, centerTime);
+        if (nearestIndex >= 0) anchorIndex = nearestIndex;
+      }
+    }
+
+    const anchorBar = bars[anchorIndex];
+    if (!anchorBar) return;
+
+    const centerTime = toChartTime(anchorBar.time) as UTCTimestamp;
+    const key = normalizeSymbolKey(symbol);
+    if (!key) return;
+
+    SHARED_CHART_TIME_ANCHORS.set(key, {
+      time: centerTime,
+      timeframe: sourceTimeframe || activeChartTimeframeRef.current || timeframeProp || "",
+      updatedAt: Date.now(),
+    });
+    lastAppliedCrossTimeAnchorRef.current = "";
+  }, [symbol, timeframeProp]);
   const orderDragStateRef = useRef<OrderDragState | null>(null);
   const orderPriceOverridesRef = useRef<Record<string, number>>({});
   // Optimistic cancel/remove lock: keeps a canceled order line hidden immediately
@@ -5477,21 +5607,9 @@ function ChartPanelComponent({
   }, [onVisibleLogicalRangeChange]);
 
   useEffect(() => {
-    initialVisibleLogicalRangeRef.current = initialVisibleLogicalRange;
-
-    const chart = chartRef.current;
-    if (
-      chart &&
-      initialVisibleLogicalRange &&
-      Number.isFinite(initialVisibleLogicalRange.from) &&
-      Number.isFinite(initialVisibleLogicalRange.to) &&
-      initialVisibleLogicalRange.to > initialVisibleLogicalRange.from
-    ) {
-      chart.timeScale().setVisibleLogicalRange({
-        from: initialVisibleLogicalRange.from,
-        to: initialVisibleLogicalRange.to,
-      });
-    }
+    // Intentionally do not restore saved logical ranges. Saved per-timeframe
+    // ranges caused old chart zones to load when switching 1m/5m/15m.
+    initialVisibleLogicalRangeRef.current = null;
   }, [initialVisibleLogicalRange]);
 
   const applyNormalVisibleRange = useCallback((bars: Candle[]) => {
@@ -5500,23 +5618,19 @@ function ChartPanelComponent({
 
     const tf = (timeframeProp || "15m").toLowerCase().trim();
     const targetBars =
-      tf === "1m" ? 160 :
+      tf === "1m" ? 150 :
       tf === "5m" ? 130 :
-      tf === "15m" ? 95 :
-      tf === "30m" ? 85 :
-      tf === "1h" || tf === "60m" ? 75 :
+      tf === "15m" ? 100 :
+      tf === "30m" ? 90 :
+      tf === "1h" || tf === "60m" ? 80 :
       tf === "1d" || tf === "day" ? 120 :
       100;
 
     const rightPaddingBars = 8;
-    const displaySlots = Math.max(
-      bars.length,
-      displaySlotCountRef.current || getDisplaySlotCountWithSessionTail(bars, timeframe, tradingDateRef.current)
-    );
-    const visibleBars = Math.min(displaySlots, targetBars);
-    const from = Math.max(0, displaySlots - visibleBars);
-    const to = displaySlots - 1 + rightPaddingBars;
-
+	const dataSlots = bars.length;
+const visibleBars = Math.min(dataSlots, targetBars);
+const from = Math.max(0, dataSlots - visibleBars);
+const to = dataSlots - 1 + rightPaddingBars;
     chart.timeScale().applyOptions({
       rightOffset: rightPaddingBars,
       barSpacing: 8,
@@ -5526,21 +5640,37 @@ function ChartPanelComponent({
     chart.timeScale().setVisibleLogicalRange({ from, to });
   }, [timeframeProp]);
 
-  const applySavedOrNormalVisibleRange = useCallback((bars: Candle[]) => {
+  const applyTimeAnchorVisibleRange = useCallback((bars: Candle[]): boolean => {
     const chart = chartRef.current;
-    const savedRange = initialVisibleLogicalRangeRef.current;
+    const anchor = getCrossTimeAnchor();
+    if (!chart || !anchor || bars.length <= 0) return false;
 
-    if (
-      chart &&
-      savedRange &&
-      Number.isFinite(savedRange.from) &&
-      Number.isFinite(savedRange.to) &&
-      savedRange.to > savedRange.from
-    ) {
-      chart.timeScale().setVisibleLogicalRange({ from: savedRange.from, to: savedRange.to });
-      return;
-    }
+    const nearestIndex = findNearestBarIndexByTime(bars, anchor.time);
+    if (nearestIndex < 0) return false;
 
+    const anchorKey = `${normalizeSymbolKey(symbol)}::${timeframeProp || ""}::${anchor.time}`;
+    if (lastAppliedCrossTimeAnchorRef.current === anchorKey) return true;
+    lastAppliedCrossTimeAnchorRef.current = anchorKey;
+
+    const targetBars = getTargetVisibleBarsForTimeframe(timeframeProp || "15m");
+    const halfWindowBars = Math.max(24, Math.round(targetBars / 2));
+    const from = Math.max(0, nearestIndex - halfWindowBars);
+    const to = Math.min(Math.max(bars.length - 1, nearestIndex + halfWindowBars), nearestIndex + halfWindowBars + 8);
+
+    chart.timeScale().applyOptions({
+      rightOffset: 8,
+      barSpacing: 8,
+      minBarSpacing: 3,
+    });
+    chart.timeScale().setVisibleLogicalRange({ from, to });
+    return true;
+  }, [getCrossTimeAnchor, symbol, timeframeProp]);
+
+  const applySavedOrNormalVisibleRange = useCallback((bars: Candle[]) => {
+    // Keep timeframe switching simple and fast: whenever new bars load, show
+    // the latest/current candle with a normal zoomed-out view. Do not restore
+    // stale per-timeframe ranges, because that is what was jumping the chart
+    // back to old zones/days.
     applyNormalVisibleRange(bars);
   }, [applyNormalVisibleRange]);
 
@@ -5582,6 +5712,10 @@ function ChartPanelComponent({
 
   const [chartTimeframe, setChartTimeframe] = useState(timeframeProp || "15m");
   const timeframe = chartTimeframe;
+
+  useEffect(() => {
+    activeChartTimeframeRef.current = chartTimeframe;
+  }, [chartTimeframe]);
   const [dailySessionMode, setDailySessionMode] = useState<DailySessionMode>(() => readStoredDailySessionMode());
 
   useEffect(() => {
@@ -5945,9 +6079,10 @@ function ChartPanelComponent({
 
   useEffect(() => {
     if (timeframeProp && timeframeProp !== chartTimeframe) {
+      lastAppliedCrossTimeAnchorRef.current = "";
       setChartTimeframe(timeframeProp);
     }
-  }, [timeframeProp]);
+  }, [timeframeProp, chartTimeframe]);
 
   const scheduleRemoteTrendlineSave = useCallback((targetSymbol: string, targetTimeframe: string, nextTrendlines: Trendline[]) => {
     const clean = nextTrendlines.map(normalizeStoredTrendline);
@@ -7041,8 +7176,10 @@ function ChartPanelComponent({
 
     const chartWidth = containerRef.current?.clientWidth ?? 0;
     const visibleLogical = timeScale.getVisibleLogicalRange?.();
+    const isOneMinuteFastChart = String(timeframe || "").toLowerCase().trim() === "1m";
+    const allowHeavyOverlayWork = !isOneMinuteFastChart;
 
-    if (latestLineVisibilityRef.current.volumeProfile && barsRef.current.length > 0 && chartWidth > 0) {
+    if (allowHeavyOverlayWork && latestLineVisibilityRef.current.volumeProfile && barsRef.current.length > 0 && chartWidth > 0) {
       const bars = barsRef.current;
       const fromIndex = visibleLogical
         ? Math.max(0, Math.floor(Number(visibleLogical.from)))
@@ -7165,7 +7302,7 @@ function ChartPanelComponent({
     } else {
       setPreviousRthRangeOverlay(null);
     }
-    const latestVwapForLabel = calcVWAP(barsRef.current).at(-1) ?? null;
+    const latestVwapForLabel = legendRef.current.vwap ?? null;
     if (latestLineVisibilityRef.current.vwap) {
       pushKeyLevelLabel("vwap", "VWAP", `VWAP ${formatPrice(latestVwapForLabel)}`, latestVwapForLabel, "#bae6fd", "rgba(14,116,144,0.92)", "1px solid rgba(56,189,248,0.75)");
     }
@@ -7256,7 +7393,7 @@ function ChartPanelComponent({
     }
     setSessionBands(nextSessionBands);
 
-    if (latestLineVisibilityRef.current.fvgFlip) {
+    if (allowHeavyOverlayWork && latestLineVisibilityRef.current.fvgFlip) {
       const fvgZone = computeLatestFvgFlipZone(barsRef.current);
 
       if (fvgZone) {
@@ -8059,7 +8196,8 @@ function ChartPanelComponent({
             value: pmh,
           }));
 
-    const compression = computeCompressionZone(bars);
+    const isOneMinuteFastChart = String(timeframe || "").toLowerCase().trim() === "1m";
+    const compression = isOneMinuteFastChart ? null : computeCompressionZone(bars);
     latestCompressionRef.current = compression;
 
     const compressionTopData: LinePoint[] =
@@ -8116,27 +8254,38 @@ function ChartPanelComponent({
       tradingDateRef.current = tradingDate;
       displaySlotCountRef.current = getDisplaySlotCountWithSessionTail(bars, timeframe, tradingDate);
 
-      const atrValues = computeRollingAtrValues(bars, 14);
-      const fakeEngulfingSignals = computeFakeEngulfingSignals(bars);
-      const liquiditySweepSignals = computeLiquiditySweepSignals(bars);
+      const isOneMinuteChart = String(timeframe || "").toLowerCase().trim() === "1m";
+      // 1m fast path: render candles/volume/VWAP/PMH/sweep levels immediately.
+      // The expensive marker studies below are intentionally skipped on 1m so
+      // timeframe switching, panning, zooming, and live updates stay responsive.
+      // They remain fully available on 5m/15m/30m/1h where the candle count is lower.
+      const runHeavyMarkerStudies = !isOneMinuteChart;
+
+      const atrValues = runHeavyMarkerStudies ? computeRollingAtrValues(bars, 14) : [];
+      const fakeEngulfingSignals = runHeavyMarkerStudies ? computeFakeEngulfingSignals(bars) : [];
+      const liquiditySweepSignals = runHeavyMarkerStudies ? computeLiquiditySweepSignals(bars) : [];
       const sixSevenSweepSignals = computeSixSevenSweepSignals(bars);
       const sixSevenSweepLines = computeSixSevenSweepLines(bars);
       const fiveAmSweepSignals = computeFiveAmSweepSignals(bars);
       const fiveAmSweepLines = computeFiveAmSweepLines(bars);
-      const volumeSignalMarkers = computeVolumeSignalMarkers(bars);
-      const bodyBreakDotSignals = computeBodyBreakDotSignals(bars);
-      const atrBreakoutSignals = computeAtrExpansionAndResistanceBreakoutSignals(
-        bars,
-        atrValues,
-        projectionSelectionRef.current
-      );
+      const volumeSignalMarkers = runHeavyMarkerStudies ? computeVolumeSignalMarkers(bars) : [];
+      const bodyBreakDotSignals = runHeavyMarkerStudies
+        ? computeBodyBreakDotSignals(bars)
+        : { blackDots: [], whiteDots: [] };
+      const atrBreakoutSignals = runHeavyMarkerStudies
+        ? computeAtrExpansionAndResistanceBreakoutSignals(
+            bars,
+            atrValues,
+            projectionSelectionRef.current
+          )
+        : { expansionDots: [], breakoutConfirmations: [] };
       const fakeEngulfingTimes = new Set(fakeEngulfingSignals.map((marker) => marker.time));
 
       const significantCandleSignals: SignalMarkerPoint[] = [];
 
       const candleData: CandlePoint[] = bars.map((bar, index) => {
-        const atr = atrValues[index];
-        const isExpansionCandle = isSignificantExpansionCandle(bar, atr, 1.5);
+        const atr = atrValues[index] ?? 0;
+        const isExpansionCandle = runHeavyMarkerStudies && isSignificantExpansionCandle(bar, atr, 1.5);
 
         if (isExpansionCandle) {
           const candleTime = toChartTime(bar.time);
@@ -8173,7 +8322,24 @@ function ChartPanelComponent({
       latestAtrExpansionMarkersRef.current = atrBreakoutSignals.expansionDots;
       latestResistanceBreakoutMarkersRef.current = atrBreakoutSignals.breakoutConfirmations;
 
-      const adaptiveRsiState = computeAdaptiveRunnerRsiState(bars, timeframe);
+      const adaptiveRsiState = runHeavyMarkerStudies
+        ? computeAdaptiveRunnerRsiState(bars, timeframe)
+        : {
+            rsi: null,
+            slope: 0,
+            zoneLow: null,
+            zoneHigh: null,
+            winRate: null,
+            avgMovePct: null,
+            score: 0,
+            status: "insufficient" as const,
+            label: "RSI: off on 1m fast mode",
+            detail: "Use 5m/15m for adaptive RSI study",
+            color: "#94a3b8",
+            background: "rgba(51,65,85,0.88)",
+            border: "1px solid rgba(148,163,184,0.35)",
+            markers: [],
+          };
       latestAdaptiveRunnerRsiMarkersRef.current = adaptiveRsiState.markers;
       setAdaptiveRunnerRsiState(adaptiveRsiState);
 
@@ -8203,10 +8369,10 @@ function ChartPanelComponent({
               value: pmh,
             }));
 
-      const compression = computeCompressionZone(bars);
+      const compression = isOneMinuteChart ? null : computeCompressionZone(bars);
       latestCompressionRef.current = compression;
-      latestVwapSignalsRef.current = computeVWAPReclaimSignals(bars, vwapValues);
-      latestChochMarkersRef.current = computeChochSignals(bars);
+      latestVwapSignalsRef.current = runHeavyMarkerStudies ? computeVWAPReclaimSignals(bars, vwapValues) : [];
+      latestChochMarkersRef.current = runHeavyMarkerStudies ? computeChochSignals(bars) : [];
 
       const compressionTopData: LinePoint[] =
         compression && latestLineVisibilityRef.current.compression
@@ -8248,12 +8414,14 @@ function ChartPanelComponent({
 
       syncTrendlineSeries();
       refreshProjectionFromLatestBar(bars);
-      evaluateTrendlineAlerts(bars);
-
-      if (autoFitPendingRef.current) {
-        applySavedOrNormalVisibleRange(bars);
-        autoFitPendingRef.current = false;
+      if (runHeavyMarkerStudies) {
+        evaluateTrendlineAlerts(bars);
       }
+	if (autoFitPendingRef.current) {
+  applySavedOrNormalVisibleRange(bars);
+  autoFitPendingRef.current = false;
+}
+
 
       window.requestAnimationFrame(updateOverlayPositions);
 
@@ -9160,16 +9328,19 @@ function ChartPanelComponent({
 
       visibleRangeNotifyTimerRef.current = window.setTimeout(() => {
         visibleRangeNotifyTimerRef.current = null;
+        rememberCurrentVisibleTimeAnchor();
+
         const range = chartInstance.timeScale().getVisibleLogicalRange();
         if (!range) return;
         if (!Number.isFinite(range.from) || !Number.isFinite(range.to) || range.to <= range.from) return;
         onVisibleLogicalRangeChangeRef.current?.({ from: Number(range.from), to: Number(range.to) });
-      }, 350);
+      }, 650);
     };
 
     chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleRangeChange);
 
     return () => {
+      rememberCurrentVisibleTimeAnchor();
       resizeObserver.disconnect();
       chart.timeScale().unsubscribeVisibleTimeRangeChange(handleVisibleRangeChange);
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
@@ -9254,13 +9425,16 @@ function ChartPanelComponent({
 
         const barsResp = await fetchBars(symbol, timeframe, {
           lookback: lookback || chartLookbackForTimeframe(timeframe),
-          session: isDailyTimeframe(timeframe) ? dailySessionMode : undefined,
+          session: isDailyTimeframe(timeframe) ? dailySessionMode : "extended",
           limit: chartLimitForTimeframe(timeframe),
           forceRefresh: isDailyTimeframe(timeframe),
         });
         if (cancelled) return;
 
         let normalizedBars = normalizeBarsForChart(barsResp.bars ?? []);
+        if (String(timeframe || "").toLowerCase() === "1m") {
+          normalizedBars = keepCurrentAndPreviousEtDayForOneMinute(normalizedBars);
+        }
 
         if (isDailyTimeframe(timeframe)) {
           try {
@@ -9372,6 +9546,92 @@ function ChartPanelComponent({
     };
   }, [symbol, timeframe, lookback, loadDelayMs, dailySessionMode, renderBars]);
 
+  // WebSocket updates can miss quiet after-hours / overnight bars. The backend /bars
+  // endpoint can still have the newest candles, so visible live charts also do a
+  // light backend refresh. This keeps the chart aligned with TOS when the server
+  // has newer candle data than the websocket stream delivered.
+  useEffect(() => {
+    if (!enableLiveStream || isDailyTimeframe(timeframe)) return;
+
+    let cancelled = false;
+    let refreshInFlight = false;
+
+    const normalizedTimeframe = String(timeframe || "1m").toLowerCase().trim();
+    const pollMs =
+      normalizedTimeframe === "1m"
+        ? 12000
+        : normalizedTimeframe === "5m"
+          ? 18000
+          : 25000;
+
+    const refreshFromBackend = async () => {
+      if (cancelled || refreshInFlight) return;
+      if (typeof document !== "undefined" && document.hidden) return;
+
+      refreshInFlight = true;
+      try {
+        const chart = chartRef.current;
+        const currentBars = barsRef.current;
+        const currentLastTime = currentBars.length > 0 ? Number(currentBars[currentBars.length - 1]?.time ?? 0) : 0;
+        const currentSlotCount = displaySlotCountRef.current || currentBars.length;
+        const visibleRange = chart?.timeScale().getVisibleLogicalRange();
+        const wasNearRightEdge = !visibleRange || visibleRange.to >= currentSlotCount - 12;
+
+        const barsResp = await fetchBars(symbol, timeframe, {
+          lookback: lookback || chartLookbackForTimeframe(timeframe),
+          session: "extended",
+          limit: chartLimitForTimeframe(timeframe),
+          forceRefresh: true,
+        });
+
+        if (cancelled) return;
+
+        let nextBars = normalizeBarsForChart(barsResp.bars ?? []);
+        if (normalizedTimeframe === "1m") {
+          nextBars = keepCurrentAndPreviousEtDayForOneMinute(nextBars);
+        }
+
+        const nextLastTime = nextBars.length > 0 ? Number(nextBars[nextBars.length - 1]?.time ?? 0) : 0;
+        const nextLastClose = nextBars.length > 0 ? Number(nextBars[nextBars.length - 1]?.close ?? 0) : 0;
+        const currentLastClose = currentBars.length > 0 ? Number(currentBars[currentBars.length - 1]?.close ?? 0) : 0;
+        const hasNewerBars = nextLastTime > currentLastTime;
+        const hasSameBarUpdate = nextLastTime === currentLastTime && nextLastClose !== currentLastClose;
+        const hasDifferentCount = nextBars.length !== currentBars.length;
+
+        if (!nextBars.length || (!hasNewerBars && !hasSameBarUpdate && !hasDifferentCount)) return;
+
+        setError("");
+        await renderBars(nextBars, barsResp.trading_date ?? null);
+
+        // If the user was already looking at the live edge, keep them there as
+        // newer candles arrive. If they panned left, do not yank the chart away.
+        if (wasNearRightEdge) {
+          applyNormalVisibleRange(nextBars);
+        }
+      } catch (err) {
+        console.warn("Chart backend refresh failed", err);
+      } finally {
+        refreshInFlight = false;
+      }
+    };
+
+    const id = window.setInterval(() => {
+      void refreshFromBackend();
+    }, pollMs);
+
+    // Do one delayed refresh shortly after mount/symbol switch so a chart that
+    // loaded from cache catches up quickly.
+    const startupId = window.setTimeout(() => {
+      void refreshFromBackend();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      window.clearTimeout(startupId);
+    };
+  }, [symbol, timeframe, lookback, enableLiveStream, renderBars, applyNormalVisibleRange]);
+
   useEffect(() => {
     if (!enableLiveStream) return;
 
@@ -9392,7 +9652,8 @@ function ChartPanelComponent({
     const scheduleLiveRender = async (bars: Candle[], tradingDate: string | null, lastPrice: number | null) => {
       pendingLiveRender = { bars, tradingDate, lastPrice };
       const elapsed = Date.now() - lastLiveRenderAt;
-      const wait = Math.max(0, 250 - elapsed);
+      const minLiveRenderIntervalMs = String(timeframe || "").toLowerCase().trim() === "1m" ? 1800 : 300;
+      const wait = Math.max(0, minLiveRenderIntervalMs - elapsed);
       if (wait <= 0) {
         if (liveRenderTimer != null) {
           window.clearTimeout(liveRenderTimer);
@@ -9709,7 +9970,9 @@ function ChartPanelComponent({
                 key={tf}
                 onClick={() => {
                   if (tf === timeframe) return;
+                  lastAppliedCrossTimeAnchorRef.current = "";
                   setChartTimeframe(tf);
+                  onTimeframeChange?.(tf);
                 }}
                 style={{
                   height: 22,
@@ -12261,5 +12524,6 @@ export default memo(ChartPanelComponent, (prev, next) =>
   prev.showInChartWatchlistAdder === next.showInChartWatchlistAdder &&
   sameOpenOrders(prev.openOrders, next.openOrders) &&
   prev.onCancelOrder === next.onCancelOrder &&
-  prev.onReplaceOrderPrice === next.onReplaceOrderPrice
+  prev.onReplaceOrderPrice === next.onReplaceOrderPrice &&
+  prev.onTimeframeChange === next.onTimeframeChange
 );

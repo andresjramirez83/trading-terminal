@@ -1582,9 +1582,11 @@ def extended_session_window_ms(
         start_dt = datetime(start_day.year, start_day.month, start_day.day, 4, 0, tzinfo=ET)
         full_ah_end = datetime(final_day.year, final_day.month, final_day.day, 20, 0, tzinfo=ET)
 
-        # For live/current-day charts, do not ask Polygon for a future end time.
-        # For historical date requests, always ask through 20:00 ET so AH is complete.
-        if requested_today and now_et.date() == final_day and now_et < full_ah_end:
+        # For live/current-day charts, keep requesting through NOW.
+        # This matches TOS-style live extended/overnight display instead of
+        # cutting the chart at 20:00 ET / 17:00 PT. Historical date requests
+        # still end at 20:00 ET to avoid creating a huge empty overnight tail.
+        if requested_today and now_et.date() == final_day:
             end_dt = now_et
         else:
             end_dt = full_ah_end
@@ -1621,8 +1623,11 @@ def _session_tail_end_ms(final_day: date, timeframe: str, end_ms: int) -> int:
         return end_ms
 
     step_ms = _intraday_step_ms(timeframe)
-    ah_end = datetime(final_day.year, final_day.month, final_day.day, 20, 0, tzinfo=ET)
-    target_ms = min(int(ah_end.timestamp() * 1000), int(end_ms))
+    # Use the actual requested end time. The old version capped this at
+    # 20:00 ET / 17:00 PT, which made charts stop while TOS could keep
+    # printing later extended/overnight candles. Historical requests still
+    # pass 20:00 ET from extended_session_window_ms(), so this is safe.
+    target_ms = int(end_ms)
     return (target_ms // step_ms) * step_ms
 
 
@@ -3358,7 +3363,7 @@ async def get_bars(
     date_str: Optional[str] = Query(None, alias="date"),
     lookback: Optional[str] = Query(None),
     limit: int = Query(MAX_BARS_DEFAULT, ge=50, le=5000),
-    session: str = Query("regular"),
+    session: str = Query("extended"),
 ):
     normalized_symbol = symbol.upper().strip()
     normalized_timeframe = timeframe.lower().strip()

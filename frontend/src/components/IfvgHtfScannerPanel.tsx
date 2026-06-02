@@ -25,6 +25,9 @@ function statusStyle(status?: string | null) {
 
 function phaseStyle(phase?: string | null) {
   const value = String(phase || "").toUpperCase();
+  if (value === "TRIGGERED") return { color: "#022c22", border: "rgba(16,185,129,0.70)", background: "#34d399" };
+  if (value === "READY") return { color: "#022c22", border: "rgba(16,185,129,0.60)", background: "#6ee7b7" };
+  if (value === "ARMED") return { color: "#eff6ff", border: "rgba(96,165,250,0.55)", background: "rgba(37,99,235,0.70)" };
   if (value === "EARLY") return { color: "#022c22", border: "rgba(16,185,129,0.60)", background: "#34d399" };
   if (value === "CONFIRMED") return { color: "#eff6ff", border: "rgba(96,165,250,0.55)", background: "rgba(37,99,235,0.85)" };
   if (value === "EXTENDED") return { color: "#451a03", border: "rgba(245,158,11,0.65)", background: "#fbbf24" };
@@ -34,8 +37,11 @@ function phaseStyle(phase?: string | null) {
 
 function phaseHint(phase?: string | null): string {
   const value = String(phase || "").toUpperCase();
+  if (value === "TRIGGERED") return "5m close confirmed — entry ready";
+  if (value === "READY") return "15m retest — waiting for 5m close";
+  if (value === "ARMED") return "15m setup armed";
   if (value === "EARLY") return "Best RR window";
-  if (value === "CONFIRMED") return "Valid, still tradable";
+  if (value === "CONFIRMED") return "Valid, waiting for 5m trigger";
   if (value === "EXTENDED") return "Late — avoid chasing";
   if (value === "FAILED") return "Invalidated";
   return "Watching";
@@ -69,6 +75,8 @@ export default function IfvgHtfScannerPanel({ selectedSymbol, onSelectSymbol, co
         min_price: 0.5,
         max_price: 20,
         min_volume: minVolume,
+        timeframes: "15m",
+        trigger_timeframe: "5m",
       });
       setData(result);
     } catch (err) {
@@ -105,8 +113,8 @@ export default function IfvgHtfScannerPanel({ selectedSymbol, onSelectSymbol, co
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 0.2 }}>15m/30m IFVG Watchlist</div>
-          <div style={{ fontSize: 10, opacity: 0.62 }}>Broad scanner · separate from runner list</div>
+          <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 0.2 }}>15m Bullish IFVG → 5m Entry</div>
+          <div style={{ fontSize: 10, opacity: 0.62 }}>15m setup · 5m close confirmation · separate from runner list</div>
         </div>
         <button
           type="button"
@@ -206,10 +214,12 @@ export default function IfvgHtfScannerPanel({ selectedSymbol, onSelectSymbol, co
                   {phaseHint(phase)}
                 </div>
                 <div style={{ marginTop: 6, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, opacity: 0.82 }}>
-                  <div>Score: <strong>{fmt(row.ifvg_score ?? row.score, 1)}</strong></div>
+                  <div>Score: <strong>{fmt(row.ifvg_score ?? (row as any).score, 1)}</strong></div>
                   <div>Dist: <strong>{fmt(row.distance_to_zone_pct, 2)}%</strong></div>
                   <div>Zone: <strong>{fmt(row.zone_low, 2)}-{fmt(row.zone_high, 2)}</strong></div>
                   <div>Dir: <strong>{row.ifvg_direction || "-"}</strong></div>
+                  <div>Entry: <strong>{fmt((row as any).entry_price, 2)}</strong></div>
+                  <div>Trig: <strong>{String((row as any).trigger_status || "wait").replace(/_/g, " ")}</strong></div>
                 </div>
               </button>
             );

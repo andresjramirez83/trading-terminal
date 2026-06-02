@@ -1783,7 +1783,12 @@ export default function TerminalPage() {
               key={`${symbolUpper}-${timeframe}`}
               symbol={symbolUpper}
               timeframe={timeframe}
-              initialVisibleLogicalRange={chartRanges[chartRangeKey(symbolUpper, timeframe)] ?? null}
+              onTimeframeChange={(nextTimeframe) => {
+                const normalized = normalizeTerminalTimeframe(nextTimeframe);
+                setTimeframe(normalized);
+                saveTerminalTimeframe(normalized);
+              }}
+              initialVisibleLogicalRange={null}
               onVisibleLogicalRangeChange={handleVisibleRangeChange}
               visibility={deferredVisibility}
               onStatsUpdate={(next) => setStats(next)}

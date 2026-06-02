@@ -2291,11 +2291,18 @@ function AlpacaPage() {
             key={`${chartId}-${symbol}-${timeframe}-${expandedChart === timeframe ? "expanded" : "normal"}-${chartResetNonce}`}
             symbol={symbol}
             timeframe={timeframe}
-            initialVisibleLogicalRange={chartRanges[chartRangeKey(symbol, timeframe)] ?? null}
+            onTimeframeChange={(nextTimeframe) => {
+              const normalized = normalizeExpandedChart(nextTimeframe);
+              if (normalized) {
+                setExpandedChart(normalized);
+                saveActiveAlpacaChartLocal(normalized);
+              }
+            }}
+            initialVisibleLogicalRange={null}
             onVisibleLogicalRangeChange={(range) => handleVisibleRangeChange(timeframe, range)}
             lookback={lookback}
             loadDelayMs={loadDelayMs}
-            enableLiveStream={isExpanded || (expandedChart === null && chartId === "main-15m")}
+            enableLiveStream={isVisible}
             legendDensity={isExpanded ? "full" : legendDensity}
             compactTools={!isExpanded && chartId.startsWith("bottom-")}
             visibility={deferredChartStudyVisibility[timeframe] ?? DEFAULT_VISIBILITY}
@@ -2599,7 +2606,7 @@ function AlpacaPage() {
                   timeframe: "1m",
                   title: `${symbol} · 1 Minute`,
                   subtitle: `Bottom chart · Bars: ${stats1m.barsCount} · PMH ${stats1m.pmh != null ? formatNumber(stats1m.pmh) : "N/A"}`,
-                  lookback: "1d",
+                  lookback: "2d",
                   loadDelayMs: 180,
                   statsSetter: setStats1m,
                   cardHeight: "470px",
@@ -2627,7 +2634,7 @@ function AlpacaPage() {
               timeframe: "1m",
               title: `${symbol} · Expanded 1 Minute`,
               subtitle: `Expanded bottom chart · Bars: ${stats1m.barsCount} · PMH ${stats1m.pmh != null ? formatNumber(stats1m.pmh) : "N/A"}`,
-              lookback: "1d",
+              lookback: "2d",
               loadDelayMs: 0,
               statsSetter: setStats1m,
               cardHeight: "calc(100vh - 220px)",

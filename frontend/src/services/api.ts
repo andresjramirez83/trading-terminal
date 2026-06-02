@@ -121,7 +121,7 @@ function normalizeLookback(timeframe: string, requested?: string): string {
 function defaultBarsLimit(timeframe: string): number {
   switch (timeframe.toLowerCase()) {
     case "1m":
-      return 650;
+      return 300;
     case "5m":
       return 550;
     case "15m":
@@ -182,6 +182,14 @@ export async function fetchBars(
   const limit = Math.max(50, Math.min(5000, Math.floor(options?.limit ?? defaultBarsLimit(normalizedTimeframe))));
   params.set("limit", String(limit));
 
+  // Force a real backend round-trip for live chart refreshes. Without this, the
+  // frontend can skip the in-memory cache but still receive a browser/proxy-cached
+  // /bars response, which makes the chart show old candles even when the server
+  // has newer bars.
+  if (options?.forceRefresh) {
+    params.set("_ts", String(Date.now()));
+  }
+
   const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${options?.date ?? ""}|${normalizedLookback}|${normalizedSession ?? ""}|${limit}`;
   const now = Date.now();
   pruneBarsCache(now);
@@ -202,7 +210,16 @@ export async function fetchBars(
     }
   }
 
-  const request = fetch(`${API_BASE}/bars?${params.toString()}`, { signal: options?.signal })
+  const request = fetch(`${API_BASE}/bars?${params.toString()}`, {
+    signal: options?.signal,
+    cache: options?.forceRefresh ? "no-store" : "default",
+    headers: options?.forceRefresh
+      ? {
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache",
+        }
+      : undefined,
+  })
     .then((res) => parseJson<BarsResponse>(res))
     .then((data) => {
       barsCache.set(cacheKey, {
@@ -336,6 +353,8 @@ export async function runIfvgHtfScanner(params: ScannerRefreshParams = {}): Prom
     min_price: 0.5,
     max_price: 20,
     min_volume: 250000,
+    timeframes: "15m",
+    trigger_timeframe: "5m",
     ...params,
   });
 }
@@ -618,18 +637,24 @@ export async function fetchAlpacaOrders(
 }
 
 export async function placeAlpacaOrder(payload: PlaceAlpacaOrderRequest) {
+  const cleanPayload = {
+    ...payload,
+    symbol: payload.symbol.toUpperCase(),
+    time_in_force: payload.time_in_force ?? "day",
+    mode: payload.mode ?? "paper",
+    extended_hours: payload.extended_hours ?? false,
+  };
+
+  console.log("[api] placing Alpaca order", cleanPayload);
+
   const res = await fetch(`${API_BASE}/alpaca/order`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
     },
-    body: JSON.stringify({
-      ...payload,
-      symbol: payload.symbol.toUpperCase(),
-      time_in_force: payload.time_in_force ?? "day",
-      mode: payload.mode ?? "paper",
-      extended_hours: payload.extended_hours ?? false,
-    }),
+    cache: "no-store",
+    body: JSON.stringify(cleanPayload),
   });
 
   return parseJson(res);

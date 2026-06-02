@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 async def bars(
     symbol: str = Query(..., min_length=1, max_length=10),
     timeframe: str = Query("1m"),
-    session: str = Query("regular"),
+    session: str = Query("extended"),
 ):
     """
     Chart bars endpoint.
