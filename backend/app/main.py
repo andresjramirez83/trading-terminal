@@ -1405,6 +1405,7 @@ def polygon_multiplier_and_timespan(timeframe: str) -> tuple[int, str]:
         "15m": (15, "minute"),
         "30m": (30, "minute"),
         "1h": (1, "hour"),
+	"4h": (4, "hour"),
         "day": (1, "day"),
         "1d": (1, "day"),
     }
@@ -3468,6 +3469,7 @@ def get_last_trade(symbol: str = Query(..., min_length=1)):
 
 
 @app.websocket("/ws/market")
+@app.websocket("/ws/chart-bars")
 async def market_ws(websocket: WebSocket, symbol: str = Query(..., min_length=1)):
     await websocket.accept()
     print(f"[market_ws] accepted for {symbol}", flush=True)
@@ -3503,82 +3505,6 @@ async def market_ws(websocket: WebSocket, symbol: str = Query(..., min_length=1)
             await polygon_ws_manager.unsubscribe_client(websocket)
         except Exception:
             pass
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-
-
-@app.websocket("/ws/chart-bars")
-async def chart_bars_ws(
-    websocket: WebSocket,
-    symbol: str = Query(..., min_length=1),
-    timeframe: str = Query("5m"),
-):
-    await websocket.accept()
-
-    clean_symbol = symbol.upper().strip()
-    clean_timeframe = timeframe.lower().strip()
-
-    print(f"[chart_bars_ws] accepted {clean_symbol} {clean_timeframe}", flush=True)
-
-    last_sent_time = None
-    last_sent_payload = None
-
-    try:
-        while True:
-            bars, used_day = await fetch_chart_bars_async(
-                clean_symbol,
-                clean_timeframe,
-                lookback="1d",
-                limit_bars=5,
-                session="extended",
-            )
-
-            if bars:
-                last = bars[-1]
-
-                payload = {
-                    "type": "bar",
-                    "symbol": clean_symbol,
-                    "timeframe": clean_timeframe,
-                    "bar": {
-                        "time": int(last.time),
-                        "open": float(last.open),
-                        "high": float(last.high),
-                        "low": float(last.low),
-                        "close": float(last.close),
-                        "volume": float(last.volume),
-                    },
-                    "trading_date": used_day.strftime("%Y-%m-%d"),
-                }
-
-                payload_key = json.dumps(payload["bar"], sort_keys=True)
-
-                if last_sent_time != last.time or last_sent_payload != payload_key:
-                    await websocket.send_text(json.dumps(payload))
-                    last_sent_time = last.time
-                    last_sent_payload = payload_key
-
-            await asyncio.sleep(2)
-
-    except WebSocketDisconnect:
-        print(f"[chart_bars_ws] disconnected {clean_symbol} {clean_timeframe}", flush=True)
-    except Exception as exc:
-        print(f"[chart_bars_ws] error {clean_symbol} {clean_timeframe}: {exc}", flush=True)
-        traceback.print_exc()
-        try:
-            await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "error",
-                        "message": str(exc),
-                    }
-                )
-            )
-        except Exception:
-            pass
-    finally:
         try:
             await websocket.close()
         except Exception:
