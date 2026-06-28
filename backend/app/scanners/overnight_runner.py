@@ -199,12 +199,23 @@ class OvernightRunnerScanner(ScannerBase):
 
         universe_map = await build_snapshot_universe(polygon, limit=max_symbols * 4)
         rows: List[Dict[str, Any]] = []
+        debug_counts = make_filter_debug_counts()
+        debug_counts["universe_count"] = len(universe_map)
+        debug_examples: List[Dict[str, Any]] = []
 
-        for symbol, snapshot in list(universe_map.items())[: max_symbols * 6]:
+        scan_items = list(universe_map.items())[: max_symbols * 6]
+        debug_counts["scanned"] = len(scan_items)
+
+        for symbol, snapshot in scan_items:
             row = await self._build_premarket_row(symbol, snapshot, polygon, hours_back=hours_back)
             if row is None:
+                debug_counts["row_none"] += 1
+                if len(debug_examples) < 15:
+                    debug_examples.append({"symbol": symbol, "reason": "row_none_no_bars_or_session"})
                 continue
-            if not row_passes_filters(
+
+            debug_counts["rows_built"] += 1
+            reject_reason = filter_reject_reason(
                 row,
                 min_price,
                 max_price,
@@ -218,9 +229,25 @@ class OvernightRunnerScanner(ScannerBase):
                 low_float_only,
                 min_short_interest_pct,
                 min_turnover_pct,
-            ):
+            )
+            if reject_reason is not None:
+                debug_counts[reject_reason] = debug_counts.get(reject_reason, 0) + 1
+                if len(debug_examples) < 15:
+                    debug_examples.append(build_reject_example(symbol, reject_reason, row))
                 continue
+
+            debug_counts["passed"] += 1
             rows.append(row)
+
+        print(
+            "[overnight-runner/live] "
+            f"universe={debug_counts['universe_count']} "
+            f"scanned={debug_counts['scanned']} "
+            f"built={debug_counts['rows_built']} "
+            f"passed={debug_counts['passed']} "
+            f"row_none={debug_counts['row_none']}",
+            flush=True,
+        )
 
         rows.sort(
             key=lambda item: (
@@ -246,6 +273,10 @@ class OvernightRunnerScanner(ScannerBase):
                 "latest_saved_ah_date": latest_saved[0] if latest_saved else None,
                 "snapshot_dates": latest_saved,
                 "runner_type_counts": summarize_runner_types(rows),
+                "debug": {
+                    "counts": debug_counts,
+                    "reject_examples": debug_examples,
+                },
                 "active_filters": build_active_filters(
                     min_price=min_price,
                     max_price=max_price,
@@ -313,12 +344,26 @@ class OvernightRunnerScanner(ScannerBase):
         )
 
         rows: List[Dict[str, Any]] = []
-        for symbol in candidate_symbols[: max_symbols * 8]:
+        debug_counts = make_filter_debug_counts()
+        debug_counts["saved_ah_count"] = len(saved_map)
+        debug_counts["live_universe_count"] = len(live_universe)
+        debug_counts["candidate_count"] = len(candidate_symbols)
+        debug_examples: List[Dict[str, Any]] = []
+
+        scan_symbols = candidate_symbols[: max_symbols * 8]
+        debug_counts["scanned"] = len(scan_symbols)
+
+        for symbol in scan_symbols:
             snapshot = live_universe.get(symbol, {})
             row = await self._build_combined_row(symbol, snapshot, polygon, saved_map.get(symbol), hours_back=hours_back)
             if row is None:
+                debug_counts["row_none"] += 1
+                if len(debug_examples) < 15:
+                    debug_examples.append({"symbol": symbol, "reason": "row_none_no_bars_or_session"})
                 continue
-            if not row_passes_filters(
+
+            debug_counts["rows_built"] += 1
+            reject_reason = filter_reject_reason(
                 row,
                 min_price,
                 max_price,
@@ -332,9 +377,27 @@ class OvernightRunnerScanner(ScannerBase):
                 low_float_only,
                 min_short_interest_pct,
                 min_turnover_pct,
-            ):
+            )
+            if reject_reason is not None:
+                debug_counts[reject_reason] = debug_counts.get(reject_reason, 0) + 1
+                if len(debug_examples) < 15:
+                    debug_examples.append(build_reject_example(symbol, reject_reason, row))
                 continue
+
+            debug_counts["passed"] += 1
             rows.append(row)
+
+        print(
+            "[overnight-runner/combined] "
+            f"saved_ah={debug_counts['saved_ah_count']} "
+            f"live_universe={debug_counts['live_universe_count']} "
+            f"candidates={debug_counts['candidate_count']} "
+            f"scanned={debug_counts['scanned']} "
+            f"built={debug_counts['rows_built']} "
+            f"passed={debug_counts['passed']} "
+            f"row_none={debug_counts['row_none']}",
+            flush=True,
+        )
 
         rows.sort(
             key=lambda item: (
@@ -362,6 +425,10 @@ class OvernightRunnerScanner(ScannerBase):
                 "snapshot_dates": snapshot_dates,
                 "candidate_count": len(candidate_symbols),
                 "runner_type_counts": summarize_runner_types(rows),
+                "debug": {
+                    "counts": debug_counts,
+                    "reject_examples": debug_examples,
+                },
                 "active_filters": build_active_filters(
                     min_price=min_price,
                     max_price=max_price,
@@ -1272,6 +1339,105 @@ def calc_final_runner_score(
         )
 
     return min(100.0, score)
+
+
+def make_filter_debug_counts() -> Dict[str, int]:
+    return {
+        "universe_count": 0,
+        "saved_ah_count": 0,
+        "live_universe_count": 0,
+        "candidate_count": 0,
+        "scanned": 0,
+        "row_none": 0,
+        "rows_built": 0,
+        "price": 0,
+        "volume": 0,
+        "gap": 0,
+        "range": 0,
+        "dollar_volume": 0,
+        "compression": 0,
+        "breakout": 0,
+        "low_float": 0,
+        "max_float": 0,
+        "short_interest": 0,
+        "turnover": 0,
+        "passed": 0,
+    }
+
+
+def filter_reject_reason(
+    row: Dict[str, Any],
+    min_price: float,
+    max_price: float,
+    min_volume: int,
+    min_gap_pct: float,
+    min_pm_range_pct: float,
+    min_pm_dollar_volume: float,
+    min_compression_score: float = 0.0,
+    min_breakout_score: float = 0.0,
+    max_float_shares: Optional[float] = None,
+    low_float_only: bool = False,
+    min_short_interest_pct: float = 0.0,
+    min_turnover_pct: float = 0.0,
+) -> Optional[str]:
+    last_price = safe_float(row.get("last_price"))
+    pm_volume = int(safe_float(row.get("pm_volume")))
+    gap_pct = safe_float(row.get("pm_gap_pct") if row.get("pm_gap_pct") is not None else row.get("gap_pct"))
+    pm_range_pct = safe_float(row.get("pm_range_pct"))
+    pm_dollar_volume = safe_float(row.get("pm_dollar_volume"))
+    compression_score = safe_float(row.get("compression_score"))
+    breakout_score = safe_float(row.get("breakout_score"))
+    float_shares_raw = row.get("float_shares")
+    float_shares = safe_float(float_shares_raw) if float_shares_raw is not None else None
+    short_interest_pct = row.get("short_interest_pct")
+    short_interest_pct = safe_float(short_interest_pct) if short_interest_pct is not None else None
+    turnover_pct = safe_float(row.get("turnover_pct"))
+    ah_score = safe_float(row.get("ah_score"))
+    has_saved_ah = bool(row.get("has_saved_ah"))
+
+    if last_price < min_price or last_price > max_price:
+        return "price"
+    if pm_volume < min_volume:
+        return "volume"
+
+    gap_ok = gap_pct >= min_gap_pct
+    combined_ah_override = has_saved_ah and ah_score >= max(50.0, min_breakout_score)
+    if not gap_ok and not combined_ah_override:
+        return "gap"
+
+    if pm_range_pct < min_pm_range_pct and not combined_ah_override:
+        return "range"
+    if pm_dollar_volume < min_pm_dollar_volume and not combined_ah_override:
+        return "dollar_volume"
+    if compression_score < min_compression_score:
+        return "compression"
+    if breakout_score < min_breakout_score and not combined_ah_override:
+        return "breakout"
+    if low_float_only and (float_shares is None or float_shares > 50_000_000):
+        return "low_float"
+    if max_float_shares is not None and (float_shares is None or float_shares > max_float_shares):
+        return "max_float"
+    if min_short_interest_pct > 0 and (short_interest_pct is None or short_interest_pct < min_short_interest_pct):
+        return "short_interest"
+    if min_turnover_pct > 0 and turnover_pct < min_turnover_pct:
+        return "turnover"
+    return None
+
+
+def build_reject_example(symbol: str, reason: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "reason": reason,
+        "last_price": round(safe_float(row.get("last_price")), 4),
+        "pm_volume": int(safe_float(row.get("pm_volume"))),
+        "gap_pct": round(safe_float(row.get("pm_gap_pct") if row.get("pm_gap_pct") is not None else row.get("gap_pct")), 2),
+        "pm_range_pct": round(safe_float(row.get("pm_range_pct")), 2),
+        "pm_dollar_volume": round(safe_float(row.get("pm_dollar_volume")), 2),
+        "compression_score": round(safe_float(row.get("compression_score")), 2),
+        "breakout_score": round(safe_float(row.get("breakout_score")), 2),
+        "runner_score": round(safe_float(row.get("runner_score")), 2),
+        "source": row.get("source"),
+    }
 
 
 def row_passes_filters(
