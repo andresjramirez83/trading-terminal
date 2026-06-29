@@ -262,6 +262,45 @@ class OvernightRunnerScanner(ScannerBase):
         rows = rows[:max_symbols]
 
         latest_saved = snapshot_store.list_snapshot_dates(self.id, "ah")
+
+        if should_use_saved_ah_fallback(rows, debug_counts):
+            latest_snapshot = snapshot_store.load_latest_snapshot(self.id, "ah")
+            fallback_result = build_saved_ah_fallback_result(
+                scanner_id=self.id,
+                scanner_name=self.name,
+                description=self.description,
+                snapshot=latest_snapshot,
+                max_symbols=max_symbols,
+                fallback_from="live",
+                fallback_reason="No live bars/session rows were available for any scanned symbol",
+                debug_counts=debug_counts,
+                debug_examples=debug_examples,
+                snapshot_dates=latest_saved,
+                active_filters=build_active_filters(
+                    min_price=min_price,
+                    max_price=max_price,
+                    min_volume=min_volume,
+                    min_gap_pct=min_gap_pct,
+                    min_pm_range_pct=min_pm_range_pct,
+                    min_pm_dollar_volume=min_pm_dollar_volume,
+                    min_compression_score=min_compression_score,
+                    min_breakout_score=min_breakout_score,
+                    max_float_shares=max_float_shares,
+                    low_float_only=low_float_only,
+                    min_short_interest_pct=min_short_interest_pct,
+                    min_turnover_pct=min_turnover_pct,
+                    hours_back=hours_back,
+                ),
+            )
+            if fallback_result is not None:
+                print(
+                    "[overnight-runner/live] closed-market fallback -> saved AH snapshot "
+                    f"date={fallback_result.get('meta', {}).get('ah_trade_date')} "
+                    f"count={fallback_result.get('count')}",
+                    flush=True,
+                )
+                return fallback_result
+
         return {
             "scanner_id": self.id,
             "scanner_name": self.name,
@@ -413,6 +452,44 @@ class OvernightRunnerScanner(ScannerBase):
         rows = rows[:max_symbols]
 
         snapshot_dates = snapshot_store.list_snapshot_dates(self.id, "ah")
+
+        if should_use_saved_ah_fallback(rows, debug_counts):
+            fallback_result = build_saved_ah_fallback_result(
+                scanner_id=self.id,
+                scanner_name=self.name,
+                description=self.description,
+                snapshot=ah_snapshot,
+                max_symbols=max_symbols,
+                fallback_from="combined",
+                fallback_reason="Saved AH symbols existed, but no live/regular/recent bars were available",
+                debug_counts=debug_counts,
+                debug_examples=debug_examples,
+                snapshot_dates=snapshot_dates,
+                active_filters=build_active_filters(
+                    min_price=min_price,
+                    max_price=max_price,
+                    min_volume=min_volume,
+                    min_gap_pct=min_gap_pct,
+                    min_pm_range_pct=min_pm_range_pct,
+                    min_pm_dollar_volume=min_pm_dollar_volume,
+                    min_compression_score=min_compression_score,
+                    min_breakout_score=min_breakout_score,
+                    max_float_shares=max_float_shares,
+                    low_float_only=low_float_only,
+                    min_short_interest_pct=min_short_interest_pct,
+                    min_turnover_pct=min_turnover_pct,
+                    hours_back=hours_back,
+                ),
+            )
+            if fallback_result is not None:
+                print(
+                    "[overnight-runner/combined] closed-market fallback -> saved AH snapshot "
+                    f"date={fallback_result.get('meta', {}).get('ah_trade_date')} "
+                    f"count={fallback_result.get('count')}",
+                    flush=True,
+                )
+                return fallback_result
+
         return {
             "scanner_id": self.id,
             "scanner_name": self.name,
@@ -843,6 +920,166 @@ class OvernightRunnerScanner(ScannerBase):
                 "ah_session_date": (saved_ah_row or {}).get("session_date"),
             },
         }
+
+
+def should_use_saved_ah_fallback(rows: List[Dict[str, Any]], debug_counts: Dict[str, int]) -> bool:
+    scanned = int(debug_counts.get("scanned", 0))
+    row_none = int(debug_counts.get("row_none", 0))
+    rows_built = int(debug_counts.get("rows_built", 0))
+    return not rows and scanned > 0 and rows_built == 0 and row_none >= scanned
+
+
+def build_saved_ah_fallback_result(
+    *,
+    scanner_id: str,
+    scanner_name: str,
+    description: str,
+    snapshot: Optional[Dict[str, Any]],
+    max_symbols: int,
+    fallback_from: str,
+    fallback_reason: str,
+    debug_counts: Dict[str, int],
+    debug_examples: List[Dict[str, Any]],
+    snapshot_dates: List[str],
+    active_filters: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not snapshot:
+        return None
+
+    saved_rows = snapshot.get("rows") or []
+    fallback_rows = [
+        convert_saved_ah_row_to_scanner_row(item)
+        for item in saved_rows
+        if isinstance(item, dict) and item.get("symbol")
+    ]
+    fallback_rows.sort(
+        key=lambda item: (
+            safe_float(item.get("runner_score")),
+            safe_float(item.get("ah_score")),
+            safe_float(item.get("ah_dollar_volume")),
+            safe_float(item.get("ah_volume")),
+        ),
+        reverse=True,
+    )
+    fallback_rows = fallback_rows[:max_symbols]
+    if not fallback_rows:
+        return None
+
+    return {
+        "scanner_id": scanner_id,
+        "scanner_name": scanner_name,
+        "description": description,
+        "workflow": "saved_ah_fallback",
+        "trade_day": datetime.now(ET).strftime("%Y-%m-%d"),
+        "count": len(fallback_rows),
+        "rows": fallback_rows,
+        "meta": {
+            "fallback": True,
+            "fallback_from": fallback_from,
+            "fallback_reason": fallback_reason,
+            "ah_trade_date": snapshot.get("trade_date"),
+            "latest_saved_ah_date": snapshot.get("trade_date") or (snapshot_dates[0] if snapshot_dates else None),
+            "snapshot_dates": snapshot_dates,
+            "source_snapshot_saved_at": snapshot.get("saved_at"),
+            "source_snapshot_count": len(saved_rows),
+            "runner_type_counts": summarize_runner_types(fallback_rows),
+            "debug": {
+                "counts": debug_counts,
+                "reject_examples": debug_examples,
+            },
+            "active_filters": active_filters,
+        },
+    }
+
+
+def convert_saved_ah_row_to_scanner_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    symbol = str(row.get("symbol", "")).upper().strip()
+    last_price = safe_float(row.get("last_price"))
+    prev_close = safe_float(row.get("prev_close"))
+    ah_gap_pct = safe_float(row.get("ah_gap_pct"))
+    ah_range_pct = safe_float(row.get("ah_range_pct"))
+    ah_volume = int(safe_float(row.get("ah_volume")))
+    ah_dollar_volume = safe_float(row.get("ah_dollar_volume"))
+    ah_score = safe_float(row.get("ah_score"))
+    compression_score = safe_float(row.get("compression_score"))
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    ah_high = safe_float(extra.get("ah_high"))
+    ah_low = safe_float(extra.get("ah_low"))
+    ah_last_close = safe_float(extra.get("ah_last_close")) or last_price
+
+    breakout_score = calc_breakout_score(ah_high, ah_last_close, 0.0) if ah_high > 0 else compression_score
+    pm_runner_score = calc_runner_score(
+        gap_pct=ah_gap_pct,
+        pm_range_pct=ah_range_pct,
+        pm_volume=ah_volume,
+        compression_score=compression_score,
+        breakout_score=breakout_score,
+        float_shares=None,
+        pm_dollar_volume=ah_dollar_volume,
+        volume_accel_pct=0.0,
+        short_interest_pct=None,
+        turnover_pct=0.0,
+        squeeze_rank=0.0,
+    )
+    runner_score = calc_final_runner_score(
+        runner_type="overnight",
+        ah_score=ah_score,
+        pm_runner_score=pm_runner_score,
+        breakout_score=breakout_score,
+        compression_score=compression_score,
+        pm_range_pct=ah_range_pct,
+        volume_accel_pct=0.0,
+        pm_dollar_volume=ah_dollar_volume,
+        has_saved_ah=True,
+        squeeze_rank=0.0,
+    )
+
+    notes = list(row.get("notes") or [])
+    if "Saved AH fallback" not in notes:
+        notes.insert(0, "Saved AH fallback")
+
+    return {
+        "symbol": symbol,
+        "last_price": round(last_price, 4),
+        "prev_close": round(prev_close, 4),
+        "ah_gap_pct": round(ah_gap_pct, 2),
+        "ah_range_pct": round(ah_range_pct, 2),
+        "ah_volume": ah_volume,
+        "ah_dollar_volume": round(ah_dollar_volume, 2),
+        "ah_score": round(ah_score, 2),
+        "pm_gap_pct": round(ah_gap_pct, 2),
+        "gap_pct": round(ah_gap_pct, 2),
+        "pm_volume": ah_volume,
+        "pm_dollar_volume": round(ah_dollar_volume, 2),
+        "pm_range_pct": round(ah_range_pct, 2),
+        "compression_score": round(compression_score, 2),
+        "breakout_score": round(breakout_score, 2),
+        "volume_accel_pct": 0.0,
+        "runner_type": "overnight",
+        "runner_score": round(runner_score, 2),
+        "pm_runner_score": round(pm_runner_score, 2),
+        "float_shares": None,
+        "shares_outstanding": None,
+        "short_interest_pct": None,
+        "short_interest_rank": 0.0,
+        "turnover_pct": 0.0,
+        "turnover_rank": 0.0,
+        "squeeze_rank": 0.0,
+        "has_saved_ah": True,
+        "notes": notes,
+        "source": "overnight_runner_saved_ah_fallback",
+        "extra": {
+            "session_source": "saved_afterhours_snapshot",
+            "pm_high": round(ah_high, 4),
+            "pm_low": round(ah_low, 4),
+            "pm_last_close": round(ah_last_close, 4),
+            "pm_session_date": row.get("session_date"),
+            "ah_session_date": row.get("session_date"),
+            "ah_high": round(ah_high, 4),
+            "ah_low": round(ah_low, 4),
+            "ah_last_close": round(ah_last_close, 4),
+        },
+    }
 
 
 async def build_snapshot_universe(polygon: PolygonService, limit: int = 160) -> "OrderedDict[str, Dict[str, Any]]":
