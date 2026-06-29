@@ -1,10 +1,17 @@
-// src/components/NewChart/ChartToolbarV2.tsx
+// src/components/ChartPanelV2/ChartToolbarV2.tsx
+
+import type { CrosshairInfo, StudyVisibility } from "../../chart/ChartTypes";
+import CrosshairInfoBox from "./CrosshairInfoBox";
+import ChartStudyToggles from "./ChartStudyToggles";
 
 type Props = {
   symbol: string;
   timeframe: string;
+  crosshairInfo: CrosshairInfo | null;
+  studyVisibility: StudyVisibility;
   onSymbolChange: (symbol: string) => void;
   onTimeframeChange: (timeframe: string) => void;
+  onStudyVisibilityChange: (visibility: StudyVisibility) => void;
 };
 
 const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
@@ -12,8 +19,11 @@ const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 export default function ChartToolbarV2({
   symbol,
   timeframe,
+  crosshairInfo,
+  studyVisibility,
   onSymbolChange,
   onTimeframeChange,
+  onStudyVisibilityChange,
 }: Props) {
   return (
     <div
@@ -26,7 +36,9 @@ export default function ChartToolbarV2({
         background: "#181b1f",
         borderBottom: "1px solid rgba(255,255,255,.08)",
         color: "#e5e7eb",
+        flexShrink: 0,
         zIndex: 30,
+        overflow: "visible",
       }}
     >
       <input
@@ -41,6 +53,7 @@ export default function ChartToolbarV2({
           borderRadius: 6,
           padding: "0 8px",
           fontWeight: 700,
+          flexShrink: 0,
         }}
       />
 
@@ -57,11 +70,19 @@ export default function ChartToolbarV2({
             color: "white",
             cursor: "pointer",
             fontWeight: 700,
+            flexShrink: 0,
           }}
         >
           {tf.toUpperCase()}
         </button>
       ))}
+
+      <CrosshairInfoBox info={crosshairInfo} />
+
+      <ChartStudyToggles
+        visibility={studyVisibility}
+        onChange={onStudyVisibilityChange}
+      />
     </div>
   );
 }

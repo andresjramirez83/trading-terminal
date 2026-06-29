@@ -159,6 +159,15 @@ function loadSharedStudyVisibility(): OverlayVisibility {
   }
 }
 
+function hasLocalSharedStudyVisibility(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(SHARED_STUDY_VISIBILITY_STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
 function saveSharedStudyVisibility(nextVisibility: OverlayVisibility) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(SHARED_STUDY_VISIBILITY_STORAGE_KEY, JSON.stringify(nextVisibility));
@@ -173,7 +182,7 @@ const EMERGENCY_FALLBACK_SYMBOL = "";
 
 const MANUAL_WATCHLIST_STORAGE_KEY = "alpacaManualWatchlist";
 const SHARED_SCANNER_WATCHLIST_STORAGE_KEY = "watchlist";
-const SHARED_ACTIVE_SYMBOL_STORAGE_KEY = "activeSymbol";
+const TERMINAL_ACTIVE_SYMBOL_STORAGE_KEY = "terminalActiveSymbol";
 const ACTIVE_TERMINAL_TIMEFRAME_STORAGE_KEY = "terminalActiveTimeframe";
 
 type TerminalTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "1d";
@@ -217,9 +226,9 @@ function loadSharedScannerWatchlist(): string[] {
   return [];
 }
 
-function loadSharedActiveSymbol(fallback: string): string {
+function loadTerminalActiveSymbol(fallback: string): string {
   if (typeof window === "undefined") return fallback;
-  const saved = normalizeSingleSymbol(window.localStorage.getItem(SHARED_ACTIVE_SYMBOL_STORAGE_KEY) || "");
+  const saved = normalizeSingleSymbol(window.localStorage.getItem(TERMINAL_ACTIVE_SYMBOL_STORAGE_KEY) || "");
   return saved || fallback;
 }
 
@@ -230,10 +239,11 @@ function saveSharedScannerWatchlist(nextWatchlist: string[]) {
   window.dispatchEvent(new CustomEvent<string[]>("scanner-watchlist-change", { detail: uniqueSymbols(nextWatchlist) }));
 }
 
-function saveSharedActiveSymbol(nextSymbol: string) {
+function saveTerminalActiveSymbol(nextSymbol: string) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(SHARED_ACTIVE_SYMBOL_STORAGE_KEY, nextSymbol);
-  window.dispatchEvent(new CustomEvent<string>("scanner-active-symbol-change", { detail: nextSymbol }));
+  const cleaned = normalizeSingleSymbol(nextSymbol);
+  if (!cleaned) return;
+  window.localStorage.setItem(TERMINAL_ACTIVE_SYMBOL_STORAGE_KEY, cleaned);
 }
 
 function loadManualWatchlist(): string[] {
@@ -325,7 +335,10 @@ export default function TerminalPage() {
   const navigate = useNavigate();
 
   const initialScannerWatchlist = useMemo(() => loadSharedScannerWatchlist(), []);
-  const initialSymbol = useMemo(() => loadSharedActiveSymbol(EMERGENCY_FALLBACK_SYMBOL), []);
+  const initialSymbol = useMemo(
+    () => loadTerminalActiveSymbol(EMERGENCY_FALLBACK_SYMBOL),
+    []
+  );
 
   const [symbol, setSymbol] = useState(initialSymbol);
   const [scannerSelectedSymbol, setScannerSelectedSymbol] = useState(initialSymbol);
@@ -376,6 +389,12 @@ export default function TerminalPage() {
   const [, forceOrderLockRender] = useState(0);
   const symbolUpper = useMemo(() => normalizeSingleSymbol(symbol), [symbol]);
 
+
+  useEffect(() => {
+    saveTerminalActiveSymbol(symbolUpper);
+  }, [symbolUpper]);
+
+
   useEffect(() => {
     let cancelled = false;
 
@@ -388,7 +407,7 @@ export default function TerminalPage() {
         if (nextSymbol) {
           setSymbol(nextSymbol);
           setScannerSelectedSymbol(nextSymbol);
-          saveSharedActiveSymbol(nextSymbol);
+          saveTerminalActiveSymbol(nextSymbol);
         }
 
         const nextTimeframe = normalizeTerminalTimeframe(remote.timeframe || remote.activeChart || null);
@@ -399,7 +418,9 @@ export default function TerminalPage() {
           setManualWatchlist(uniqueSymbols(remote.manualWatchlist));
         }
 
-        if (remote.studyVisibility && typeof remote.studyVisibility === "object") {
+        // Local study settings are the user's latest chart preference in this browser.
+        // Do not let an older shared/backend snapshot reset the dropdown back to all studies ON.
+        if (!hasLocalSharedStudyVisibility() && remote.studyVisibility && typeof remote.studyVisibility === "object") {
           const nextVisibility = normalizeOverlayVisibility(remote.studyVisibility as Partial<OverlayVisibility>);
           setVisibility(nextVisibility);
           saveSharedStudyVisibility(nextVisibility);
@@ -506,29 +527,10 @@ export default function TerminalPage() {
       if (Array.isArray(nextWatchlist)) applySharedWatchlist(nextWatchlist);
     };
 
-    const handleScannerActiveSymbolEvent = (event: Event) => {
-      const next = normalizeSingleSymbol((event as CustomEvent<string>).detail || "");
-      if (!next) return;
-      setSymbol(next);
-    };
-
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === SHARED_ACTIVE_SYMBOL_STORAGE_KEY && event.newValue) {
-        const next = normalizeSingleSymbol(event.newValue);
-        if (next) {
-          setSymbol(next);
-        }
-      }
-    };
-
     window.addEventListener("scanner-watchlist-change", handleScannerWatchlistEvent);
-    window.addEventListener("scanner-active-symbol-change", handleScannerActiveSymbolEvent);
-    window.addEventListener("storage", handleStorage);
 
     return () => {
       window.removeEventListener("scanner-watchlist-change", handleScannerWatchlistEvent);
-      window.removeEventListener("scanner-active-symbol-change", handleScannerActiveSymbolEvent);
-      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 
@@ -555,6 +557,18 @@ export default function TerminalPage() {
       return nextVisibility;
     });
   };
+
+  const handleChartVisibilityChange = useCallback((nextVisibility: Partial<OverlayVisibility>) => {
+    setPreset("runner");
+    setVisibility((prev) => {
+      const mergedVisibility = normalizeOverlayVisibility({
+        ...prev,
+        ...nextVisibility,
+      });
+      saveSharedStudyVisibility(mergedVisibility);
+      return mergedVisibility;
+    });
+  }, []);
 
   const visibleStudiesCount = useMemo(
     () => STUDY_OPTIONS.filter((study) => visibility[study.key]).length,
@@ -617,7 +631,7 @@ export default function TerminalPage() {
     // highlighting without forcing the chart/header/shared active symbol to update.
     setScannerSelectedSymbol(next);
     setSymbol(next);
-    saveSharedActiveSymbol(next);
+    saveTerminalActiveSymbol(next);
 
     const requested = String(requestedTimeframe || "").toLowerCase().trim();
     if (requested === "15m" || requested === "30m") {
@@ -677,13 +691,11 @@ export default function TerminalPage() {
   }, [handleAddSymbolToWatchlist, manualWatchlistInput, symbolUpper]);
 
   const openQuickOrderTemplate = useCallback((template: OrderTemplate) => {
-    localStorage.setItem("activeSymbol", symbolUpper);
     setQuickOrderTemplate(template);
     setQuickOrderOpen(true);
   }, [symbolUpper]);
 
   const openQuickAlert = useCallback(() => {
-    localStorage.setItem("activeSymbol", symbolUpper);
     setQuickAlertOpen(true);
   }, [symbolUpper]);
 
@@ -1798,6 +1810,7 @@ export default function TerminalPage() {
                 setTrendlineAction({ type: "none" })
               }
               onTrendlineStateChange={setTrendlineUiState}
+              onVisibilityChange={handleChartVisibilityChange}
               onRequestAddSymbolToWatchlist={handleAddSymbolToWatchlist}
               showInChartWatchlistAdder={false}
               openOrders={ordersForChart}

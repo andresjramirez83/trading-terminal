@@ -100,6 +100,7 @@ type Props = {
   enableLiveStream?: boolean;
   legendDensity?: "full" | "compact" | "minimal";
   compactTools?: boolean;
+  onVisibilityChange?: (nextVisibility: Partial<OverlayVisibility>) => void;
 
   // Optional order-line layer. Parent pages can pass Alpaca/open order objects here.
   // Supports straight buy/sell limit lines, bracket entry lines, take-profit lines, and stop-loss lines.
@@ -211,6 +212,33 @@ type RectOverlay = {
   height: number;
   label: string;
   direction: CompressionDirection;
+};
+
+type ManualDemandZone = {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  candleTime: UTCTimestamp;
+  topPrice: number;
+  bottomPrice: number;
+  candleHigh: number;
+  candleLow: number;
+  candleOpen: number;
+  candleClose: number;
+  createdAt: number;
+};
+
+type ManualDemandZoneOverlay = {
+  id: string;
+  left: number;
+  width: number;
+  top: number;
+  height: number;
+  labelLeft: number;
+  labelTop: number;
+  label: string;
+  topPrice: number;
+  bottomPrice: number;
 };
 
 type FvgFlipStatus = "bearish" | "testing" | "confirmed_bull_ifvg" | "failed_bull_ifvg";
@@ -427,6 +455,26 @@ type HoveredCandleState = {
 };
 
 
+type CandleStructureReport = {
+  time: UTCTimestamp;
+  candleHigh: number;
+  candleLow: number;
+  tookOutHigh: number | null;
+  tookOutHighTime: UTCTimestamp | null;
+  previousSupport: number | null;
+  previousSupportTime: UTCTimestamp | null;
+  consolidationResistance: number | null;
+  consolidationSupport: number | null;
+  consolidationStartTime: UTCTimestamp | null;
+  consolidationEndTime: UTCTimestamp | null;
+  srFlipRetestLine: number | null;
+  srFlipSupportTouch: number | null;
+  srFlipResistanceTouch: number | null;
+  srFlipSupportTime: UTCTimestamp | null;
+  srFlipResistanceTime: UTCTimestamp | null;
+};
+
+
 function toHoveredCandleState(bar: Candle | null): HoveredCandleState | null {
   if (!bar) return null;
 
@@ -560,6 +608,45 @@ type StoredProjectionPriceLine = {
 const PROJECTION_STORAGE_VERSION = 1;
 const LOCAL_PROJECTION_STORAGE_KEY = "trading_terminal_saved_projections_v1";
 const PROJECTION_SYNC_API_BASE = API_BASE || API_BASE_URL;
+const MANUAL_DEMAND_ZONE_STORAGE_KEY = "trading-terminal.chart.manualDemandZones.v1";
+
+// Chart speed controls. Keep Lightweight Charts doing the drawing and keep
+// React out of high-frequency mouse/tick loops as much as possible.
+const FAST_CROSSHAIR_HOVER_THROTTLE_MS = 140;
+const FAST_VISIBLE_RANGE_OVERLAY_THROTTLE_MS = 80;
+const FAST_LEGEND_ONLY_THROTTLE_MS = 500;
+const FAST_LIVE_RENDER_1M_MS = 2500;
+const FAST_LIVE_RENDER_OTHER_MS = 900;
+
+function readStoredManualDemandZones(): ManualDemandZone[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(MANUAL_DEMAND_ZONE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((zone): zone is ManualDemandZone =>
+      zone &&
+      typeof zone.id === "string" &&
+      typeof zone.symbol === "string" &&
+      typeof zone.timeframe === "string" &&
+      Number.isFinite(Number(zone.candleTime)) &&
+      Number.isFinite(Number(zone.topPrice)) &&
+      Number.isFinite(Number(zone.bottomPrice))
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredManualDemandZones(zones: ManualDemandZone[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MANUAL_DEMAND_ZONE_STORAGE_KEY, JSON.stringify(zones.slice(-150)));
+  } catch {
+    // Keep chart usable if localStorage fails.
+  }
+}
 
 type LineVisibilityState = {
   pmh: boolean;
@@ -687,7 +774,8 @@ type ChartFunctionId =
   | "support_prediction_wick_range"
   | "resistance_prediction_wick_range"
   | "vwap_zscore_projection"
-  | "vwap_zscore_fixed_projection";
+  | "vwap_zscore_fixed_projection"
+  | "manual_demand_zone";
 
 type ChartFunctionCategory = "projection" | "structure" | "volatility" | "orderflow";
 
@@ -969,6 +1057,12 @@ function calcVWAPStdDev(bars: Candle[], vwapValues: number[]): number[] {
 function isSwingHigh(bars: Candle[], index: number): boolean {
   if (index <= 0 || index >= bars.length - 1) return false;
   return bars[index].high >= bars[index - 1].high && bars[index].high >= bars[index + 1].high;
+}
+
+
+function isSwingLow(bars: Candle[], index: number): boolean {
+  if (index <= 0 || index >= bars.length - 1) return false;
+  return bars[index].low <= bars[index - 1].low && bars[index].low <= bars[index + 1].low;
 }
 
 function trueRange(current: Candle, previous?: Candle): number {
@@ -2051,19 +2145,23 @@ function computeSixSevenSweepLines(bars: Candle[]): SixSevenSweepLineStudy {
     const bar = bars[i];
     const parts = getEtBarParts(bar.time);
 
-    if (!state || state.date !== parts.date) {
-      if (activeSegment) {
-        (activeSegment as any).endIndex = Math.max(activeSegment.startIndex, i - 1);
-        segments.push(activeSegment);
-        activeSegment = null;
+      if (!state || state.date !== parts.date) {
+          if (activeSegment !== null) {
+              const segment = activeSegment as TradeSegment;
+
+              segment.endIndex = Math.max(segment.startIndex, i - 1);
+              segments.push(segment);
+
+              activeSegment = null;
+          }
+
+          state = {
+              date: parts.date,
+              low: null,
+              bodyTarget: null,
+              lowSwept: false,
+          };
       }
-      state = {
-        date: parts.date,
-        low: null,
-        bodyTarget: null,
-        lowSwept: false,
-      };
-    }
 
     const inRange = parts.hm >= RANGE_START_ET && parts.hm < RANGE_END_ET;
     const afterRange = parts.hm >= RANGE_END_ET;
@@ -2271,19 +2369,23 @@ function computeFiveAmSweepLines(bars: Candle[]): FiveAmSweepLineStudy {
     const bar = bars[i];
     const parts = getEtBarParts(bar.time);
 
-    if (!state || state.date !== parts.date) {
-      if (activeSegment) {
-        activeSegment.endIndex = Math.max(activeSegment.startIndex, i - 1);
-        segments.push(activeSegment);
-        activeSegment = null;
+      if (!state || state.date !== parts.date) {
+          if (activeSegment != null) {
+              const segment = activeSegment as unknown as TradeSegment;
+
+              segment.endIndex = Math.max(segment.startIndex, i - 1);
+              segments.push(segment);
+
+              activeSegment = null;
+          }
+
+          state = {
+              date: parts.date,
+              low: null,
+              bodyTarget: null,
+              lowSwept: false,
+          };
       }
-      state = {
-        date: parts.date,
-        low: null,
-        bodyTarget: null,
-        lowSwept: false,
-      };
-    }
 
     const inCandle = parts.hm >= CANDLE_START_ET && parts.hm < CANDLE_END_ET;
     const afterCandle = parts.hm >= CANDLE_END_ET;
@@ -2326,18 +2428,26 @@ function computeFiveAmSweepLines(bars: Candle[]): FiveAmSweepLineStudy {
     for (let j = i + 1; j < bars.length; j++) {
       const nextBar = bars[j];
       const nextParts = getEtBarParts(nextBar.time);
-      if (nextParts.date !== state.date) {
-        activeSegment.endIndex = Math.max(activeSegment.startIndex, j - 1);
-        segments.push(activeSegment);
-        activeSegment = null;
-        break;
-      }
-      activeSegment.endIndex = j;
-      if (nextBar.high >= state.bodyTarget) {
-        segments.push(activeSegment);
-        activeSegment = null;
-        break;
-      }
+        const segment = activeSegment;
+
+        if (segment === null) {
+            break;
+        }
+
+        if (nextParts.date !== state.date) {
+            segment.endIndex = Math.max(segment.startIndex, j - 1);
+            segments.push(segment);
+            activeSegment = null;
+            break;
+        }
+
+        segment.endIndex = j;
+
+        if (nextBar.high >= state.bodyTarget) {
+            segments.push(segment);
+            activeSegment = null;
+            break;
+        }
     }
 
     if (activeSegment) {
@@ -3960,6 +4070,228 @@ function findNearestBarIndexByTime(bars: Candle[], targetTime: UTCTimestamp): nu
   return bestIndex;
 }
 
+function buildCandleStructureReport(bars: Candle[], clickedTime: UTCTimestamp): CandleStructureReport | null {
+  const clickedIndex = findNearestBarIndexByTime(bars, clickedTime);
+  if (clickedIndex < 0 || !bars[clickedIndex]) return null;
+
+  const lookbackStart = Math.max(0, clickedIndex - 500);
+
+  const getHighestPriorCandleHighClosedAbove = (anchorIndex: number) => {
+    const anchor = bars[anchorIndex];
+    if (!anchor) return { index: -1, price: null as number | null };
+
+    const anchorClose = Number(anchor.close);
+    if (!Number.isFinite(anchorClose)) return { index: -1, price: null as number | null };
+
+    const start = Math.max(0, anchorIndex - 500);
+    let bestIndex = -1;
+    let bestPrice: number | null = null;
+
+    // LOCKED RULE: no swing-high logic here.
+    // Took high = the HIGHEST actual candle HIGH to the left
+    // where the selected candle CLOSED above that high.
+    // This uses selected.close only, never selected.high/wick.
+    for (let i = start; i < anchorIndex; i += 1) {
+      const candidateHigh = Number(bars[i].high);
+      if (!Number.isFinite(candidateHigh)) continue;
+      if (candidateHigh >= anchorClose) continue;
+
+      if (bestPrice == null || candidateHigh > bestPrice) {
+        bestPrice = candidateHigh;
+        bestIndex = i;
+      }
+    }
+
+    return { index: bestIndex, price: bestPrice };
+  };
+
+  // Use exactly the candle the user clicked. Do not auto-shift to another candle.
+  const anchorIndex = clickedIndex;
+
+  const selected = bars[anchorIndex];
+  const atr = averageTrueRangeBefore(bars, anchorIndex, 14);
+  const basePrice = Math.max(Number(selected.close) || 0, Number(selected.high) || 0, 1);
+  const tolerance = Math.max(0.06, basePrice * 0.0125, atr * 0.20);
+
+  const brokenHighResult = getHighestPriorCandleHighClosedAbove(anchorIndex);
+  const tookOutIndex = brokenHighResult.index;
+  const brokenResistance = brokenHighResult.price;
+
+  let supportIndex = -1;
+  for (let i = anchorIndex - 1; i >= lookbackStart; i -= 1) {
+    if (isSwingLow(bars, i)) {
+      supportIndex = i;
+      break;
+    }
+  }
+
+  if (supportIndex < 0 && anchorIndex > lookbackStart) {
+    let lowest = Number.POSITIVE_INFINITY;
+    for (let i = lookbackStart; i < anchorIndex; i += 1) {
+      if (bars[i].low < lowest) {
+        lowest = bars[i].low;
+        supportIndex = i;
+      }
+    }
+  }
+
+  let srFlipSupportIndex = -1;
+  let srFlipResistanceIndex = -1;
+  let srFlipSupportTouch: number | null = null;
+  let srFlipResistanceTouch: number | null = null;
+  let srFlipRetestLine: number | null = null;
+
+  if (tookOutIndex >= 0 && brokenResistance != null && Number.isFinite(brokenResistance)) {
+    // S->R retest rule anchored from the took-high candle:
+    // 1) Took High is already the highest candle high/body level the clicked candle closed above.
+    // 2) Scan LEFT of the took-high candle for prior support touches.
+    // 3) Scan RIGHT of the took-high candle, up to the clicked candle, for resistance touches.
+    // 4) Pick the support/resistance pair whose prices are closest to each other.
+    // 5) Always draw something: if no clean S/R pair is found, fall back to the took-high price.
+    // No swing-high logic is used in this S/R retest section.
+    // Do not search support past a higher candle to the left of the TOOK candle.
+    // That higher candle is a structure wall, so older lows/highs are from a prior leg.
+    const tookCandleHigh = Number(bars[tookOutIndex].high);
+    const tookCandleBodyHigh = Math.max(Number(bars[tookOutIndex].open), Number(bars[tookOutIndex].close));
+    const tookCandleCeiling = Math.max(
+      Number.isFinite(tookCandleHigh) ? tookCandleHigh : Number.NEGATIVE_INFINITY,
+      Number.isFinite(tookCandleBodyHigh) ? tookCandleBodyHigh : Number.NEGATIVE_INFINITY,
+    );
+
+    let supportSearchStart = Math.max(0, tookOutIndex - 500);
+    if (Number.isFinite(tookCandleCeiling)) {
+      // Include lower supports until the previous STRUCTURE swing high.
+      // Do not stop on any random higher candle/wick to the left.
+      // Stop only when we hit the prior swing-high wall above the TOOK candle.
+      for (let wallIdx = tookOutIndex - 1; wallIdx >= supportSearchStart; wallIdx -= 1) {
+        const wallHigh = Number(bars[wallIdx].high);
+        if (
+          Number.isFinite(wallHigh) &&
+          wallHigh > tookCandleCeiling &&
+          isSwingHigh(bars, wallIdx)
+        ) {
+          supportSearchStart = wallIdx + 1;
+          break;
+        }
+      }
+    }
+
+    const resistanceSearchEnd = Math.max(tookOutIndex + 1, anchorIndex);
+    // Keep S/R pairs tight. We want the lowest REAL support/resistance flip,
+    // not an immediate took-high reaction candle or a far-away random low.
+    const maxSrDistance = Math.min(
+      Math.max(tolerance * 2.5, basePrice * 0.02, 0.12),
+      Math.max(basePrice * 0.06, 0.30),
+    );
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (let sIdx = supportSearchStart; sIdx < tookOutIndex; sIdx += 1) {
+      const supportCandidates = [
+        Number(bars[sIdx].low),
+        Math.min(Number(bars[sIdx].open), Number(bars[sIdx].close)),
+      ].filter((value, idx, arr) => Number.isFinite(value) && arr.indexOf(value) === idx);
+
+      for (const supportPrice of supportCandidates) {
+        if (supportPrice <= 0 || supportPrice >= brokenResistance) continue;
+
+        // Skip the first couple candles after TOOK; those are usually the immediate reaction,
+        // not the later resistance retest we want.
+        for (let rIdx = tookOutIndex + 3; rIdx <= resistanceSearchEnd; rIdx += 1) {
+          const resistanceCandidates = [
+            Number(bars[rIdx].high),
+            Math.max(Number(bars[rIdx].open), Number(bars[rIdx].close)),
+          ].filter((value, idx, arr) => Number.isFinite(value) && arr.indexOf(value) === idx);
+
+          for (const resistancePrice of resistanceCandidates) {
+            if (resistancePrice <= 0 || resistancePrice >= brokenResistance) continue;
+
+            const srDistance = Math.abs(supportPrice - resistancePrice);
+            if (srDistance > maxSrDistance) continue;
+
+            const retestLevel = (supportPrice + resistancePrice) / 2;
+            const supportAge = tookOutIndex - sIdx;
+            const resistanceAge = rIdx - tookOutIndex;
+
+            // Priority:
+            // A) choose the LOWEST valid S/R retest pair first,
+            // B) then choose the closest exact/near S/R match,
+            // C) then use age only as a tie-breaker.
+            const score =
+              retestLevel * 1000000 +
+              srDistance * 10000 +
+              Math.abs(supportAge - resistanceAge) * 0.50 +
+              resistanceAge * 0.20 +
+              supportAge * 0.05;
+
+            if (score < bestScore) {
+              bestScore = score;
+              srFlipSupportIndex = sIdx;
+              srFlipResistanceIndex = rIdx;
+              srFlipSupportTouch = supportPrice;
+              srFlipResistanceTouch = resistancePrice;
+              srFlipRetestLine = retestLevel;
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback: draw the highest broken candle level so the line never disappears.
+    if (srFlipRetestLine == null || !Number.isFinite(srFlipRetestLine)) {
+      srFlipResistanceIndex = tookOutIndex;
+      srFlipResistanceTouch = brokenResistance;
+      srFlipSupportIndex = -1;
+      srFlipSupportTouch = null;
+      srFlipRetestLine = brokenResistance;
+    }
+  }
+
+  let consolidationStart = -1;
+  let consolidationEnd = -1;
+  let consolidationResistance: number | null = null;
+  let consolidationSupport: number | null = null;
+
+  const maxWindow = Math.min(14, anchorIndex);
+  const minWindow = Math.min(5, maxWindow);
+
+  for (let windowSize = maxWindow; windowSize >= minWindow; windowSize -= 1) {
+    const start = anchorIndex - windowSize;
+    const end = anchorIndex - 1;
+    const windowBars = bars.slice(start, end + 1);
+    const rangeHigh = Math.max(...windowBars.map((bar) => bar.high));
+    const rangeLow = Math.min(...windowBars.map((bar) => bar.low));
+    const avgClose = windowBars.reduce((sum, bar) => sum + bar.close, 0) / windowBars.length;
+    const rangePct = avgClose > 0 ? (rangeHigh - rangeLow) / avgClose : Number.POSITIVE_INFINITY;
+
+    if (rangePct <= 0.045) {
+      consolidationStart = start;
+      consolidationEnd = end;
+      consolidationResistance = rangeHigh;
+      consolidationSupport = rangeLow;
+      break;
+    }
+  }
+
+  return {
+    time: toChartTime(selected.time),
+    candleHigh: selected.high,
+    candleLow: selected.low,
+    tookOutHigh: tookOutIndex >= 0 ? bars[tookOutIndex].high : null,
+    tookOutHighTime: tookOutIndex >= 0 ? toChartTime(bars[tookOutIndex].time) : null,
+    previousSupport: supportIndex >= 0 ? bars[supportIndex].low : null,
+    previousSupportTime: supportIndex >= 0 ? toChartTime(bars[supportIndex].time) : null,
+    consolidationResistance,
+    consolidationSupport,
+    consolidationStartTime: consolidationStart >= 0 ? toChartTime(bars[consolidationStart].time) : null,
+    consolidationEndTime: consolidationEnd >= 0 ? toChartTime(bars[consolidationEnd].time) : null,
+    srFlipRetestLine,
+    srFlipSupportTouch,
+    srFlipResistanceTouch,
+    srFlipSupportTime: srFlipSupportIndex >= 0 ? toChartTime(bars[srFlipSupportIndex].time) : null,
+    srFlipResistanceTime: srFlipResistanceIndex >= 0 ? toChartTime(bars[srFlipResistanceIndex].time) : null,
+  };
+}
+
 function getTargetVisibleBarsForTimeframe(timeframe: string): number {
   const tf = (timeframe || "15m").toLowerCase().trim();
   if (tf === "1m") return 160;
@@ -4594,9 +4926,57 @@ const CHART_FUNCTIONS: ChartFunctionDefinition[] = [
     category: "projection",
     buildSelection: buildHighLowWickProjectionSelection,
   },
+  {
+    id: "manual_demand_zone",
+    label: "Demand Zone",
+    description:
+      "Click any candle to draw a manual demand rectangle from that candle low up to the candle body high. The zone extends right and stays on this symbol/timeframe until deleted.",
+    category: "structure",
+    buildSelection: buildEmptyProjectionSelection,
+  },
 ];
 
 const DEFAULT_CHART_FUNCTION_ID: ChartFunctionId = "support_prediction_wick_range";
+const CHART_TOOL_SETTINGS_STORAGE_KEY = "trading-terminal.chart.toolSettings.v1";
+
+type StoredChartToolSettings = {
+  activeChartFunctionId?: ChartFunctionId;
+  projectionSettingsOpen?: boolean;
+  projectionMode?: boolean;
+  saveProjectionLines?: boolean;
+};
+
+function normalizeChartFunctionId(value: unknown): ChartFunctionId {
+  return CHART_FUNCTIONS.some((item) => item.id === value)
+    ? (value as ChartFunctionId)
+    : DEFAULT_CHART_FUNCTION_ID;
+}
+
+function readStoredChartToolSettings(): StoredChartToolSettings {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(CHART_TOOL_SETTINGS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as StoredChartToolSettings;
+    return {
+      activeChartFunctionId: normalizeChartFunctionId(parsed.activeChartFunctionId),
+      projectionSettingsOpen: Boolean(parsed.projectionSettingsOpen),
+      projectionMode: Boolean(parsed.projectionMode),
+      saveProjectionLines: Boolean(parsed.saveProjectionLines),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredChartToolSettings(settings: StoredChartToolSettings): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CHART_TOOL_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Keep the chart usable if localStorage is blocked/full.
+  }
+}
 
 function getChartFunctionDefinition(id: ChartFunctionId): ChartFunctionDefinition {
   return CHART_FUNCTIONS.find((item) => item.id === id) ?? CHART_FUNCTIONS[0];
@@ -4833,14 +5213,15 @@ function getSessionTimelineTimes(
 
   const allTimes = new Set<number>();
 
-  // Keep every real bar exactly where Polygon put it.
+  // Keep every real bar exactly where Polygon/Alpaca put it.
   for (const bar of bars) {
     allTimes.add(Number(toChartTime(bar.time)));
   }
 
-  // Add every regular 04:00-20:00 ET time slot so the time scale does not
-  // compress quiet extended-hours periods. This mirrors TOS/TradingView style
-  // continuity while studies still use the original real Polygon bars.
+  // Add every regular 04:00-20:00 ET time slot so quiet extended-hours periods
+  // do not compress. This is the FULL session timeline and is intentionally used
+  // only as a source timeline; display data is clamped below so the chart never
+  // opens in blank future slots after the latest real candle.
   for (const date of dates) {
     const start = Number(etDateHmToUtcTimestamp(date, 400));
     const end = Number(etDateHmToUtcTimestamp(date, 2000));
@@ -4852,6 +5233,39 @@ function getSessionTimelineTimes(
   return Array.from(allTimes).sort((a, b) => a - b).map((time) => time as UTCTimestamp);
 }
 
+function clampTimelineToRealDataWindow(
+  timeline: UTCTimestamp[],
+  realTimes: Iterable<number>
+): UTCTimestamp[] {
+  const times = Array.from(realTimes).filter((time) => Number.isFinite(time));
+  if (!timeline.length || !times.length) return timeline;
+
+  const firstRealTime = Math.min(...times);
+  const lastRealTime = Math.max(...times);
+
+  // Field-of-view fix: keep filler only BETWEEN real candles. Do not append
+  // filler out to 20:00 ET, because that makes 1m charts load in the blank
+  // future/night area instead of on the current candle.
+  return timeline.filter((time) => {
+    const numericTime = Number(time);
+    return numericTime >= firstRealTime && numericTime <= lastRealTime;
+  });
+}
+
+function getDisplayTimelineTimes(
+  bars: Candle[],
+  timeframe: string,
+  tradingDate: string | null
+): UTCTimestamp[] {
+  const timeline = getSessionTimelineTimes(bars, timeframe, tradingDate);
+  if (!isIntradayChartTimeframe(timeframe) || bars.length === 0) return timeline;
+
+  return clampTimelineToRealDataWindow(
+    timeline,
+    bars.map((bar) => Number(toChartTime(bar.time)))
+  );
+}
+
 function buildSessionFilledCandleData(
   realCandles: CandlePoint[],
   bars: Candle[],
@@ -4860,7 +5274,7 @@ function buildSessionFilledCandleData(
 ): CandlePoint[] {
   if (!isIntradayChartTimeframe(timeframe) || !realCandles.length) return realCandles;
 
-  const timeline = getSessionTimelineTimes(bars, timeframe, tradingDate);
+  const timeline = getDisplayTimelineTimes(bars, timeframe, tradingDate);
   const realByTime = new Map<number, CandlePoint>();
   for (const candle of realCandles) realByTime.set(Number(candle.time), candle);
 
@@ -4915,7 +5329,7 @@ function extendLineToSessionEnd(
   tradingDate: string | null
 ): LinePoint[] {
   if (!data.length) return data;
-  const timeline = getSessionTimelineTimes(bars, timeframe, tradingDate);
+  const timeline = getDisplayTimelineTimes(bars, timeframe, tradingDate);
   if (!timeline.length) return data;
 
   const byTime = new Map<number, LinePoint>();
@@ -4938,7 +5352,7 @@ function extendLineToSessionEnd(
 }
 
 function getDisplaySlotCountWithSessionTail(bars: Candle[], timeframe: string, tradingDate: string | null): number {
-  return getSessionTimelineTimes(bars, timeframe, tradingDate).length || bars.length;
+  return getDisplayTimelineTimes(bars, timeframe, tradingDate).length || bars.length;
 }
 
 function computeSessionStats(
@@ -5444,14 +5858,11 @@ function ChartPanelComponent({
   enableLiveStream = true,
   legendDensity = "compact",
   compactTools = false,
+  onVisibilityChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const [legendExpanded, setLegendExpanded] = useState(legendDensity === "full");
-
-  useEffect(() => {
-    setLegendExpanded(legendDensity === "full");
-  }, [legendDensity, symbol, timeframeProp]);
+  const [legendExpanded, setLegendExpanded] = useState(true);
 
   const toolScale = compactTools ? 0.78 : 1;
   const chartToolButtonStyle: CSSProperties = compactTools
@@ -5539,6 +5950,15 @@ function ChartPanelComponent({
   const onVisibleLogicalRangeChangeRef = useRef(onVisibleLogicalRangeChange);
   const initialVisibleLogicalRangeRef = useRef(initialVisibleLogicalRange);
   const visibleRangeNotifyTimerRef = useRef<number | null>(null);
+  const hoveredCandleRafRef = useRef<number | null>(null);
+  const hoveredCandleTimerRef = useRef<number | null>(null);
+  const pendingHoveredCandleRef = useRef<HoveredCandleState | null>(null);
+  const lastHoveredCandleTimeRef = useRef<UTCTimestamp | null>(null);
+  const lastHoveredCandleUpdateAtRef = useRef(0);
+  const overlayPositionRafRef = useRef<number | null>(null);
+  const overlayPositionTimerRef = useRef<number | null>(null);
+  const lastOverlayPositionUpdateAtRef = useRef(0);
+  const lastLegendOnlyUpdateAtRef = useRef(0);
   const lastAppliedCrossTimeAnchorRef = useRef<string>("");
   const activeChartTimeframeRef = useRef(timeframeProp || "15m");
   const getCrossTimeAnchor = useCallback((): SharedChartTimeAnchor | null => {
@@ -5627,10 +6047,14 @@ function ChartPanelComponent({
       100;
 
     const rightPaddingBars = 8;
-	const dataSlots = bars.length;
-const visibleBars = Math.min(dataSlots, targetBars);
-const from = Math.max(0, dataSlots - visibleBars);
-const to = dataSlots - 1 + rightPaddingBars;
+    // Use the actual displayed series length, not raw real-bar count.
+    // 1m charts can include zero-volume filler candles between real candles; using
+    // bars.length anchors the visible range too far left and leaves the current
+    // candle outside the field of view.
+    const dataSlots = Math.max(displaySlotCountRef.current || 0, bars.length);
+    const visibleBars = Math.min(dataSlots, targetBars);
+    const from = Math.max(0, dataSlots - visibleBars);
+    const to = dataSlots - 1 + rightPaddingBars;
     chart.timeScale().applyOptions({
       rightOffset: rightPaddingBars,
       barSpacing: 8,
@@ -5724,6 +6148,9 @@ const to = dataSlots - 1 + rightPaddingBars;
 
   const [error, setError] = useState("");
   const [compressionRect, setCompressionRect] = useState<RectOverlay | null>(null);
+  const [manualDemandZones, setManualDemandZones] = useState<ManualDemandZone[]>(() => readStoredManualDemandZones());
+  const manualDemandZonesRef = useRef<ManualDemandZone[]>([]);
+  const [manualDemandZoneOverlays, setManualDemandZoneOverlays] = useState<ManualDemandZoneOverlay[]>([]);
   const [fvgFlipOverlay, setFvgFlipOverlay] = useState<FvgFlipOverlay | null>(null);
   const lastInstantIfvgAlertKeyRef = useRef<string>("");
   const lastInstantIfvgAlertAtRef = useRef<number>(0);
@@ -5742,6 +6169,7 @@ const to = dataSlots - 1 + rightPaddingBars;
   const [adaptiveRunnerRsiMarkers, setAdaptiveRunnerRsiMarkers] = useState<MarkerOverlay[]>([]);
   const [sixSevenSweepMarkers, setSixSevenSweepMarkers] = useState<MarkerOverlay[]>([]);
   const [fiveAmSweepMarkers, setFiveAmSweepMarkers] = useState<MarkerOverlay[]>([]);
+  const [candleIqMarkers, setCandleIqMarkers] = useState<MarkerOverlay[]>([]);
   const [adaptiveRunnerRsiState, setAdaptiveRunnerRsiState] = useState<AdaptiveRunnerRsiState | null>(null);
   const [trendlineHandleOverlays, setTrendlineHandleOverlays] = useState<TrendlineHandleOverlay[]>([]);
   const [trendlineFocusOverlay, setTrendlineFocusOverlay] = useState<TrendlineFocusOverlay | null>(null);
@@ -5763,15 +6191,25 @@ const to = dataSlots - 1 + rightPaddingBars;
   const [manualTrendlineScope, setManualTrendlineScope] = useState<TrendlineScope>("shared");
   const [manualTrendlineColor, setManualTrendlineColor] = useState("#00e5ff");
   const [manualTrendlineWidth, setManualTrendlineWidth] = useState(2);
+  const [manualFlatPrice, setManualFlatPrice] = useState("");
   const [manualExtendLeft, setManualExtendLeft] = useState(true);
   const [manualExtendRight, setManualExtendRight] = useState(true);
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
-  const [projectionMode, setProjectionMode] = useState(false);
-  const [saveProjectionLines, setSaveProjectionLines] = useState(false);
-  const [projectionSettingsOpen, setProjectionSettingsOpen] = useState(false);
+  const storedChartToolSettingsRef = useRef<StoredChartToolSettings | null>(null);
+  if (storedChartToolSettingsRef.current === null) {
+    storedChartToolSettingsRef.current = readStoredChartToolSettings();
+  }
+  const storedChartToolSettings = storedChartToolSettingsRef.current;
+  const [projectionMode, setProjectionMode] = useState(() => Boolean(storedChartToolSettings.projectionMode));
+  const [saveProjectionLines, setSaveProjectionLines] = useState(() => Boolean(storedChartToolSettings.saveProjectionLines));
+  const [projectionSettingsOpen, setProjectionSettingsOpen] = useState(() => Boolean(storedChartToolSettings.projectionSettingsOpen));
   const [lineSettingsOpen, setLineSettingsOpen] = useState(false);
+  const [trendlineSettingsOpen, setTrendlineSettingsOpen] = useState(false);
   const [lineVisibility, setLineVisibility] = useState<LineVisibilityState>(() => readStoredLineVisibility());
-  const [activeChartFunctionId, setActiveChartFunctionId] = useState<ChartFunctionId>(DEFAULT_CHART_FUNCTION_ID);
+  const didPersistLineVisibilityRef = useRef(false);
+  const [activeChartFunctionId, setActiveChartFunctionId] = useState<ChartFunctionId>(() =>
+    storedChartToolSettings.activeChartFunctionId ?? DEFAULT_CHART_FUNCTION_ID
+  );
   const [projectionSelection, setProjectionSelection] = useState<ProjectionSelection | null>(null);
   const [selectedSavedProjectionId, setSelectedSavedProjectionId] = useState<string | null>(null);
   const [trendlineAlerts, setTrendlineAlerts] = useState<TrendlineAlert[]>([]);
@@ -5828,7 +6266,7 @@ const to = dataSlots - 1 + rightPaddingBars;
 
   // Pro toolbar: keep settings panels derived from the active tool so they cannot desync after
   // persistence restores, order-drag patches, or chart refreshes.
-  const trendlineSettingsVisible = drawMode;
+  const trendlineSettingsVisible = trendlineSettingsOpen;
   const projectionSettingsVisible = projectionSettingsOpen;
 
   const [legend, setLegend] = useState<LegendState>({
@@ -5851,11 +6289,95 @@ const to = dataSlots - 1 + rightPaddingBars;
     },
   });
   const [hoveredCandle, setHoveredCandle] = useState<HoveredCandleState | null>(null);
+  const [candleInspectorMode, setCandleInspectorMode] = useState(false);
+  const candleInspectorModeRef = useRef(false);
+  const [candleStructureReport, setCandleStructureReport] = useState<CandleStructureReport | null>(null);
+  const candleIqRetestPriceLineRef = useRef<any | null>(null);
   const [controlState, setControlState] = useState<ControlState>({
     label: "NEUTRAL",
     color: "#cbd5e1",
     detail: "Δ 0% · vol 0.00x",
   });
+
+  useEffect(() => {
+    candleInspectorModeRef.current = candleInspectorMode;
+  }, [candleInspectorMode]);
+
+
+  const drawCandleIqRetestLine = useCallback((price: number | null) => {
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries) return;
+
+    if (candleIqRetestPriceLineRef.current) {
+      try {
+        candleSeries.removePriceLine(candleIqRetestPriceLineRef.current);
+      } catch {
+        // already removed
+      }
+      candleIqRetestPriceLineRef.current = null;
+    }
+
+    if (price == null || !Number.isFinite(price)) return;
+
+    candleIqRetestPriceLineRef.current = candleSeries.createPriceLine({
+      price,
+      color: "#facc15",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 2,
+      axisLabelVisible: true,
+      title: `S→R RETEST ${formatPrice(price)}`,
+    });
+  }, []);
+
+  const drawCandleIqSelectionMarkers = useCallback((report: CandleStructureReport | null) => {
+    const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
+
+    if (!chart || !candleSeries || !report) {
+      setCandleIqMarkers([]);
+      return;
+    }
+
+    const timeScale = chart.timeScale();
+    const nextMarkers: MarkerOverlay[] = [];
+
+    const addMarker = (
+      time: UTCTimestamp | null,
+      price: number | null,
+      label: string,
+      direction: "up" | "down"
+    ) => {
+      if (time == null || price == null || !Number.isFinite(price)) return;
+
+      const left = timeScale.timeToCoordinate(time as Time);
+      const top = candleSeries.priceToCoordinate(price);
+
+      if (left == null || top == null || !Number.isFinite(left) || !Number.isFinite(top)) return;
+
+      nextMarkers.push({
+        left,
+        top,
+        label,
+        color: "#facc15",
+        direction,
+        dotSize: 11,
+      });
+    };
+
+    addMarker(report.tookOutHighTime, report.tookOutHigh, "TOOK", "down");
+    addMarker(report.srFlipSupportTime, report.srFlipSupportTouch, "S", "up");
+    addMarker(report.srFlipResistanceTime, report.srFlipResistanceTouch, "R", "down");
+
+    setCandleIqMarkers(nextMarkers);
+  }, []);
+
+  useEffect(() => {
+    if (candleInspectorMode) return;
+
+    setCandleStructureReport(null);
+    setCandleIqMarkers([]);
+    drawCandleIqRetestLine(null);
+  }, [candleInspectorMode, drawCandleIqRetestLine]);
 
   const effectiveLineVisibility = useMemo<LineVisibilityState>(
     () => ({
@@ -5986,14 +6508,30 @@ const to = dataSlots - 1 + rightPaddingBars;
     latestLineVisibilityRef.current = effectiveLineVisibility;
   }, [effectiveLineVisibility]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  const onVisibilityChangeRef = useRef(onVisibilityChange);
 
-    try {
-      window.localStorage.setItem(CHART_LINE_VISIBILITY_STORAGE_KEY, JSON.stringify(lineVisibility));
-    } catch {
-      // Keep chart controls usable even if storage is blocked/full.
+  useEffect(() => {
+    onVisibilityChangeRef.current = onVisibilityChange;
+  }, [onVisibilityChange]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(CHART_LINE_VISIBILITY_STORAGE_KEY, JSON.stringify(lineVisibility));
+      } catch {
+        // Keep chart controls usable even if storage is blocked/full.
+      }
     }
+
+    // Do not let ChartPanel's first render push old/default local line settings back into
+    // the parent Studies dropdown. The bridge above first pulls the parent visibility into
+    // lineVisibility, then later user changes are safe to sync upward.
+    if (!didPersistLineVisibilityRef.current) {
+      didPersistLineVisibilityRef.current = true;
+      return;
+    }
+
+    onVisibilityChangeRef.current?.(lineVisibility);
   }, [lineVisibility]);
 
   useEffect(() => {
@@ -6433,6 +6971,15 @@ const to = dataSlots - 1 + rightPaddingBars;
   }, [effectiveLineVisibility.projections, clearProjectionSelection]);
 
   useEffect(() => {
+    writeStoredChartToolSettings({
+      activeChartFunctionId,
+      projectionSettingsOpen,
+      projectionMode,
+      saveProjectionLines,
+    });
+  }, [activeChartFunctionId, projectionSettingsOpen, projectionMode, saveProjectionLines]);
+
+  useEffect(() => {
     if (!effectiveLineVisibility.trendlines) {
       setSelectedTrendlineId(null);
     }
@@ -6678,6 +7225,38 @@ const to = dataSlots - 1 + rightPaddingBars;
     [applySelectedTrendlinePatch]
   );
 
+  const addManualFlatTrendline = useCallback(() => {
+    const price = Number(manualFlatPrice);
+    if (!Number.isFinite(price) || price <= 0) return;
+
+    const bars = barsRef.current;
+    if (bars.length < 2) return;
+
+    const firstTime = toChartTime(bars[0].time);
+    const lastTime = toChartTime(bars[bars.length - 1].time);
+    if (!Number.isFinite(firstTime) || !Number.isFinite(lastTime) || firstTime === lastTime) return;
+
+    const nextLine = createTrendline(
+      symbol,
+      timeframe,
+      { time: firstTime, price },
+      { time: lastTime, price },
+      {
+        scope: manualTrendlineScope,
+        extendLeft: manualExtendLeft,
+        extendRight: manualExtendRight,
+        color: manualTrendlineColor,
+        width: manualTrendlineWidth,
+      }
+    );
+    if (!nextLine) return;
+
+    setLineVisibility((prev) => ({ ...prev, trendlines: true }));
+    setTrendlines((prev) => [...prev, nextLine]);
+    setSelectedTrendlineId(nextLine.id);
+    setPendingTrendPoint(null);
+  }, [manualFlatPrice, symbol, timeframe, manualTrendlineScope, manualExtendLeft, manualExtendRight, manualTrendlineColor, manualTrendlineWidth]);
+
   const handleManualExtendLeftChange = useCallback(
     (extendLeft: boolean) => {
       setManualExtendLeft(extendLeft);
@@ -6780,6 +7359,7 @@ const to = dataSlots - 1 + rightPaddingBars;
 
   const syncTrendlineSeries = useCallback(() => {
     const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
     if (!chart) return;
 
     const bars = barsRef.current;
@@ -6851,34 +7431,68 @@ const to = dataSlots - 1 + rightPaddingBars;
       const startIndex = Math.max(0, leftIndex - leftPadding);
       const endIndex = Math.min(visibleBars.length - 1, rightIndex + rightPadding);
 
-      const data: { time: UTCTimestamp; value: number }[] = [];
+      const segmentStartIndex = Math.max(0, Math.min(startIndex, visibleBars.length - 1));
+      const segmentEndIndex = Math.max(0, Math.min(endIndex, visibleBars.length - 1));
+      const segmentStartTime = toChartTime(visibleBars[segmentStartIndex].time);
+      const segmentEndTime = toChartTime(visibleBars[segmentEndIndex].time);
 
-      for (let idx = startIndex; idx <= endIndex; idx++) {
-        if (!line.extendLeft && idx < leftIndex) continue;
-        if (!line.extendRight && idx > rightIndex) continue;
+      let segmentStartValue = getTrendlinePriceAtBarIndex(line, visibleBars, segmentStartIndex);
+      let segmentEndValue = getTrendlinePriceAtBarIndex(line, visibleBars, segmentEndIndex);
 
-        data.push({
-          time: toChartTime(visibleBars[idx].time),
-          value: getTrendlinePriceAtBarIndex(line, visibleBars, idx),
-        });
-      }
+      // Draw the extended trendline as one true straight segment, but keep it
+      // passing through the original clicked wick/body anchors exactly.
+      if (candleSeries) {
+        const timeScale = chart.timeScale();
+        const x1 = timeScale.timeToCoordinate(line.t1 as Time);
+        const x2 = timeScale.timeToCoordinate(line.t2 as Time);
+        const y1 = candleSeries.priceToCoordinate(line.p1);
+        const y2 = candleSeries.priceToCoordinate(line.p2);
+        const xStart = timeScale.timeToCoordinate(segmentStartTime as Time);
+        const xEnd = timeScale.timeToCoordinate(segmentEndTime as Time);
 
-      if (!data.length) {
-        data.push(
-          {
-            time: line.t1,
-            value: line.p1,
-          },
-          {
-            time: line.t2,
-            value: line.p2,
+        if (
+          x1 != null &&
+          x2 != null &&
+          y1 != null &&
+          y2 != null &&
+          xStart != null &&
+          xEnd != null &&
+          Number.isFinite(x1) &&
+          Number.isFinite(x2) &&
+          Number.isFinite(y1) &&
+          Number.isFinite(y2) &&
+          Number.isFinite(xStart) &&
+          Number.isFinite(xEnd) &&
+          x1 !== x2
+        ) {
+          const pixelSlope = (y2 - y1) / (x2 - x1);
+          const startY = y1 + pixelSlope * (xStart - x1);
+          const endY = y1 + pixelSlope * (xEnd - x1);
+          const startPrice = candleSeries.coordinateToPrice(startY);
+          const endPrice = candleSeries.coordinateToPrice(endY);
+
+          if (
+            startPrice != null &&
+            endPrice != null &&
+            Number.isFinite(startPrice) &&
+            Number.isFinite(endPrice)
+          ) {
+            segmentStartValue = startPrice;
+            segmentEndValue = endPrice;
           }
-        );
+        }
       }
 
-      const dedupedData = data
-        .sort((a, b) => a.time - b.time)
-        .filter((point, index, arr) => index === 0 || point.time !== arr[index - 1].time);
+      const dedupedData =
+        segmentStartTime === segmentEndTime
+          ? [
+              { time: line.t1, value: line.p1 },
+              { time: line.t2, value: line.p2 },
+            ]
+          : [
+              { time: segmentStartTime, value: segmentStartValue },
+              { time: segmentEndTime, value: segmentEndValue },
+            ].sort((a, b) => a.time - b.time);
 
       series.setData(dedupedData);
       // Keep trendlines from changing candle price scale after draw/edit/color changes.
@@ -7153,6 +7767,7 @@ const to = dataSlots - 1 + rightPaddingBars;
 
     if (!chart || !candleSeries) {
       setCompressionRect(null);
+      setManualDemandZoneOverlays([]);
       setFvgFlipOverlay(null);
       setBreakoutMarker(null);
       setVwapMarkers([]);
@@ -7349,49 +7964,100 @@ const to = dataSlots - 1 + rightPaddingBars;
     setKeyLevelLabelOverlays(sortedKeyLevelLabels);
 
     const nextSessionBands: SessionBandOverlay[] = [];
-    const visibleBarsForBandSpacing: number[] = [];
-    for (const bar of barsRef.current) {
-      const coord = timeScale.timeToCoordinate(toChartTime(bar.time) as Time);
-      if (coord != null && Number.isFinite(Number(coord))) {
-        visibleBarsForBandSpacing.push(Number(coord));
+    if (latestLineVisibilityRef.current.sessionBands) {
+      const visibleBarsForBandSpacing: number[] = [];
+      const visibleBars = visibleLogical
+        ? barsRef.current.slice(
+            Math.max(0, Math.floor(Number(visibleLogical.from)) - 5),
+            Math.min(barsRef.current.length, Math.ceil(Number(visibleLogical.to)) + 6)
+          )
+        : barsRef.current.slice(-220);
+
+      for (const bar of visibleBars) {
+        const coord = timeScale.timeToCoordinate(toChartTime(bar.time) as Time);
+        if (coord != null && Number.isFinite(Number(coord))) {
+          visibleBarsForBandSpacing.push(Number(coord));
+        }
+      }
+      visibleBarsForBandSpacing.sort((a, b) => a - b);
+      const bandGaps: number[] = [];
+      for (let i = 1; i < visibleBarsForBandSpacing.length; i += 1) {
+        const currentX = visibleBarsForBandSpacing[i];
+        const previousX = visibleBarsForBandSpacing[i - 1];
+        const gap = currentX - previousX;
+        if (gap > 0 && gap < 80) bandGaps.push(gap);
+      }
+      bandGaps.sort((a, b) => a - b);
+      const sessionBandPad = Math.max(2, Math.min(bandGaps.length ? bandGaps[Math.floor(bandGaps.length / 2)] : 6, 18));
+
+      for (const band of computeSessionBandRanges(barsRef.current, tradingDateRef.current)) {
+        const leftCoord = timeScale.timeToCoordinate(band.startTime as Time);
+        const rightCoord = timeScale.timeToCoordinate(band.endTime as Time);
+        const leftX = leftCoord == null ? null : Number(leftCoord);
+        const rightX = rightCoord == null ? null : Number(rightCoord);
+
+        if (
+          leftX == null ||
+          rightX == null ||
+          !Number.isFinite(leftX) ||
+          !Number.isFinite(rightX)
+        ) {
+          continue;
+        }
+
+        const left = Math.min(leftX, rightX) - sessionBandPad / 2;
+        const width = Math.max(Math.abs(rightX - leftX) + sessionBandPad, 2);
+
+        nextSessionBands.push({
+          ...band,
+          left,
+          width,
+        });
       }
     }
-    visibleBarsForBandSpacing.sort((a, b) => a - b);
-    const bandGaps: number[] = [];
-    for (let i = 1; i < visibleBarsForBandSpacing.length; i += 1) {
-      const currentX = visibleBarsForBandSpacing[i];
-      const previousX = visibleBarsForBandSpacing[i - 1];
-      const gap = currentX - previousX;
-      if (gap > 0 && gap < 80) bandGaps.push(gap);
-    }
-    bandGaps.sort((a, b) => a - b);
-    const sessionBandPad = Math.max(2, Math.min(bandGaps.length ? bandGaps[Math.floor(bandGaps.length / 2)] : 6, 18));
+    setSessionBands(nextSessionBands);
 
-    for (const band of computeSessionBandRanges(barsRef.current, tradingDateRef.current)) {
-      const leftCoord = timeScale.timeToCoordinate(band.startTime as Time);
-      const rightCoord = timeScale.timeToCoordinate(band.endTime as Time);
-      const leftX = leftCoord == null ? null : Number(leftCoord);
-      const rightX = rightCoord == null ? null : Number(rightCoord);
+    const visibleDemandZones = manualDemandZonesRef.current.filter((zone) =>
+      zone.symbol === symbol.toUpperCase() && zone.timeframe === timeframe
+    );
+    const nextDemandZoneOverlays: ManualDemandZoneOverlay[] = [];
+    const demandZoneRight = Math.max(chartWidth, containerRef.current?.clientWidth ?? chartWidth, 0);
+
+    for (const zone of visibleDemandZones) {
+      const centerX = timeScale.timeToCoordinate(zone.candleTime as Time);
+      const topY = candleSeries.priceToCoordinate(zone.topPrice);
+      const bottomY = candleSeries.priceToCoordinate(zone.bottomPrice);
 
       if (
-        leftX == null ||
-        rightX == null ||
-        !Number.isFinite(leftX) ||
-        !Number.isFinite(rightX)
+        centerX == null ||
+        topY == null ||
+        bottomY == null ||
+        !Number.isFinite(centerX) ||
+        !Number.isFinite(topY) ||
+        !Number.isFinite(bottomY)
       ) {
         continue;
       }
 
-      const left = Math.min(leftX, rightX) - sessionBandPad / 2;
-      const width = Math.max(Math.abs(rightX - leftX) + sessionBandPad, 2);
+      const left = Math.max(0, Number(centerX));
+      const top = Math.min(Number(topY), Number(bottomY));
+      const height = Math.max(Math.abs(Number(bottomY) - Number(topY)), 4);
+      const width = Math.max(demandZoneRight - left, 24);
 
-      nextSessionBands.push({
-        ...band,
+      nextDemandZoneOverlays.push({
+        id: zone.id,
         left,
         width,
+        top,
+        height,
+        labelLeft: left + 6,
+        labelTop: Math.max(top - 22, 4),
+        label: `Demand ${formatPrice(zone.bottomPrice)} - ${formatPrice(zone.topPrice)}`,
+        topPrice: zone.topPrice,
+        bottomPrice: zone.bottomPrice,
       });
     }
-    setSessionBands(nextSessionBands);
+    setManualDemandZoneOverlays(nextDemandZoneOverlays);
 
     if (allowHeavyOverlayWork && latestLineVisibilityRef.current.fvgFlip) {
       const fvgZone = computeLatestFvgFlipZone(barsRef.current);
@@ -8106,6 +8772,16 @@ const to = dataSlots - 1 + rightPaddingBars;
   }, [symbol]);
 
   useEffect(() => {
+    manualDemandZonesRef.current = manualDemandZones;
+    writeStoredManualDemandZones(manualDemandZones);
+    window.requestAnimationFrame(updateOverlayPositions);
+  }, [manualDemandZones, updateOverlayPositions]);
+
+  useEffect(() => {
+    manualDemandZonesRef.current = manualDemandZones;
+  }, [manualDemandZones]);
+
+  useEffect(() => {
     window.requestAnimationFrame(updateOverlayPositions);
   }, [effectiveLineVisibility, updateOverlayPositions]);
 
@@ -8707,11 +9383,22 @@ const to = dataSlots - 1 + rightPaddingBars;
       localization: {
         timeFormatter: (time: number) => formatPacificTime(time, true),
       },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: "rgba(255,255,255,0.15)" },
-        horzLine: { color: "rgba(255,255,255,0.15)" },
-      },
+crosshair: {
+  mode: CrosshairMode.Normal,
+  vertLine: {
+    color: "#FFFF00",
+    width: 1,
+    style: LineStyle.Dashed,
+    labelBackgroundColor: "#FFFF00",
+  },
+  horzLine: {
+    color: "#FFFF00",
+    width: 1,
+    style: LineStyle.Dashed,
+    labelBackgroundColor: "#FFFF00",
+  },
+},
+
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -8882,7 +9569,7 @@ const to = dataSlots - 1 + rightPaddingBars;
     fiveAmLowSeries.applyOptions({ autoscaleInfoProvider: () => null });
     fiveAmCloseSeries.applyOptions({ autoscaleInfoProvider: () => null });
 
-    const getPointFromCoordinates = (x: number, y: number): PendingTrendPoint | null => {
+    const getRawPointFromCoordinates = (x: number, y: number): PendingTrendPoint | null => {
       const chart = chartRef.current;
       const candleSeries = candleSeriesRef.current;
       if (!chart || !candleSeries) return null;
@@ -8894,10 +9581,21 @@ const to = dataSlots - 1 + rightPaddingBars;
       const rawClickedPrice = candleSeries.coordinateToPrice(y);
       if (rawClickedPrice == null || !Number.isFinite(rawClickedPrice)) return null;
 
+      return {
+        time: clickedTime,
+        price: rawClickedPrice,
+        snapKind: "close",
+      };
+    };
+
+    const getPointFromCoordinates = (x: number, y: number): PendingTrendPoint | null => {
+      const rawPoint = getRawPointFromCoordinates(x, y);
+      if (!rawPoint) return null;
+
       return buildSnappedTrendPointFromClick(
         barsRef.current,
-        clickedTime,
-        rawClickedPrice,
+        rawPoint.time,
+        rawPoint.price,
         trendlineSnapMode
       );
     };
@@ -8915,13 +9613,42 @@ const to = dataSlots - 1 + rightPaddingBars;
       if (clickedTime == null || rawClickedPrice == null || !Number.isFinite(rawClickedPrice)) return;
 
       if (projectionModeRef.current) {
-        if (!latestLineVisibilityRef.current.projections) return;
         const nearestBar = findNearestBarByTime(barsRef.current, clickedTime);
         if (!nearestBar) return;
         const functionId =
           activeChartFunctionIdRef.current === "none"
             ? "support_prediction_wick_range"
             : activeChartFunctionIdRef.current;
+
+        if (functionId === "manual_demand_zone") {
+          const topPrice = Math.max(nearestBar.open, nearestBar.close);
+          const bottomPrice = nearestBar.low;
+          if (Number.isFinite(topPrice) && Number.isFinite(bottomPrice) && topPrice > bottomPrice) {
+            const candleTime = toChartTime(nearestBar.time) as UTCTimestamp;
+            const id = `${symbol.toUpperCase()}-${timeframe}-demand-${candleTime}-${Date.now()}`;
+            setManualDemandZones((prev) => [
+              ...prev,
+              {
+                id,
+                symbol: symbol.toUpperCase(),
+                timeframe,
+                candleTime,
+                topPrice,
+                bottomPrice,
+                candleHigh: nearestBar.high,
+                candleLow: nearestBar.low,
+                candleOpen: nearestBar.open,
+                candleClose: nearestBar.close,
+                createdAt: Date.now(),
+              },
+            ]);
+          }
+          projectionModeRef.current = true;
+          setProjectionMode(true);
+          return;
+        }
+
+        if (!latestLineVisibilityRef.current.projections) return;
         drawProjectionSelection(getChartFunctionDefinition(functionId).buildSelection(nearestBar, barsRef.current));
         // Keep FX/projection pick mode armed so multiple projections can be placed without reloading or reselecting the tool.
         projectionModeRef.current = true;
@@ -8931,6 +9658,19 @@ const to = dataSlots - 1 + rightPaddingBars;
 
       if (!drawModeRef.current) {
         if (dragStateRef.current) return;
+
+        if (candleInspectorModeRef.current) {
+          const report = buildCandleStructureReport(barsRef.current, clickedTime);
+          if (report) {
+            setCandleStructureReport(report);
+            drawCandleIqRetestLine(report.srFlipRetestLine);
+            drawCandleIqSelectionMarkers(report);
+            setHoveredCandle(toHoveredCandleState(findNearestBarByTime(barsRef.current, clickedTime)));
+          }
+          setSelectedSavedProjectionId(null);
+          setSelectedTrendlineId(null);
+          return;
+        }
 
         const savedProjectionInteraction = getNearestSavedProjectionInteraction(rawClickedPrice);
         if (savedProjectionInteraction) {
@@ -9069,7 +9809,32 @@ const to = dataSlots - 1 + rightPaddingBars;
         activeChartFunctionIdRef.current === "none"
           ? "support_prediction_wick_range"
           : activeChartFunctionIdRef.current;
-      drawProjectionSelection(getChartFunctionDefinition(functionId).buildSelection(nearestBar, barsRef.current));
+      if (functionId === "manual_demand_zone") {
+        const topPrice = Math.max(nearestBar.open, nearestBar.close);
+        const bottomPrice = nearestBar.low;
+        if (Number.isFinite(topPrice) && Number.isFinite(bottomPrice) && topPrice > bottomPrice) {
+          const candleTime = toChartTime(nearestBar.time) as UTCTimestamp;
+          const id = `${symbol.toUpperCase()}-${timeframe}-demand-${candleTime}-${Date.now()}`;
+          setManualDemandZones((prev) => [
+            ...prev,
+            {
+              id,
+              symbol: symbol.toUpperCase(),
+              timeframe,
+              candleTime,
+              topPrice,
+              bottomPrice,
+              candleHigh: nearestBar.high,
+              candleLow: nearestBar.low,
+              candleOpen: nearestBar.open,
+              candleClose: nearestBar.close,
+              createdAt: Date.now(),
+            },
+          ]);
+        }
+      } else {
+        drawProjectionSelection(getChartFunctionDefinition(functionId).buildSelection(nearestBar, barsRef.current));
+      }
       projectionModeRef.current = true;
       setProjectionMode(true);
     };
@@ -9090,7 +9855,9 @@ const to = dataSlots - 1 + rightPaddingBars;
       const rect = containerEl.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
-      const point = getPointFromCoordinates(x, y);
+      // Use raw cursor price for hit-testing the line. Snapping this to a
+      // candle wick makes line clicks miss unless the line is near that wick.
+      const point = getRawPointFromCoordinates(x, y);
       if (!point) return;
 
       const interaction = getNearestTrendlineInteraction(
@@ -9130,16 +9897,17 @@ const to = dataSlots - 1 + rightPaddingBars;
       // updates here make the chart feel jumpy/funky while dragging a broker price.
       if (orderDragStateRef.current) return;
 
-      const point = getPointFromCoordinates(x, y);
+      const rawPoint = getRawPointFromCoordinates(x, y);
+      const snappedPoint = getPointFromCoordinates(x, y);
 
-      if (dragStateRef.current && point) {
+      if (dragStateRef.current && snappedPoint) {
         event.preventDefault();
         event.stopPropagation();
         const drag = dragStateRef.current;
         setTrendlines((prev) =>
           prev.map((line) => {
             if (line.id !== drag.trendlineId) return line;
-            return updateTrendlineAnchor(line, drag.anchor, point) ?? line;
+            return updateTrendlineAnchor(line, drag.anchor, snappedPoint) ?? line;
           })
         );
         window.requestAnimationFrame(() => {
@@ -9149,15 +9917,15 @@ const to = dataSlots - 1 + rightPaddingBars;
         return;
       }
 
-      if (drawModeRef.current || projectionModeRef.current || !point) {
+      if (drawModeRef.current || projectionModeRef.current || !rawPoint) {
         containerEl.style.cursor = drawModeRef.current || projectionModeRef.current ? "crosshair" : "default";
         return;
       }
 
       const interaction = getNearestTrendlineInteraction(
         trendlinesRef.current,
-        point.time,
-        point.price,
+        rawPoint.time,
+        rawPoint.price,
         barsRef.current
       );
 
@@ -9303,7 +10071,36 @@ const to = dataSlots - 1 + rightPaddingBars;
           ? barsRef.current[barsRef.current.length - 1]
           : null;
 
-      setHoveredCandle(toHoveredCandleState(hoveredBar));
+      const nextHoveredCandle = toHoveredCandleState(hoveredBar);
+      const nextTime = nextHoveredCandle?.time ?? null;
+      if (nextTime != null && lastHoveredCandleTimeRef.current === nextTime) return;
+
+      pendingHoveredCandleRef.current = nextHoveredCandle;
+
+      const flushHoveredCandle = () => {
+        hoveredCandleRafRef.current = null;
+        const pending = pendingHoveredCandleRef.current;
+        pendingHoveredCandleRef.current = null;
+        lastHoveredCandleTimeRef.current = pending?.time ?? null;
+        lastHoveredCandleUpdateAtRef.current = Date.now();
+        setHoveredCandle(pending);
+      };
+
+      const elapsed = Date.now() - lastHoveredCandleUpdateAtRef.current;
+      if (elapsed < FAST_CROSSHAIR_HOVER_THROTTLE_MS) {
+        if (hoveredCandleTimerRef.current == null) {
+          hoveredCandleTimerRef.current = window.setTimeout(() => {
+            hoveredCandleTimerRef.current = null;
+            if (hoveredCandleRafRef.current == null) {
+              hoveredCandleRafRef.current = window.requestAnimationFrame(flushHoveredCandle);
+            }
+          }, FAST_CROSSHAIR_HOVER_THROTTLE_MS - elapsed);
+        }
+        return;
+      }
+
+      if (hoveredCandleRafRef.current != null) return;
+      hoveredCandleRafRef.current = window.requestAnimationFrame(flushHoveredCandle);
     };
 
     chart.subscribeCrosshairMove(handleCrosshairMove);
@@ -9314,9 +10111,29 @@ const to = dataSlots - 1 + rightPaddingBars;
     window.addEventListener("pointerup", handlePointerUp);
 
     const handleVisibleRangeChange = () => {
-      window.requestAnimationFrame(() => {
+      const runOverlayUpdate = () => {
+        overlayPositionRafRef.current = null;
+        lastOverlayPositionUpdateAtRef.current = Date.now();
         updateOverlayPositions();
-      });
+      };
+
+      const elapsed = Date.now() - lastOverlayPositionUpdateAtRef.current;
+      if (elapsed >= FAST_VISIBLE_RANGE_OVERLAY_THROTTLE_MS) {
+        if (overlayPositionTimerRef.current != null) {
+          window.clearTimeout(overlayPositionTimerRef.current);
+          overlayPositionTimerRef.current = null;
+        }
+        if (overlayPositionRafRef.current == null) {
+          overlayPositionRafRef.current = window.requestAnimationFrame(runOverlayUpdate);
+        }
+      } else if (overlayPositionTimerRef.current == null) {
+        overlayPositionTimerRef.current = window.setTimeout(() => {
+          overlayPositionTimerRef.current = null;
+          if (overlayPositionRafRef.current == null) {
+            overlayPositionRafRef.current = window.requestAnimationFrame(runOverlayUpdate);
+          }
+        }, FAST_VISIBLE_RANGE_OVERLAY_THROTTLE_MS - elapsed);
+      }
 
       const chartInstance = chartRef.current;
       const cb = onVisibleLogicalRangeChangeRef.current;
@@ -9355,6 +10172,23 @@ const to = dataSlots - 1 + rightPaddingBars;
         visibleRangeNotifyTimerRef.current = null;
       }
 
+      if (hoveredCandleRafRef.current !== null) {
+        window.cancelAnimationFrame(hoveredCandleRafRef.current);
+        hoveredCandleRafRef.current = null;
+      }
+      if (hoveredCandleTimerRef.current !== null) {
+        window.clearTimeout(hoveredCandleTimerRef.current);
+        hoveredCandleTimerRef.current = null;
+      }
+      if (overlayPositionRafRef.current !== null) {
+        window.cancelAnimationFrame(overlayPositionRafRef.current);
+        overlayPositionRafRef.current = null;
+      }
+      if (overlayPositionTimerRef.current !== null) {
+        window.clearTimeout(overlayPositionTimerRef.current);
+        overlayPositionTimerRef.current = null;
+      }
+      pendingHoveredCandleRef.current = null;
 
       for (const timeoutId of alertTimeoutsRef.current) {
         window.clearTimeout(timeoutId);
@@ -9652,7 +10486,9 @@ const to = dataSlots - 1 + rightPaddingBars;
     const scheduleLiveRender = async (bars: Candle[], tradingDate: string | null, lastPrice: number | null) => {
       pendingLiveRender = { bars, tradingDate, lastPrice };
       const elapsed = Date.now() - lastLiveRenderAt;
-      const minLiveRenderIntervalMs = String(timeframe || "").toLowerCase().trim() === "1m" ? 1800 : 300;
+      const minLiveRenderIntervalMs = String(timeframe || "").toLowerCase().trim() === "1m"
+        ? FAST_LIVE_RENDER_1M_MS
+        : FAST_LIVE_RENDER_OTHER_MS;
       const wait = Math.max(0, minLiveRenderIntervalMs - elapsed);
       if (wait <= 0) {
         if (liveRenderTimer != null) {
@@ -9785,18 +10621,23 @@ const to = dataSlots - 1 + rightPaddingBars;
             lastPriceOverride ?? nextBars[nextBars.length - 1]?.close ?? null
           );
         } else if (lastPriceOverride != null) {
-          setLegend((prev) => {
-            const next = { ...prev, last: lastPriceOverride };
-            legendRef.current = next;
-            return next;
-          });
+          const now = Date.now();
+          if (now - lastLegendOnlyUpdateAtRef.current >= FAST_LEGEND_ONLY_THROTTLE_MS) {
+            lastLegendOnlyUpdateAtRef.current = now;
+            setLegend((prev) => {
+              if (prev.last === lastPriceOverride) return prev;
+              const next = { ...prev, last: lastPriceOverride };
+              legendRef.current = next;
+              return next;
+            });
 
-          onStatsUpdateRef.current({
-            last: lastPriceOverride,
-            pmh: legendRef.current.pmh,
-            vwap: legendRef.current.vwap,
-            barsCount: barsRef.current.length,
-          });
+            onStatsUpdateRef.current({
+              last: lastPriceOverride,
+              pmh: legendRef.current.pmh,
+              vwap: legendRef.current.vwap,
+              barsCount: barsRef.current.length,
+            });
+          }
         }
       } catch (err) {
         console.error("WS message error:", err);
@@ -10087,6 +10928,31 @@ const to = dataSlots - 1 + rightPaddingBars;
             <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>PDL: {formatPrice(legend.session.previousRegularLow)}</div>
             <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>AH H: {formatPrice(legend.session.afterHoursHigh)}</div>
             <div style={{ ...legendBoxStyle, pointerEvents: "auto" }}>EXT H: {formatPrice(legend.session.extendedHigh)}</div>
+            <button
+              type="button"
+              onClick={() => setCandleInspectorMode((prev) => !prev)}
+              style={{
+                ...legendBoxStyle,
+                pointerEvents: "auto",
+                cursor: "pointer",
+                color: candleInspectorMode ? "#111827" : "#fde68a",
+                background: candleInspectorMode ? "#facc15" : "rgba(15, 23, 42, 0.88)",
+                borderColor: candleInspectorMode ? "#fde047" : "rgba(250, 204, 21, 0.45)",
+              }}
+              title="Turn on, then click any candle to inspect the high it took out, prior support, and consolidation resistance."
+            >
+              Candle IQ {candleInspectorMode ? "ON" : "OFF"}
+            </button>
+            {candleStructureReport ? (
+              <>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#fde68a" }}>IQ T: {formatPacificTime(candleStructureReport.time, false)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#67e8f9" }}>Took high: {formatPrice(candleStructureReport.tookOutHigh)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#86efac" }}>Prev sup: {formatPrice(candleStructureReport.previousSupport)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#facc15" }}>Retest: {formatPrice(candleStructureReport.srFlipRetestLine)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#86efac" }}>S touch: {formatPrice(candleStructureReport.srFlipSupportTouch)}</div>
+                <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#fca5a5" }}>R touch: {formatPrice(candleStructureReport.srFlipResistanceTouch)}</div>
+              </>
+            ) : null}
             {hoveredCandle ? (
               <>
                 <div style={{ ...legendBoxStyle, pointerEvents: "auto", color: "#e2e8f0" }}>T: {formatPacificTime(hoveredCandle.time, false)}</div>
@@ -10250,6 +11116,21 @@ const to = dataSlots - 1 + rightPaddingBars;
         </button>
 
         <button
+          onClick={() => setTrendlineSettingsOpen((prev) => !prev)}
+          style={{
+            ...chartToolButtonStyle,
+            border: trendlineSettingsOpen
+              ? "1px solid rgba(96,165,250,0.6)"
+              : toolbarIconButtonStyle.border,
+            background: trendlineSettingsOpen ? "rgba(30,64,175,0.95)" : toolbarIconButtonStyle.background,
+            color: trendlineSettingsOpen ? "#dbeafe" : toolbarIconButtonStyle.color,
+          }}
+          title={trendlineSettingsOpen ? "Hide trendline settings" : "Open trendline settings"}
+        >
+          ⚙
+        </button>
+
+        <button
           onClick={() => {
             setDrawMode(false);
             setPendingTrendPoint(null);
@@ -10407,10 +11288,7 @@ const to = dataSlots - 1 + rightPaddingBars;
             </span>
             <select
               value={activeChartFunctionId}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => event.stopPropagation()}
-              onPointerDown={(event) => event.stopPropagation()}
-              onChange={(event) => setActiveChartFunctionId(event.target.value as ChartFunctionId)}
+              onChange={(event) => setActiveChartFunctionId(normalizeChartFunctionId(event.target.value))}
               style={{ ...toolbarSelectStyle, width: "100%" }}
               title="Choose which chart function to draw"
             >
@@ -10438,6 +11316,37 @@ const to = dataSlots - 1 + rightPaddingBars;
           >
             {saveProjectionLines ? "Save Projection ON" : "Save Projection OFF"}
           </button>
+
+          {activeChartFunctionId === "manual_demand_zone" ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              <button
+                onClick={() =>
+                  setManualDemandZones((prev) => {
+                    const currentKey = `${symbol.toUpperCase()}::${timeframe}`;
+                    const currentZones = prev.filter((zone) => `${zone.symbol}::${zone.timeframe}` === currentKey);
+                    const lastCurrent = currentZones.at(-1);
+                    if (!lastCurrent) return prev;
+                    return prev.filter((zone) => zone.id !== lastCurrent.id);
+                  })
+                }
+                style={{ ...toolbarButtonStyle, height: 30, padding: "0 8px", justifyContent: "center" }}
+                title="Delete the newest demand zone on this symbol/timeframe"
+              >
+                Delete Last
+              </button>
+              <button
+                onClick={() =>
+                  setManualDemandZones((prev) =>
+                    prev.filter((zone) => !(zone.symbol === symbol.toUpperCase() && zone.timeframe === timeframe))
+                  )
+                }
+                style={{ ...toolbarButtonStyle, height: 30, padding: "0 8px", justifyContent: "center" }}
+                title="Clear demand zones on this symbol/timeframe"
+              >
+                Clear Demand
+              </button>
+            </div>
+          ) : null}
 
           <div
             style={{
@@ -10486,9 +11395,9 @@ const to = dataSlots - 1 + rightPaddingBars;
               color: projectionMode ? "#dbeafe" : toolbarButtonStyle.color,
               background: projectionMode ? "rgba(30,64,175,0.95)" : toolbarButtonStyle.background,
             }}
-            title={!effectiveLineVisibility.projections ? "Function projections are hidden in Line Visibility" : activeChartFunctionId === "none" ? "Choose a chart function first" : "Enable projection pick mode"}
+            title={activeChartFunctionId === "manual_demand_zone" ? "Enable demand-zone candle pick mode" : !effectiveLineVisibility.projections ? "Function projections are hidden in Line Visibility" : activeChartFunctionId === "none" ? "Choose a chart function first" : "Enable projection pick mode"}
           >
-            {!effectiveLineVisibility.projections ? "Projections Hidden" : activeChartFunctionId === "none" ? "Function Off" : projectionMode ? "Projection Pick On" : "Enable Projection Pick"}
+            {activeChartFunctionId === "manual_demand_zone" ? (projectionMode ? "Demand Pick On" : "Enable Demand Pick") : !effectiveLineVisibility.projections ? "Projections Hidden" : activeChartFunctionId === "none" ? "Function Off" : projectionMode ? "Projection Pick On" : "Enable Projection Pick"}
           </button>
 
           <div
@@ -10736,14 +11645,11 @@ const to = dataSlots - 1 + rightPaddingBars;
               Trendline Settings
             </div>
             <button
-              onClick={() => {
-                setDrawMode(false);
-                setPendingTrendPoint(null);
-              }}
+              onClick={() => setTrendlineSettingsOpen(false)}
               style={{ ...toolbarIconButtonStyle, width: 28, height: 28, fontSize: 12 }}
-              title="Turn trendline tool off"
+              title="Close trendline settings"
             >
-              ←
+              ✕
             </button>
           </div>
 
@@ -10828,6 +11734,38 @@ const to = dataSlots - 1 + rightPaddingBars;
             >
               {drawMode ? "Manual Trendline On" : "Manual Trendline"}
             </button>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, alignItems: "center" }}>
+              <input
+                value={manualFlatPrice}
+                onChange={(event) => setManualFlatPrice(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") addManualFlatTrendline();
+                }}
+                placeholder="Flat price, ex 1.50"
+                inputMode="decimal"
+                style={{
+                  ...toolbarSelectStyle,
+                  width: "100%",
+                  height: 32,
+                  fontSize: 12,
+                }}
+                title="Enter a price to draw a perfectly flat trendline"
+              />
+              <button
+                onClick={addManualFlatTrendline}
+                style={{
+                  ...toolbarButtonStyle,
+                  height: 32,
+                  padding: "0 10px",
+                  justifyContent: "center",
+                  whiteSpace: "nowrap",
+                }}
+                title="Add flat price trendline"
+              >
+                Add
+              </button>
+            </div>
 
             <button
               onClick={() => handleManualExtendLeftChange(!manualExtendLeft)}
@@ -11149,6 +12087,8 @@ const to = dataSlots - 1 + rightPaddingBars;
                 ? "0 0 0 2px rgba(250,204,21,0.35), 0 4px 12px rgba(0,0,0,0.40)"
                 : "0 0 0 2px rgba(34,211,238,0.25), 0 4px 12px rgba(0,0,0,0.35)",
               animation: handle.selected ? "selectedTrendlinePulse 1s ease-in-out infinite" : undefined,
+              pointerEvents: "auto",
+              cursor: "grab",
               zIndex: 30,
             }}
           />
@@ -11428,6 +12368,45 @@ const to = dataSlots - 1 + rightPaddingBars;
           </>
         ) : null}
 
+        {manualDemandZoneOverlays.map((zone) => (
+          <div key={zone.id}>
+            <div
+              style={{
+                position: "absolute",
+                left: zone.left,
+                top: zone.top,
+                width: zone.width,
+                height: zone.height,
+                background: "rgba(34,197,94,0.16)",
+                border: "1px solid rgba(34,197,94,0.62)",
+                borderRadius: 4,
+                boxShadow: "0 0 0 1px rgba(34,197,94,0.10) inset",
+                pointerEvents: "none",
+                zIndex: 3,
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: zone.labelLeft,
+                top: zone.labelTop,
+                padding: "2px 6px",
+                borderRadius: 6,
+                background: "rgba(22,101,52,0.92)",
+                border: "1px solid rgba(74,222,128,0.60)",
+                color: "#bbf7d0",
+                fontSize: 11,
+                fontWeight: 900,
+                letterSpacing: 0.2,
+                pointerEvents: "none",
+                zIndex: 12,
+              }}
+            >
+              {zone.label}
+            </div>
+          </div>
+        ))}
+
         {effectiveLineVisibility.compression && compressionRect ? (
           <>
             <div
@@ -11537,6 +12516,53 @@ const to = dataSlots - 1 + rightPaddingBars;
             </div>
           </>
         ) : null}
+
+        {candleInspectorMode
+          ? candleIqMarkers.map((marker, idx) => {
+              const dotSize = marker.dotSize ?? 11;
+              const labelTop = marker.direction === "up" ? marker.top + dotSize + 2 : marker.top - dotSize - 18;
+
+              return (
+                <div key={`candle-iq-${marker.label}-${idx}-${marker.left}-${marker.top}`}>
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: marker.left - dotSize / 2,
+                      top: marker.top - dotSize / 2,
+                      width: dotSize,
+                      height: dotSize,
+                      borderRadius: "999px",
+                      background: "#facc15",
+                      border: "2px solid rgba(15,23,42,0.95)",
+                      boxShadow: "0 0 9px rgba(250,204,21,0.95)",
+                      pointerEvents: "auto",
+                      zIndex: 34,
+                    }}
+                    title={`Candle IQ ${marker.label}`}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: marker.left + 7,
+                      top: labelTop,
+                      padding: "2px 6px",
+                      borderRadius: 7,
+                      background: "rgba(15,23,42,0.90)",
+                      border: "1px solid rgba(250,204,21,0.65)",
+                      color: "#fde68a",
+                      fontSize: 10,
+                      fontWeight: 800,
+                      letterSpacing: 0.2,
+                      pointerEvents: "auto",
+                      zIndex: 35,
+                    }}
+                  >
+                    {marker.label}
+                  </div>
+                </div>
+              );
+            })
+          : null}
 
         {effectiveLineVisibility.vwap
           ? vwapMarkers.map((marker, idx) => {
@@ -12515,15 +13541,4 @@ const sameOpenOrders = (a: ChartOrder[] | undefined, b: ChartOrder[] | undefined
 const sameTrendlineAction = (a: TrendlineControlAction | undefined, b: TrendlineControlAction | undefined) =>
   (a?.type ?? "none") === (b?.type ?? "none");
 
-export default memo(ChartPanelComponent, (prev, next) =>
-  prev.symbol === next.symbol &&
-  prev.timeframe === next.timeframe &&
-  sameVisibility(prev.visibility, next.visibility) &&
-  sameTrendlineAction(prev.trendlineAction, next.trendlineAction) &&
-  prev.trendlineSnapMode === next.trendlineSnapMode &&
-  prev.showInChartWatchlistAdder === next.showInChartWatchlistAdder &&
-  sameOpenOrders(prev.openOrders, next.openOrders) &&
-  prev.onCancelOrder === next.onCancelOrder &&
-  prev.onReplaceOrderPrice === next.onReplaceOrderPrice &&
-  prev.onTimeframeChange === next.onTimeframeChange
-);
+export default memo(ChartPanelComponent);

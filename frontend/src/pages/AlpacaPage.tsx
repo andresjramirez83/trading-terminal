@@ -161,6 +161,10 @@ function normalizeOverlayVisibility(value: Partial<OverlayVisibility> | null | u
   };
 }
 
+function sameOverlayVisibility(a: OverlayVisibility, b: OverlayVisibility): boolean {
+  return (Object.keys(DEFAULT_VISIBILITY) as Array<keyof OverlayVisibility>).every((key) => a[key] === b[key]);
+}
+
 function buildDefaultChartStudyVisibilityMap(): ChartStudyVisibilityMap {
   return {
     "1m": { ...DEFAULT_VISIBILITY },
@@ -221,7 +225,7 @@ const EMERGENCY_FALLBACK_SYMBOL = "AAPL";
 
 const MANUAL_WATCHLIST_STORAGE_KEY = "alpacaManualWatchlist";
 const SCANNER_WATCHLIST_STORAGE_KEY = "watchlist";
-const ACTIVE_SYMBOL_STORAGE_KEY = "activeSymbol";
+const ALPACA_ACTIVE_SYMBOL_STORAGE_KEY = "alpacaActiveSymbol";
 const ACTIVE_ALPACA_CHART_STORAGE_KEY = "alpacaActiveChartTimeframe";
 const BRACKET_PLAN_STORAGE_PREFIX = "alpacaBracketPlan";
 const SCANNER_CACHE_URL = `${API_BASE}/scanner/cache`;
@@ -283,7 +287,7 @@ function loadInitialWatchlist(): string[] {
 
 function loadInitialSelectedSymbol(initialWatchlist: string[]): string {
   if (typeof window !== "undefined") {
-    const stored = normalizeSingleSymbol(window.localStorage.getItem(ACTIVE_SYMBOL_STORAGE_KEY) || "");
+    const stored = normalizeSingleSymbol(window.localStorage.getItem(ALPACA_ACTIVE_SYMBOL_STORAGE_KEY) || "");
     if (stored) return stored;
   }
   return initialWatchlist[0] || EMERGENCY_FALLBACK_SYMBOL;
@@ -339,8 +343,7 @@ function saveActiveSymbolLocal(nextSymbol: string) {
   if (typeof window === "undefined") return;
   const cleanSymbol = normalizeSingleSymbol(nextSymbol);
   if (!cleanSymbol) return;
-  window.localStorage.setItem(ACTIVE_SYMBOL_STORAGE_KEY, cleanSymbol);
-  window.dispatchEvent(new CustomEvent<string>("scanner-active-symbol-change", { detail: cleanSymbol }));
+  window.localStorage.setItem(ALPACA_ACTIVE_SYMBOL_STORAGE_KEY, cleanSymbol);
 }
 
 function loadManualWatchlist(): string[] {
@@ -478,7 +481,6 @@ function normalizeAlpacaOrderPrice(value: number): number {
 
 function AlpacaPage() {
   const navigate = useNavigate();
-
   const [mode, setMode] = useState<AlpacaMode>("paper");
   const initialWatchlistRef = useRef<string[]>(loadInitialWatchlist());
   const [symbol, setSymbol] = useState<string>(() => loadInitialSelectedSymbol(initialWatchlistRef.current));
@@ -492,6 +494,10 @@ function AlpacaPage() {
   const sharedStateHydratedRef = useRef(false);
   const sharedStateSaveTimerRef = useRef<number | null>(null);
   const bracketPlanHydratedRef = useRef(false);
+
+  useEffect(() => {
+    setChartResetNonce((prev) => prev + 1);
+  }, [symbol]);
 
   const [account, setAccount] = useState<any | null>(null);
   const [positions, setPositions] = useState<any[]>([]);
@@ -685,12 +691,6 @@ function AlpacaPage() {
       if (Array.isArray(nextWatchlist)) applyScannerWatchlist(nextWatchlist);
     };
 
-    const handleScannerActiveSymbolEvent = (event: Event) => {
-      const next = normalizeSingleSymbol((event as CustomEvent<string>).detail || "");
-      if (!next) return;
-      setSymbol(next);
-      setSymbolInput(next);
-    };
 
     const handleStorage = (event: StorageEvent) => {
       if (event.key === SCANNER_WATCHLIST_STORAGE_KEY && event.newValue) {
@@ -701,23 +701,13 @@ function AlpacaPage() {
           // Ignore bad scanner watchlist storage.
         }
       }
-
-      if (event.key === ACTIVE_SYMBOL_STORAGE_KEY && event.newValue) {
-        const next = normalizeSingleSymbol(event.newValue);
-        if (next) {
-          setSymbol(next);
-          setSymbolInput(next);
-        }
-      }
     };
 
     window.addEventListener("scanner-watchlist-change", handleScannerWatchlistEvent);
-    window.addEventListener("scanner-active-symbol-change", handleScannerActiveSymbolEvent);
     window.addEventListener("storage", handleStorage);
 
     return () => {
       window.removeEventListener("scanner-watchlist-change", handleScannerWatchlistEvent);
-      window.removeEventListener("scanner-active-symbol-change", handleScannerActiveSymbolEvent);
       window.removeEventListener("storage", handleStorage);
     };
   }, []);
@@ -1178,9 +1168,16 @@ function AlpacaPage() {
   const updateChartStudyVisibility = useCallback((timeframe: ChartTimeframe, updater: (current: OverlayVisibility) => OverlayVisibility) => {
     startTransition(() => {
       setChartStudyVisibility((prev) => {
+        const currentVisibility = normalizeOverlayVisibility(prev[timeframe] ?? DEFAULT_VISIBILITY);
+        const nextVisibility = normalizeOverlayVisibility(updater(currentVisibility));
+
+        if (sameOverlayVisibility(currentVisibility, nextVisibility)) {
+          return prev;
+        }
+
         const nextMap: ChartStudyVisibilityMap = {
           ...prev,
-          [timeframe]: normalizeOverlayVisibility(updater(prev[timeframe] ?? DEFAULT_VISIBILITY)),
+          [timeframe]: nextVisibility,
         };
         saveChartStudyVisibilityMap(nextMap);
         return nextMap;
@@ -1200,6 +1197,15 @@ function AlpacaPage() {
     updateChartStudyVisibility(timeframe, (current) => ({
       ...current,
       [key]: !current[key],
+    }));
+  }, [updateChartStudyVisibility]);
+
+  const handleChartVisibilityChange = useCallback((timeframe: ChartTimeframe, nextVisibility: Partial<OverlayVisibility>) => {
+    setOverlayPreset((prev) => (prev === "runner" ? prev : "runner"));
+    setChartOverlayPresets((prev) => (prev[timeframe] === "runner" ? prev : { ...prev, [timeframe]: "runner" }));
+    updateChartStudyVisibility(timeframe, (current) => ({
+      ...current,
+      ...nextVisibility,
     }));
   }, [updateChartStudyVisibility]);
 
@@ -2312,6 +2318,7 @@ function AlpacaPage() {
             showInChartWatchlistAdder={false}
             onTrendlineActionHandled={handleTrendlineActionHandled}
             onTrendlineStateChange={setTrendlineUiState}
+            onVisibilityChange={(nextVisibility) => handleChartVisibilityChange(timeframe, nextVisibility)}
             openOrders={ordersForChart}
             onCancelOrder={cancelChartOrderLine}
             onReplaceOrderPrice={replaceChartOrderLinePrice}

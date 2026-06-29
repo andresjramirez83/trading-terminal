@@ -121,20 +121,20 @@ function normalizeLookback(timeframe: string, requested?: string): string {
 function defaultBarsLimit(timeframe: string): number {
   switch (timeframe.toLowerCase()) {
     case "1m":
-      return 300;
+      return 220;
     case "5m":
-      return 550;
+      return 420;
     case "15m":
-      return 450;
-    case "30m":
-      return 400;
-    case "1h":
       return 350;
+    case "30m":
+      return 320;
+    case "1h":
+      return 300;
     case "1d":
     case "day":
       return 500;
     default:
-      return 500;
+      return 420;
   }
 }
 
@@ -858,4 +858,85 @@ export async function saveSharedAlpacaState(payload: SharedAlpacaStatePayload): 
     body: JSON.stringify(payload),
   });
   return parseJson<SharedAlpacaStatePayload>(res);
+}
+
+/* =========================
+   V2 LIVE CHART WEBSOCKET
+   ========================= */
+
+export type LiveBarMessage = {
+  type?: string;
+  symbol?: string;
+  timeframe?: string;
+  time: number | string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+  v?: number;
+};
+
+export function resolveWsBaseUrl(): string {
+  const apiBase = API_BASE.replace(/\/$/, "");
+  return apiBase.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+}
+
+export function connectChartV2BarsSocket(params: {
+  symbol: string;
+  timeframe: string;
+  onBar: (bar: LiveBarMessage) => void;
+  onOpen?: () => void;
+  onClose?: () => void;
+  onError?: (err: Event) => void;
+}): WebSocket {
+  const symbol = params.symbol.trim().toUpperCase();
+  const timeframe = params.timeframe.trim().toLowerCase();
+
+  const qs = new URLSearchParams({
+    symbol,
+    timeframe,
+  });
+
+  // If your backend websocket route has a different name,
+  // this is the only line we need to change.
+  const ws = new WebSocket(`${resolveWsBaseUrl()}/ws/chart-bars?${qs.toString()}`);
+
+  ws.onopen = () => {
+    console.log("[ChartV2 WS] connected", symbol, timeframe);
+    params.onOpen?.();
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+
+      const bar = msg?.bar ?? msg;
+
+      if (
+        bar &&
+        bar.time != null &&
+        bar.open != null &&
+        bar.high != null &&
+        bar.low != null &&
+        bar.close != null
+      ) {
+        params.onBar(bar as LiveBarMessage);
+      }
+    } catch (err) {
+      console.error("[ChartV2 WS] bad message", event.data, err);
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.error("[ChartV2 WS] error", err);
+    params.onError?.(err);
+  };
+
+  ws.onclose = () => {
+    console.log("[ChartV2 WS] closed", symbol, timeframe);
+    params.onClose?.();
+  };
+
+  return ws;
 }

@@ -10,6 +10,7 @@ from app.scanners.base import ScannerBase
 from app.services.polygon_service import PolygonService
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 from app.services.scanner_universe_service import get_scanner_universe
+from app.services.scanner_cache_service import get_scanner_recent_1m_bars, get_scanner_ticker_details
 
 ET = ZoneInfo("America/New_York")
 PT = ZoneInfo("America/Los_Angeles")
@@ -543,7 +544,7 @@ class OvernightRunnerScanner(ScannerBase):
         if last_price <= 0:
             return None
 
-        bars = await polygon.get_recent_1m_bars(symbol, hours_back=hours_back)
+        bars = await get_scanner_recent_1m_bars(polygon, symbol, hours_back=hours_back)
         if not bars:
             return None
 
@@ -615,7 +616,7 @@ class OvernightRunnerScanner(ScannerBase):
         if last_price <= 0:
             return None
 
-        bars = await polygon.get_recent_1m_bars(symbol, hours_back=hours_back)
+        bars = await get_scanner_recent_1m_bars(polygon, symbol, hours_back=hours_back)
         if not bars:
             return None
 
@@ -632,7 +633,7 @@ class OvernightRunnerScanner(ScannerBase):
         if pm_session is None:
             return None
 
-        details = await polygon.get_ticker_details(symbol)
+        details = await get_scanner_ticker_details(polygon, symbol)
         share_stats = extract_share_stats(details)
         float_shares = share_stats.get("float_shares")
         shares_outstanding = share_stats.get("shares_outstanding")
@@ -759,7 +760,7 @@ class OvernightRunnerScanner(ScannerBase):
         *,
         hours_back: int,
     ) -> Optional[Dict[str, Any]]:
-        bars = await polygon.get_recent_1m_bars(symbol, hours_back=hours_back)
+        bars = await get_scanner_recent_1m_bars(polygon, symbol, hours_back=hours_back)
         if not bars:
             return None
 
@@ -786,7 +787,7 @@ class OvernightRunnerScanner(ScannerBase):
         if last_price <= 0:
             return None
 
-        details = await polygon.get_ticker_details(symbol)
+        details = await get_scanner_ticker_details(polygon, symbol)
         share_stats = extract_share_stats(details)
         float_shares = share_stats.get("float_shares")
         shares_outstanding = share_stats.get("shares_outstanding")

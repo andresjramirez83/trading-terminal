@@ -8,6 +8,8 @@ type SocketEntry = {
   listeners: Set<MarketSocketListener>;
   reconnectTimer: number | null;
   connectTimer: number | null;
+  messageFlushTimer: number | null;
+  pendingPayloads: unknown[];
   shouldReconnect: boolean;
   isConnecting: boolean;
   intentionalClose: boolean;
@@ -18,6 +20,7 @@ type SocketEntry = {
 
 const MAX_RECONNECT_ATTEMPTS = 8;
 const MIN_CONNECT_SPACING_MS = 350;
+const MESSAGE_BATCH_WINDOW_MS = 120;
 const BASE_RECONNECT_DELAY_MS = 1_200;
 const MAX_RECONNECT_DELAY_MS = 12_000;
 
@@ -154,6 +157,8 @@ class MarketSocketManager {
       listeners: new Set<MarketSocketListener>(),
       reconnectTimer: null,
       connectTimer: null,
+      messageFlushTimer: null,
+      pendingPayloads: [],
       shouldReconnect: true,
       isConnecting: false,
       intentionalClose: false,
@@ -174,6 +179,11 @@ class MarketSocketManager {
       window.clearTimeout(entry.connectTimer);
       entry.connectTimer = null;
     }
+    if (entry.messageFlushTimer != null) {
+      window.clearTimeout(entry.messageFlushTimer);
+      entry.messageFlushTimer = null;
+    }
+    entry.pendingPayloads = [];
   }
 
   private disconnectButKeepListeners(entry: SocketEntry, reason: string): void {
@@ -276,13 +286,30 @@ class MarketSocketManager {
         return;
       }
 
-      for (const listener of Array.from(entry.listeners)) {
-        try {
-          listener(payload);
-        } catch (error) {
-          console.error("[marketSocket] listener error", entry.symbol, error);
+      const incoming = Array.isArray(payload) ? payload : [payload];
+      entry.pendingPayloads.push(...incoming);
+
+      if (entry.messageFlushTimer != null) return;
+
+      entry.messageFlushTimer = window.setTimeout(() => {
+        entry.messageFlushTimer = null;
+        if (entry.connectionId !== connectionId || entry.socket !== socket) {
+          entry.pendingPayloads = [];
+          return;
         }
-      }
+
+        const batchedPayload = entry.pendingPayloads;
+        entry.pendingPayloads = [];
+        if (!batchedPayload.length) return;
+
+        for (const listener of Array.from(entry.listeners)) {
+          try {
+            listener(batchedPayload);
+          } catch (error) {
+            console.error("[marketSocket] listener error", entry.symbol, error);
+          }
+        }
+      }, MESSAGE_BATCH_WINDOW_MS);
     };
 
     socket.onerror = (event) => {
