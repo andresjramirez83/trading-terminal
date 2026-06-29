@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from app.scanners.base import ScannerBase
+from app.scanners.scanner_engine import ScannerEngine
 from app.services.polygon_service import PolygonService
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 
@@ -109,27 +109,6 @@ def group_regular_bars_by_day(bars: List[Dict[str, float]]) -> "OrderedDict[str,
     return grouped
 
 
-async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
-    merged: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-
-    async def add_rows(coro: Any) -> None:
-        try:
-            rows = await coro
-        except Exception as exc:
-            print(f"[gap-atr-runner] universe source failed: {exc}", flush=True)
-            return
-        for row in rows or []:
-            symbol = normalize_symbol(row.get("ticker") or row.get("symbol"))
-            if symbol and symbol not in merged:
-                merged[symbol] = row
-
-    await asyncio.gather(
-        add_rows(polygon.get_snapshot_gainers(limit=limit)),
-        add_rows(polygon.get_snapshot_actives(limit=limit)),
-        add_rows(polygon.get_snapshot_losers(limit=limit)),
-    )
-    return merged
-
 
 class GapAtrRunnerScanner(ScannerBase):
     id = "gap_atr_runner"
@@ -154,13 +133,21 @@ class GapAtrRunnerScanner(ScannerBase):
         min_volume_mult = float(kwargs.get("min_volume_mult", 1.25))
         lookback_days = int(kwargs.get("lookback_days", 5))
 
-        universe = await build_snapshot_universe(polygon, limit=max(80, max_symbols * 6))
-        rows: List[Dict[str, Any]] = []
-        checked = 0
+        concurrency = max(1, int(kwargs.get("concurrency", 20)))
+        universe_limit = max(1000, max_symbols * 10)
+        engine = ScannerEngine(concurrency=concurrency)
+        universe = await engine.get_universe(
+            polygon=polygon,
+            limit=universe_limit,
+            min_limit=universe_limit,
+        )
 
-        for symbol, snapshot in list(universe.items())[: max_symbols * 10]:
-            checked += 1
-            row = await self._scan_symbol(
+        scan_items = list(universe.items())[: max_symbols * 10]
+        checked = len(scan_items)
+
+        async def worker(item: tuple[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            symbol, snapshot = item
+            return await self._scan_symbol(
                 polygon,
                 symbol,
                 snapshot,
@@ -175,8 +162,21 @@ class GapAtrRunnerScanner(ScannerBase):
                 min_volume_mult=min_volume_mult,
                 lookback_days=lookback_days,
             )
-            if row is not None:
-                rows.append(row)
+
+        rows, elapsed_ms = await engine.scan(
+            items=scan_items,
+            worker=worker,
+        )
+
+        print(
+            "[gap-atr-runner] "
+            f"universe={len(universe)} "
+            f"scanned={checked} "
+            f"passed={len(rows)} "
+            f"concurrency={concurrency} "
+            f"elapsed_ms={elapsed_ms:.1f}",
+            flush=True,
+        )
 
         rows.sort(
             key=lambda item: (
@@ -201,6 +201,11 @@ class GapAtrRunnerScanner(ScannerBase):
             "rows": rows,
             "meta": {
                 "checked": checked,
+                "universe_count": len(universe),
+                "scanned": checked,
+                "passed": len(rows),
+                "concurrency": concurrency,
+                "elapsed_ms": round(elapsed_ms, 1),
                 "active_filters": {
                     "max_symbols": max_symbols,
                     "min_price": min_price,
@@ -214,6 +219,7 @@ class GapAtrRunnerScanner(ScannerBase):
                     "min_volume_mult": min_volume_mult,
                     "lookback_days": lookback_days,
                     "timeframe": "15m",
+                    "concurrency": concurrency,
                 },
             },
         }
