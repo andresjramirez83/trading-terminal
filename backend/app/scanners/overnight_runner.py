@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import math
+import os
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -14,6 +17,19 @@ from app.services.scanner_cache_service import get_scanner_recent_1m_bars, get_s
 
 ET = ZoneInfo("America/New_York")
 PT = ZoneInfo("America/Los_Angeles")
+
+
+def get_scanner_concurrency(default: int = 20) -> int:
+    """Bounded scanner concurrency.
+
+    Keeps scans fast without letting one scanner launch hundreds of Polygon/detail
+    requests at once. Can be tuned from .env with OVERNIGHT_SCANNER_CONCURRENCY.
+    """
+    try:
+        value = int(os.getenv("OVERNIGHT_SCANNER_CONCURRENCY", str(default)) or str(default))
+    except Exception:
+        value = default
+    return max(1, min(50, value))
 
 
 class OvernightRunnerScanner(ScannerBase):
@@ -208,12 +224,34 @@ class OvernightRunnerScanner(ScannerBase):
         scan_items = list(universe_map.items())[: max_symbols * 6]
         debug_counts["scanned"] = len(scan_items)
 
-        for symbol, snapshot in scan_items:
-            row = await self._build_premarket_row(symbol, snapshot, polygon, hours_back=hours_back)
+        started_at = time.perf_counter()
+        concurrency = get_scanner_concurrency()
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def build_live_item(symbol: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+            async with semaphore:
+                try:
+                    row = await self._build_premarket_row(symbol, snapshot, polygon, hours_back=hours_back)
+                    return {"symbol": symbol, "row": row, "error": None}
+                except Exception as exc:
+                    return {"symbol": symbol, "row": None, "error": str(exc)}
+
+        scan_results = await asyncio.gather(
+            *(build_live_item(symbol, snapshot) for symbol, snapshot in scan_items)
+        )
+
+        for result in scan_results:
+            symbol = str(result.get("symbol") or "").upper()
+            row = result.get("row")
+            error = result.get("error")
+
             if row is None:
                 debug_counts["row_none"] += 1
                 if len(debug_examples) < 15:
-                    debug_examples.append({"symbol": symbol, "reason": "row_none_no_bars_or_session"})
+                    reason = "row_none_no_bars_or_session"
+                    if error:
+                        reason = f"row_error: {error[:120]}"
+                    debug_examples.append({"symbol": symbol, "reason": reason})
                 continue
 
             debug_counts["rows_built"] += 1
@@ -241,13 +279,17 @@ class OvernightRunnerScanner(ScannerBase):
             debug_counts["passed"] += 1
             rows.append(row)
 
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000.0, 1)
+
         print(
             "[overnight-runner/live] "
             f"universe={debug_counts['universe_count']} "
             f"scanned={debug_counts['scanned']} "
             f"built={debug_counts['rows_built']} "
             f"passed={debug_counts['passed']} "
-            f"row_none={debug_counts['row_none']}",
+            f"row_none={debug_counts['row_none']} "
+            f"concurrency={concurrency} "
+            f"elapsed_ms={elapsed_ms}",
             flush=True,
         )
 
@@ -311,6 +353,11 @@ class OvernightRunnerScanner(ScannerBase):
             "count": len(rows),
             "rows": rows,
             "meta": {
+                "performance": {
+                    "elapsed_ms": elapsed_ms,
+                    "concurrency": concurrency,
+                    "scanned": debug_counts["scanned"],
+                },
                 "latest_saved_ah_date": latest_saved[0] if latest_saved else None,
                 "snapshot_dates": latest_saved,
                 "runner_type_counts": summarize_runner_types(rows),
@@ -394,13 +441,39 @@ class OvernightRunnerScanner(ScannerBase):
         scan_symbols = candidate_symbols[: max_symbols * 8]
         debug_counts["scanned"] = len(scan_symbols)
 
-        for symbol in scan_symbols:
-            snapshot = live_universe.get(symbol, {})
-            row = await self._build_combined_row(symbol, snapshot, polygon, saved_map.get(symbol), hours_back=hours_back)
+        started_at = time.perf_counter()
+        concurrency = get_scanner_concurrency()
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def build_combined_item(symbol: str) -> Dict[str, Any]:
+            async with semaphore:
+                try:
+                    snapshot = live_universe.get(symbol, {})
+                    row = await self._build_combined_row(
+                        symbol,
+                        snapshot,
+                        polygon,
+                        saved_map.get(symbol),
+                        hours_back=hours_back,
+                    )
+                    return {"symbol": symbol, "row": row, "error": None}
+                except Exception as exc:
+                    return {"symbol": symbol, "row": None, "error": str(exc)}
+
+        scan_results = await asyncio.gather(*(build_combined_item(symbol) for symbol in scan_symbols))
+
+        for result in scan_results:
+            symbol = str(result.get("symbol") or "").upper()
+            row = result.get("row")
+            error = result.get("error")
+
             if row is None:
                 debug_counts["row_none"] += 1
                 if len(debug_examples) < 15:
-                    debug_examples.append({"symbol": symbol, "reason": "row_none_no_bars_or_session"})
+                    reason = "row_none_no_bars_or_session"
+                    if error:
+                        reason = f"row_error: {error[:120]}"
+                    debug_examples.append({"symbol": symbol, "reason": reason})
                 continue
 
             debug_counts["rows_built"] += 1
@@ -428,6 +501,8 @@ class OvernightRunnerScanner(ScannerBase):
             debug_counts["passed"] += 1
             rows.append(row)
 
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000.0, 1)
+
         print(
             "[overnight-runner/combined] "
             f"saved_ah={debug_counts['saved_ah_count']} "
@@ -436,7 +511,9 @@ class OvernightRunnerScanner(ScannerBase):
             f"scanned={debug_counts['scanned']} "
             f"built={debug_counts['rows_built']} "
             f"passed={debug_counts['passed']} "
-            f"row_none={debug_counts['row_none']}",
+            f"row_none={debug_counts['row_none']} "
+            f"concurrency={concurrency} "
+            f"elapsed_ms={elapsed_ms}",
             flush=True,
         )
 
@@ -500,6 +577,11 @@ class OvernightRunnerScanner(ScannerBase):
             "count": len(rows),
             "rows": rows,
             "meta": {
+                "performance": {
+                    "elapsed_ms": elapsed_ms,
+                    "concurrency": concurrency,
+                    "scanned": debug_counts["scanned"],
+                },
                 "ah_trade_date": ah_snapshot.get("trade_date"),
                 "snapshot_dates": snapshot_dates,
                 "candidate_count": len(candidate_symbols),
