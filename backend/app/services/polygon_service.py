@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -126,6 +128,137 @@ class PolygonService:
         except Exception as exc:
             _debug(f"POLYGON LOSERS SNAPSHOT FAILED: {exc}")
             return []
+
+    def _ticker_universe_cache_path(self) -> Path:
+        raw = os.getenv("SCANNER_UNIVERSE_CACHE_PATH", "data/polygon_ticker_universe.json").strip()
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        return Path.cwd() / path
+
+    def _read_cached_ticker_universe(self, *, max_age_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
+        path = self._ticker_universe_cache_path()
+        try:
+            if not path.exists():
+                return []
+            payload = json.loads(path.read_text())
+            saved_at = float(payload.get("saved_at_epoch") or 0)
+            if max_age_seconds is not None and saved_at > 0 and time.time() - saved_at > max_age_seconds:
+                return []
+            rows = payload.get("tickers") or []
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict) and row.get("ticker")]
+        except Exception as exc:
+            _debug(f"POLYGON TICKER UNIVERSE CACHE READ FAILED: {exc}")
+        return []
+
+    def _write_cached_ticker_universe(self, rows: List[Dict[str, Any]]) -> None:
+        path = self._ticker_universe_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "saved_at_epoch": time.time(),
+                "count": len(rows),
+                "tickers": rows,
+            }
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        except Exception as exc:
+            _debug(f"POLYGON TICKER UNIVERSE CACHE WRITE FAILED: {exc}")
+
+    async def _get_full_url(self, url: str) -> Dict[str, Any]:
+        last_error = ""
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                client = self._client(self.timeout)
+                params = None if "apiKey=" in url else {"apiKey": self.api_key}
+                response = await client.get(url, params=params)
+                body_preview = response.text[:500]
+                if response.status_code == 200:
+                    return response.json()
+                last_error = f"Polygon HTTP {response.status_code} for {url}: {body_preview}"
+                if response.status_code in {408, 409, 425, 429, 500, 502, 503, 504} and attempt < self.max_retries:
+                    await asyncio.sleep(0.8 * attempt)
+                    continue
+                raise RuntimeError(last_error)
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_error = f"Polygon network error for {url}: {type(exc).__name__}: {exc}"
+                if attempt < self.max_retries:
+                    await asyncio.sleep(0.8 * attempt)
+                    continue
+                raise RuntimeError(last_error) from exc
+            except ValueError as exc:
+                last_error = f"Polygon JSON parse error for {url}: {exc}"
+                if attempt < self.max_retries:
+                    await asyncio.sleep(0.8 * attempt)
+                    continue
+                raise RuntimeError(last_error) from exc
+        raise RuntimeError(last_error or f"Polygon request failed for {url}")
+
+    async def get_ticker_universe(self, limit: int = 1000, *, refresh: bool = False) -> List[Dict[str, Any]]:
+        """Return a persistent tradable stock universe for scanner fallback.
+
+        Snapshot gainers/actives/losers can be empty on weekends, holidays, or during
+        Polygon snapshot outages. This reference-ticker universe gives scanners a stable
+        symbol source so they can still evaluate recent bars and saved snapshots.
+        """
+        safe_limit = max(1, min(int(limit or 1000), 10000))
+        cache_ttl = float(os.getenv("SCANNER_UNIVERSE_CACHE_TTL_SECONDS", "86400") or "86400")
+
+        if not refresh:
+            cached = self._read_cached_ticker_universe(max_age_seconds=cache_ttl)
+            if cached:
+                return cached[:safe_limit]
+
+        rows: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        params = {
+            "market": "stocks",
+            "active": "true",
+            "type": "CS",
+            "sort": "ticker",
+            "order": "asc",
+            "limit": 1000,
+        }
+
+        try:
+            data = await self._get("/v3/reference/tickers", params=params)
+            while True:
+                for item in data.get("results") or []:
+                    ticker = str(item.get("ticker", "")).upper().strip()
+                    if not ticker or ticker in seen:
+                        continue
+                    seen.add(ticker)
+                    rows.append({
+                        "ticker": ticker,
+                        "name": item.get("name"),
+                        "market": item.get("market"),
+                        "locale": item.get("locale"),
+                        "primary_exchange": item.get("primary_exchange"),
+                        "type": item.get("type"),
+                        "active": item.get("active"),
+                    })
+                    if len(rows) >= safe_limit:
+                        break
+
+                if len(rows) >= safe_limit:
+                    break
+
+                next_url = data.get("next_url")
+                if not next_url:
+                    break
+                data = await self._get_full_url(str(next_url))
+
+            if rows:
+                self._write_cached_ticker_universe(rows)
+                return rows[:safe_limit]
+
+        except Exception as exc:
+            _debug(f"POLYGON TICKER UNIVERSE FETCH FAILED: {exc}")
+
+        # If the live reference call failed, use stale cache as a last resort.
+        cached = self._read_cached_ticker_universe(max_age_seconds=None)
+        return cached[:safe_limit]
 
     async def get_ticker_snapshot(self, symbol: str) -> Dict[str, Any]:
         data = await self._get(f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbol.upper()}")
