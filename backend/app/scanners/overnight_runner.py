@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from app.scanners.base import ScannerBase
 from app.services.polygon_service import PolygonService
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
+from app.services.scanner_universe_service import get_scanner_universe
 
 ET = ZoneInfo("America/New_York")
 PT = ZoneInfo("America/Los_Angeles")
@@ -845,23 +846,18 @@ class OvernightRunnerScanner(ScannerBase):
 
 
 async def build_snapshot_universe(polygon: PolygonService, limit: int = 160) -> "OrderedDict[str, Dict[str, Any]]":
-    gainers = await polygon.get_snapshot_gainers(limit=limit)
-    actives = await polygon.get_snapshot_actives(limit=limit)
+    """Return scanner universe using the shared universe service.
 
-    losers: List[Dict[str, Any]] = []
-    get_losers = getattr(polygon, "get_snapshot_losers", None)
-    if callable(get_losers):
-        try:
-            losers = await get_losers(limit=limit)
-        except Exception:
-            losers = []
-
-    universe_map: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-    for item in gainers + actives + losers:
-        symbol = str(item.get("ticker", "")).upper().strip()
-        if symbol and symbol not in universe_map:
-            universe_map[symbol] = item
-    return universe_map
+    This keeps existing scanner code unchanged while moving symbol sourcing into
+    ScannerUniverseService. The service uses Polygon snapshot gainers/actives/losers
+    first, then falls back to cached/reference universes so weekend/holiday scans do
+    not receive an empty symbol universe.
+    """
+    return await get_scanner_universe(
+        polygon,
+        limit=max(1, int(limit or 160)),
+        min_limit=max(1000, int(limit or 160)),
+    )
 
 
 
