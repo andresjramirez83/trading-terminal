@@ -23,8 +23,6 @@ function saveSharedScannerWatchlist(nextWatchlist: string[]) {
     new Set(nextWatchlist.map((item) => normalizeSingleSymbol(String(item))).filter(Boolean))
   );
 
-  if (!cleaned.length) return;
-
   window.localStorage.setItem(SHARED_SCANNER_WATCHLIST_STORAGE_KEY, JSON.stringify(cleaned));
   window.dispatchEvent(
     new CustomEvent<string[]>("scanner-watchlist-change", {

@@ -1,5 +1,6 @@
-import React, { useMemo, type CSSProperties, type ReactNode } from "react";
+import React, { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
+import { fetchSharedAlpacaState } from "../../../../services/api";
 import { useActiveSymbol } from "../../ActiveSymbolContext";
 import {
   useWatchlists,
@@ -8,6 +9,125 @@ import {
 } from "../../../watchlists/WatchlistContext";
 
 type SymbolTone = WatchlistSymbolTone;
+
+const MANUAL_WATCHLIST_STORAGE_KEYS = [
+  "watchlist", // Legacy ScannerPage source of truth
+  "manualWatchlist",
+  "alpacaManualWatchlist",
+  "terminalManualWatchlist",
+  "sharedManualWatchlist",
+  "trading.manual.watchlist",
+];
+const MANUAL_WATCHLIST_STORAGE_KEY = "watchlist";
+
+function normalizeWorkspaceSymbol(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9.]/g, "");
+}
+
+function uniqueWorkspaceSymbols(values: unknown[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const value of values) {
+    const symbol = normalizeWorkspaceSymbol(value);
+
+    if (!symbol || seen.has(symbol)) {
+      continue;
+    }
+
+    seen.add(symbol);
+    out.push(symbol);
+  }
+
+  return out;
+}
+
+function extractSymbolsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return uniqueWorkspaceSymbols(value);
+  }
+
+  if (value && typeof value === "object") {
+    const data = value as Record<string, unknown>;
+    const possibleLists = [
+      data.manualWatchlist,
+      data.symbols,
+      data.watchlist,
+      data.manualSymbols,
+      data.selectedSymbols,
+    ];
+
+    for (const possibleList of possibleLists) {
+      const symbols = extractSymbolsFromUnknown(possibleList);
+      if (symbols.length) {
+        return symbols;
+      }
+    }
+  }
+
+  if (typeof value === "string") {
+    return uniqueWorkspaceSymbols(value.split(/[\s,;]+/));
+  }
+
+  return [];
+}
+
+function readLegacyManualWatchlist(): string[] | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  for (const key of MANUAL_WATCHLIST_STORAGE_KEYS) {
+    try {
+      const raw = window.localStorage.getItem(key);
+
+      if (raw === null) {
+        continue;
+      }
+
+      let parsed: unknown = raw;
+
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = raw;
+      }
+
+      return extractSymbolsFromUnknown(parsed);
+    } catch {
+      // Ignore individual bad legacy keys.
+    }
+  }
+
+  return null;
+}
+
+function writeLegacyManualWatchlist(symbols: string[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const cleaned = uniqueWorkspaceSymbols(symbols);
+
+  for (const key of MANUAL_WATCHLIST_STORAGE_KEYS) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(cleaned));
+    } catch {
+      // Local persistence should never break the panel.
+    }
+  }
+}
+
+function isManualWorkspaceWatchlist(watchlist: { id?: string; name?: string; type?: string } | null | undefined): boolean {
+  const id = String(watchlist?.id ?? "").toLowerCase();
+  const name = String(watchlist?.name ?? "").toLowerCase();
+  const type = String(watchlist?.type ?? "").toLowerCase();
+
+  return type === "manual" || id.includes("manual") || name.includes("manual");
+}
 
 const styles: Record<string, CSSProperties> = {
   panel: {
@@ -186,30 +306,151 @@ export default function WatchlistsWorkspacePanel() {
     deleteWatchlist,
   } = useWatchlists();
 
+  const [legacyManualSymbols, setLegacyManualSymbols] = useState<string[] | null>(() =>
+    readLegacyManualWatchlist()
+  );
+
   const selectedWatchlist = activeWatchlist ?? watchlists[0];
+  const selectedIsManual = isManualWorkspaceWatchlist(selectedWatchlist);
+
+  const syncLegacyManualSymbols = useCallback((nextSymbols?: unknown) => {
+    const incoming =
+      nextSymbols === undefined
+        ? readLegacyManualWatchlist()
+        : extractSymbolsFromUnknown(nextSymbols);
+
+    if (incoming === null) {
+      return;
+    }
+
+    const next = uniqueWorkspaceSymbols(incoming);
+
+    setLegacyManualSymbols((prev) => {
+      if (
+        prev !== null &&
+        prev.length === next.length &&
+        prev.every((item, index) => item === next[index])
+      ) {
+        return prev;
+      }
+
+      writeLegacyManualWatchlist(next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshRemoteManualSymbols() {
+      try {
+        const remote = await fetchSharedAlpacaState();
+        if (cancelled || !remote) {
+          return;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(remote as any, "manualWatchlist")) {
+          syncLegacyManualSymbols((remote as any).manualWatchlist);
+        }
+      } catch {
+        // Remote sync should never break the watchlist panel.
+      }
+    }
+
+    function refreshAllManualSymbols() {
+      syncLegacyManualSymbols();
+      void refreshRemoteManualSymbols();
+    }
+
+    function handleManualWatchlistEvent(event: Event) {
+      syncLegacyManualSymbols((event as CustomEvent<unknown>).detail);
+    }
+
+    function handleStorage(event: StorageEvent) {
+      if (event.key && !MANUAL_WATCHLIST_STORAGE_KEYS.includes(event.key)) {
+        return;
+      }
+
+      if (event.newValue) {
+        try {
+          syncLegacyManualSymbols(JSON.parse(event.newValue));
+          return;
+        } catch {
+          syncLegacyManualSymbols(event.newValue);
+          return;
+        }
+      }
+
+      syncLegacyManualSymbols();
+    }
+
+    window.addEventListener("manual-watchlist-change", handleManualWatchlistEvent);
+    window.addEventListener("scanner-watchlist-change", handleManualWatchlistEvent);
+    window.addEventListener("alpaca-manual-watchlist-change", handleManualWatchlistEvent);
+    window.addEventListener("shared-manual-watchlist-change", handleManualWatchlistEvent);
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("focus", refreshAllManualSymbols);
+    document.addEventListener("visibilitychange", refreshAllManualSymbols);
+
+    refreshAllManualSymbols();
+
+    const intervalId = window.setInterval(refreshAllManualSymbols, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("manual-watchlist-change", handleManualWatchlistEvent);
+      window.removeEventListener("scanner-watchlist-change", handleManualWatchlistEvent);
+      window.removeEventListener("alpaca-manual-watchlist-change", handleManualWatchlistEvent);
+      window.removeEventListener("shared-manual-watchlist-change", handleManualWatchlistEvent);
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("focus", refreshAllManualSymbols);
+      document.removeEventListener("visibilitychange", refreshAllManualSymbols);
+    };
+  }, [syncLegacyManualSymbols]);
+
+  const displaySymbols = useMemo(() => {
+    const baseSymbols = selectedWatchlist?.symbols ?? [];
+
+    if (!selectedIsManual) {
+      return baseSymbols;
+    }
+
+    if (legacyManualSymbols === null) {
+      return baseSymbols;
+    }
+
+    return legacyManualSymbols.map((symbol) => ({
+      symbol,
+      score: 0,
+      tone: "watch" as SymbolTone,
+      setup: "Manual",
+      note: "Legacy manual watchlist",
+    }));
+  }, [legacyManualSymbols, selectedIsManual, selectedWatchlist?.symbols]);
 
   const sortedSymbols = useMemo(() => {
-    return [...(selectedWatchlist?.symbols ?? [])].sort(
+    return [...displaySymbols].sort(
       (a, b) => (b.score ?? 0) - (a.score ?? 0)
     );
-  }, [selectedWatchlist?.symbols]);
+  }, [displaySymbols]);
 
-  const readyCount = (selectedWatchlist?.symbols ?? []).filter(
+  const readyCount = displaySymbols.filter(
     (item) => item.tone === "ready"
   ).length;
 
-  const weakCount = (selectedWatchlist?.symbols ?? []).filter(
+  const weakCount = displaySymbols.filter(
     (item) => item.tone === "weak"
   ).length;
 
   const averageScore =
-    !selectedWatchlist || selectedWatchlist.symbols.length === 0
+    displaySymbols.length === 0
       ? 0
       : Math.round(
-          selectedWatchlist.symbols.reduce(
+          displaySymbols.reduce(
             (total, item) => total + (item.score ?? 0),
             0
-          ) / selectedWatchlist.symbols.length
+          ) / displaySymbols.length
         );
 
   function handleCreateWatchlist() {
@@ -320,7 +561,7 @@ export default function WatchlistsWorkspacePanel() {
 
       <Card title="Opportunity Summary">
         <div style={styles.statGrid}>
-          <Stat label="Symbols" value={selectedWatchlist?.symbols.length ?? 0} />
+          <Stat label="Symbols" value={displaySymbols.length} />
           <Stat label="Ready" value={readyCount} good />
           <Stat label="Avg" value={averageScore} />
         </div>
@@ -360,7 +601,7 @@ export default function WatchlistsWorkspacePanel() {
       >
         {sortedSymbols.length === 0 ? (
           <div style={styles.emptyState}>
-            This watchlist is empty. Scanner-generated lists will populate here automatically.
+            This watchlist is empty. Scanner-generated lists and manual symbols will populate here automatically.
           </div>
         ) : (
           <div style={styles.table}>
