@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from app.analysis.trade_analysis_engine import TradeAnalysisEngine
 from app.scanners.base import ScannerBase
 from app.services.polygon_service import PolygonService
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
@@ -32,12 +33,84 @@ def get_scanner_concurrency(default: int = 20) -> int:
     return max(1, min(50, value))
 
 
+def get_analysis_dict(analysis: Any) -> Dict[str, Any]:
+    if analysis is None:
+        return {}
+
+    try:
+        if hasattr(analysis, "to_dict"):
+            data = analysis.to_dict()
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+    return {}
+
+
+def trade_analysis_grade(analysis_data: Dict[str, Any]) -> str:
+    readiness = analysis_data.get("readiness")
+    if isinstance(readiness, dict):
+        return str(readiness.get("grade") or "")
+    return ""
+
 class OvernightRunnerScanner(ScannerBase):
     id = "overnight_runner"
     name = "Overnight Compression Runner"
     description = (
         "Uses saved previous-day afterhours plus current premarket to rank overnight and momentum runner setups."
     )
+
+    def __init__(self) -> None:
+        self.trade_analysis_engine = TradeAnalysisEngine()
+
+    async def _attach_trade_analysis(
+        self,
+        row: Dict[str, Any],
+        polygon: PolygonService,
+        symbol: str,
+        snapshot: Dict[str, Any],
+        *,
+        timeframe: str = "1m",
+        score_boost_pct: float = 0.05,
+    ) -> Dict[str, Any]:
+        try:
+            analysis = await self.trade_analysis_engine.analyze_symbol(
+                polygon,
+                symbol,
+                snapshot=snapshot,
+                timeframe=timeframe,
+            )
+        except Exception as exc:
+            print(f"[overnight-runner] trade analysis failed {symbol}: {exc}", flush=True)
+            analysis = None
+
+        analysis_data = get_analysis_dict(analysis)
+        readiness_score = safe_float(analysis_data.get("readiness_score"))
+        readiness_grade = trade_analysis_grade(analysis_data)
+
+        notes = list(row.get("notes") or [])
+        if readiness_grade:
+            notes.append(f"readiness: {readiness_grade}")
+
+        if readiness_score > 0:
+            base_score = safe_float(row.get("runner_score"))
+            row["runner_score"] = round(
+                max(0.0, min(100.0, base_score + min(readiness_score * score_boost_pct, 5.0))),
+                2,
+            )
+
+        row["uses_trade_analysis"] = True
+        row["trade_readiness_score"] = round(readiness_score, 2)
+        row["trade_readiness_grade"] = readiness_grade or None
+        row["trade_analysis_signals"] = analysis_data.get("signals", [])
+        row["trade_analysis_warnings"] = analysis_data.get("warnings", [])
+        row["notes"] = notes
+
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+        extra["trade_analysis"] = analysis_data
+        row["extra"] = extra
+
+        return row
 
     async def save_afterhours_snapshot(
         self,
@@ -361,6 +434,7 @@ class OvernightRunnerScanner(ScannerBase):
                 "latest_saved_ah_date": latest_saved[0] if latest_saved else None,
                 "snapshot_dates": latest_saved,
                 "runner_type_counts": summarize_runner_types(rows),
+                "uses_trade_analysis": True,
                 "debug": {
                     "counts": debug_counts,
                     "reject_examples": debug_examples,
@@ -586,6 +660,7 @@ class OvernightRunnerScanner(ScannerBase):
                 "snapshot_dates": snapshot_dates,
                 "candidate_count": len(candidate_symbols),
                 "runner_type_counts": summarize_runner_types(rows),
+                "uses_trade_analysis": True,
                 "debug": {
                     "counts": debug_counts,
                     "reject_examples": debug_examples,
@@ -660,7 +735,7 @@ class OvernightRunnerScanner(ScannerBase):
         if ah_dollar_volume >= 1_000_000:
             notes.append("AH liquidity")
 
-        return {
+        row = {
             "symbol": symbol,
             "session_date": session["session_date"],
             "last_price": round(last_price, 4),
@@ -679,6 +754,8 @@ class OvernightRunnerScanner(ScannerBase):
                 "ah_last_close": round(session["ah_last_close"], 4),
             },
         }
+
+        return await self._attach_trade_analysis(row, polygon, symbol, snapshot, timeframe="1m", score_boost_pct=0.03)
 
     async def _build_premarket_row(
         self,
@@ -799,7 +876,7 @@ class OvernightRunnerScanner(ScannerBase):
         if turnover_pct >= 25:
             notes.append("Turnover")
 
-        return {
+        row = {
             "symbol": symbol,
             "last_price": round(last_price, 4),
             "prev_close": round(prev_close, 4),
@@ -832,6 +909,8 @@ class OvernightRunnerScanner(ScannerBase):
                 "pm_session_date": pm_session["session_date"],
             },
         }
+
+        return await self._attach_trade_analysis(row, polygon, symbol, snapshot, timeframe="1m", score_boost_pct=0.05)
 
     async def _build_combined_row(
         self,
@@ -964,7 +1043,7 @@ class OvernightRunnerScanner(ScannerBase):
         if runner_type == "momentum" and not has_saved_ah:
             notes.append("PM-only runner")
 
-        return {
+        row = {
             "symbol": symbol,
             "last_price": round(last_price, 4),
             "prev_close": round(prev_close, 4),
@@ -1003,6 +1082,8 @@ class OvernightRunnerScanner(ScannerBase):
                 "ah_session_date": (saved_ah_row or {}).get("session_date"),
             },
         }
+
+        return await self._attach_trade_analysis(row, polygon, symbol, snapshot, timeframe="1m", score_boost_pct=0.05)
 
 
 def should_use_saved_ah_fallback(rows: List[Dict[str, Any]], debug_counts: Dict[str, int]) -> bool:
