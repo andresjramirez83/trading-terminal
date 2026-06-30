@@ -541,6 +541,88 @@ export default function TerminalPage() {
   }, [manualWatchlist]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const mergeManualWatchlist = (incoming: unknown) => {
+      if (!Array.isArray(incoming)) return;
+
+      const cleaned = uniqueSymbols(incoming);
+      if (!cleaned.length) return;
+
+      setManualWatchlist((prev) => {
+        const merged = uniqueSymbols([...cleaned, ...prev]);
+        if (prev.length === merged.length && prev.every((item, index) => item === merged[index])) {
+          return prev;
+        }
+        return merged;
+      });
+    };
+
+    const readLocalManualWatchlist = () => {
+      if (typeof window === "undefined") return;
+      try {
+        const raw = window.localStorage.getItem(MANUAL_WATCHLIST_STORAGE_KEY);
+        if (!raw) return;
+        mergeManualWatchlist(JSON.parse(raw));
+      } catch {
+        // Ignore malformed legacy storage.
+      }
+    };
+
+    const refreshRemoteManualWatchlist = async () => {
+      try {
+        const remote = await fetchSharedAlpacaState();
+        if (cancelled || !remote) return;
+        mergeManualWatchlist((remote as any).manualWatchlist);
+      } catch {
+        // Legacy/manual watchlist sync should never break the chart.
+      }
+    };
+
+    const handleManualWatchlistEvent = (event: Event) => {
+      mergeManualWatchlist((event as CustomEvent<string[]>).detail);
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== MANUAL_WATCHLIST_STORAGE_KEY || !event.newValue) return;
+      try {
+        mergeManualWatchlist(JSON.parse(event.newValue));
+      } catch {
+        // Ignore malformed storage data.
+      }
+    };
+
+    const handleVisibilityOrFocus = () => {
+      readLocalManualWatchlist();
+      void refreshRemoteManualWatchlist();
+    };
+
+    window.addEventListener("manual-watchlist-change", handleManualWatchlistEvent);
+    window.addEventListener("alpaca-manual-watchlist-change", handleManualWatchlistEvent);
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("focus", handleVisibilityOrFocus);
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+
+    readLocalManualWatchlist();
+    void refreshRemoteManualWatchlist();
+
+    const intervalId = window.setInterval(() => {
+      readLocalManualWatchlist();
+      void refreshRemoteManualWatchlist();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("manual-watchlist-change", handleManualWatchlistEvent);
+      window.removeEventListener("alpaca-manual-watchlist-change", handleManualWatchlistEvent);
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+    };
+  }, []);
+
+  useEffect(() => {
     const applySharedWatchlist = (nextWatchlist: string[]) => {
       const cleaned = uniqueSymbols(nextWatchlist);
       if (!cleaned.length) return;
