@@ -6,6 +6,7 @@ from datetime import datetime, time, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from app.analysis.trade_analysis_engine import TradeAnalysisEngine
 from app.scanners.base import ScannerBase
 from app.services.polygon_service import PolygonService
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
@@ -86,19 +87,38 @@ def current_trade_date() -> str:
 def parse_target_hours(raw: Any) -> List[int]:
     if raw is None or raw == "":
         return [6, 7]
+
     if isinstance(raw, (list, tuple, set)):
         values = raw
     else:
         values = str(raw).replace(";", ",").split(",")
+
     out: List[int] = []
+
     for item in values:
         try:
             hour = int(str(item).strip())
         except Exception:
             continue
+
         if 0 <= hour <= 23 and hour not in out:
             out.append(hour)
+
     return sorted(out) or [6, 7]
+
+
+def get_analysis_dict(analysis: Any) -> Dict[str, Any]:
+    if analysis is None:
+        return {}
+
+    try:
+        if hasattr(analysis, "to_dict"):
+            data = analysis.to_dict()
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+    return {}
 
 
 async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
@@ -110,8 +130,10 @@ async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "Order
         except Exception as exc:
             print(f"[hourly-sweep-runner] universe source failed: {exc}", flush=True)
             return
+
         for row in rows or []:
             symbol = normalize_symbol(row.get("ticker") or row.get("symbol"))
+
             if symbol and symbol not in merged:
                 merged[symbol] = row
 
@@ -120,6 +142,7 @@ async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "Order
         add_rows(polygon.get_snapshot_actives(limit=limit)),
         add_rows(polygon.get_snapshot_losers(limit=limit)),
     )
+
     return merged
 
 
@@ -127,6 +150,9 @@ class HourlySweepRunnerScanner(ScannerBase):
     id = "hourly_sweep_runner"
     name = "6/7 Hour Liquidity Sweep Scanner"
     description = "Scans active stocks for liquidity sweeps of the 6:00 and 7:00 ET hour range."
+
+    def __init__(self) -> None:
+        self.trade_analysis_engine = TradeAnalysisEngine()
 
     async def run(
         self,
@@ -143,10 +169,14 @@ class HourlySweepRunnerScanner(ScannerBase):
         sweep_buffer_pct = float(kwargs.get("sweep_buffer_pct", 0.001))
         recent_bars = int(kwargs.get("recent_bars", 36))
         include_ready = str(kwargs.get("include_ready", "false")).lower() in {"1", "true", "yes", "on"}
+
         timeframe = str(kwargs.get("timeframe", kwargs.get("confirm_timeframe", "5m")) or "5m").lower().strip()
+
         if timeframe not in {"1m", "5m", "15m"}:
             timeframe = "5m"
+
         target_hours = parse_target_hours(kwargs.get("target_hours", kwargs.get("hours", "6,7")))
+
         extra_symbols = [normalize_symbol(x) for x in kwargs.get("extra_symbols", []) or []]
         extra_symbols = [x for x in extra_symbols if x]
 
@@ -155,6 +185,7 @@ class HourlySweepRunnerScanner(ScannerBase):
 
         rows: List[Dict[str, Any]] = []
         checked = 0
+
         reject_counts: Dict[str, int] = {
             "no_bars": 0,
             "no_hour_range": 0,
@@ -167,9 +198,11 @@ class HourlySweepRunnerScanner(ScannerBase):
 
         for symbol in candidate_symbols[: max_symbols * 8]:
             checked += 1
+
             row, reject_reason = await self._scan_symbol(
                 polygon,
                 symbol,
+                snapshot=universe.get(symbol, {}),
                 timeframe=timeframe,
                 target_hours=target_hours,
                 min_price=min_price,
@@ -181,6 +214,7 @@ class HourlySweepRunnerScanner(ScannerBase):
                 recent_bars=recent_bars,
                 include_ready=include_ready,
             )
+
             if row is not None:
                 rows.append(row)
                 reject_counts["passed"] += 1
@@ -190,12 +224,14 @@ class HourlySweepRunnerScanner(ScannerBase):
         rows.sort(
             key=lambda item: (
                 safe_float(item.get("runner_score")),
+                safe_float(item.get("trade_readiness_score")),
                 1 if item.get("phase") == "CONFIRMED" else 0,
                 safe_float(item.get("rvol")),
                 safe_float(item.get("volume")),
             ),
             reverse=True,
         )
+
         rows = rows[:max_symbols]
 
         return {
@@ -212,6 +248,7 @@ class HourlySweepRunnerScanner(ScannerBase):
                 "checked": checked,
                 "target_hours_et": target_hours,
                 "range_window_et": f"{min(target_hours):02d}:00-{max(target_hours) + 1:02d}:00",
+                "uses_trade_analysis": True,
                 "reject_counts": reject_counts,
                 "active_filters": {
                     "max_symbols": max_symbols,
@@ -234,6 +271,7 @@ class HourlySweepRunnerScanner(ScannerBase):
         polygon: PolygonService,
         symbol: str,
         *,
+        snapshot: Dict[str, Any],
         timeframe: str,
         target_hours: List[int],
         min_price: float,
@@ -245,6 +283,24 @@ class HourlySweepRunnerScanner(ScannerBase):
         recent_bars: int,
         include_ready: bool,
     ) -> Tuple[Optional[Dict[str, Any]], str]:
+        symbol = normalize_symbol(symbol)
+
+        if not symbol:
+            return None, "no_bars"
+
+        try:
+            trade_analysis = await self.trade_analysis_engine.analyze_symbol(
+                polygon,
+                symbol,
+                snapshot=snapshot,
+                timeframe=timeframe,
+            )
+        except Exception as exc:
+            print(f"[hourly-sweep-runner] trade analysis failed {symbol}: {exc}", flush=True)
+            trade_analysis = None
+
+        analysis_data = get_analysis_dict(trade_analysis)
+
         try:
             raw = await polygon.get_bars(symbol, timeframe)
         except Exception as exc:
@@ -252,18 +308,22 @@ class HourlySweepRunnerScanner(ScannerBase):
             return None, "no_bars"
 
         bars = valid_bars(raw)
+
         if len(bars) < 20:
             return None, "no_bars"
 
         hour_range = self._build_target_hour_range(bars, target_hours)
+
         if hour_range is None:
             return None, "no_hour_range"
 
         last = bars[-1]
         last_price = safe_float(last["close"])
         total_volume = int(sum(safe_float(b["volume"]) for b in self._todays_bars(bars)))
+
         if last_price < min_price or (max_price > 0 and last_price > max_price):
             return None, "price"
+
         if total_volume < min_volume:
             return None, "volume"
 
@@ -275,10 +335,37 @@ class HourlySweepRunnerScanner(ScannerBase):
             recent_bars=recent_bars,
             include_ready=include_ready,
         )
+
         if state is None:
             return None, "no_sweep"
+
+        trade_readiness_score = safe_float(analysis_data.get("readiness_score"))
+        trade_readiness_grade = str(
+            ((analysis_data.get("readiness") or {}).get("grade"))
+            if isinstance(analysis_data.get("readiness"), dict)
+            else ""
+        )
+
+        if trade_readiness_score > 0:
+            state["runner_score"] = round(
+                max(0.0, min(100.0, safe_float(state.get("runner_score")) + min(trade_readiness_score * 0.06, 6.0))),
+                2,
+            )
+            state["sweep_score"] = round(
+                max(0.0, min(100.0, safe_float(state.get("sweep_score")) + min(trade_readiness_score * 0.04, 4.0))),
+                2,
+            )
+
+        if state is None:
+            return None, "no_sweep"
+
         if safe_float(state.get("runner_score")) < min_sweep_score and state.get("phase") != "READY":
             return None, "score"
+
+        notes = list(state["notes"])
+
+        if trade_readiness_grade:
+            notes.append(f"readiness: {trade_readiness_grade}")
 
         row = {
             "symbol": symbol,
@@ -309,14 +396,21 @@ class HourlySweepRunnerScanner(ScannerBase):
             "reclaim_close": state.get("reclaim_close"),
             "reject_close": state.get("reject_close"),
             "bars_since_sweep": state.get("bars_since_sweep"),
-            "notes": state["notes"],
+            "uses_trade_analysis": True,
+            "trade_readiness_score": round(trade_readiness_score, 2),
+            "trade_readiness_grade": trade_readiness_grade or None,
+            "trade_analysis_signals": analysis_data.get("signals", []),
+            "trade_analysis_warnings": analysis_data.get("warnings", []),
+            "notes": notes,
             "source": "live_hour_range_sweep",
             "extra": {
                 "target_hours_et": target_hours,
                 "sweep_buffer_pct": sweep_buffer_pct,
                 "range_bar_count": hour_range["bar_count"],
+                "trade_analysis": analysis_data,
             },
         }
+
         return row, "passed"
 
     def _todays_bars(self, bars: List[Dict[str, float]]) -> List[Dict[str, float]]:
@@ -334,8 +428,10 @@ class HourlySweepRunnerScanner(ScannerBase):
 
         for bar in bars:
             dt = et_dt(int(bar["time"]))
+
             if dt.strftime("%Y-%m-%d") != today:
                 continue
+
             if dt.hour in target_set:
                 range_bars.append(bar)
 
@@ -344,6 +440,7 @@ class HourlySweepRunnerScanner(ScannerBase):
 
         range_high = max(safe_float(b["high"]) for b in range_bars)
         range_low = min(safe_float(b["low"]) for b in range_bars)
+
         if range_high <= 0 or range_low <= 0 or range_high <= range_low:
             return None
 
@@ -351,8 +448,10 @@ class HourlySweepRunnerScanner(ScannerBase):
         range_end_hour = max(target_hours) + 1
         last_dt = et_dt(max(int(b["time"]) for b in range_bars))
         range_end_dt = datetime.combine(last_dt.date(), time(hour=min(range_end_hour, 23), minute=0), tzinfo=ET)
+
         if range_end_hour >= 24:
             range_end_dt = datetime.combine(last_dt.date(), time(hour=23, minute=59), tzinfo=ET)
+
         range_end_ms = int(range_end_dt.astimezone(timezone.utc).timestamp() * 1000)
         range_pct = pct_change(range_high, range_low)
 
@@ -380,12 +479,16 @@ class HourlySweepRunnerScanner(ScannerBase):
         range_high = safe_float(hour_range.get("range_high"))
         range_low = safe_float(hour_range.get("range_low"))
         range_end_time = int(safe_float(hour_range.get("range_end_time")))
+
         after = [b for b in bars if int(b["time"]) >= range_end_time]
+
         if not after:
             return None
 
-        avg_volume = average([safe_float(b["volume"]) for b in bars[-60:-1]]) or average([safe_float(b["volume"]) for b in bars[:-1]])
-        recent_after = after[-max(1, recent_bars):]
+        avg_volume = average([safe_float(b["volume"]) for b in bars[-60:-1]]) or average(
+            [safe_float(b["volume"]) for b in bars[:-1]]
+        )
+
         candidates: List[Dict[str, Any]] = []
 
         for index, bar in enumerate(after):
@@ -407,6 +510,7 @@ class HourlySweepRunnerScanner(ScannerBase):
                 sweep_depth_pct = abs(pct_change(low, range_low))
                 wick_pct = lower_wick(bar) / rng
                 continuation = close > max(safe_float(b["high"]) for b in after[max(0, index - 4):index] or [bar])
+
                 score = self._score_sweep(
                     sweep_depth_pct=sweep_depth_pct,
                     wick_pct=wick_pct,
@@ -416,33 +520,37 @@ class HourlySweepRunnerScanner(ScannerBase):
                     continuation=continuation,
                     bars_since=len(after) - 1 - index,
                 )
-                candidates.append({
-                    "setup": "6/7 LOW SWEEP RECLAIM",
-                    "setup_state": "LOW_SWEEP_RECLAIM",
-                    "phase": "CONFIRMED" if len(after) - 1 - index <= recent_bars else "WATCH",
-                    "direction": "bullish",
-                    "runner_score": score,
-                    "sweep_score": score,
-                    "last_price": round(safe_float(bars[-1]["close"]), 4),
-                    "rvol": round(rvol, 2),
-                    "sweep_time": int(bar["time"]),
-                    "sweep_time_label": et_time_label(int(bar["time"])),
-                    "sweep_price": round(low, 4),
-                    "sweep_depth_pct": round(sweep_depth_pct, 2),
-                    "reclaim_close": round(close, 4),
-                    "reject_close": None,
-                    "bars_since_sweep": len(after) - 1 - index,
-                    "notes": [
-                        f"swept below {hour_range['range_label']} low {range_low:.4f}",
-                        f"closed back above range low at {close:.4f}",
-                        f"sweep rvol {rvol:.2f}",
-                    ],
-                })
+
+                candidates.append(
+                    {
+                        "setup": "6/7 LOW SWEEP RECLAIM",
+                        "setup_state": "LOW_SWEEP_RECLAIM",
+                        "phase": "CONFIRMED" if len(after) - 1 - index <= recent_bars else "WATCH",
+                        "direction": "bullish",
+                        "runner_score": score,
+                        "sweep_score": score,
+                        "last_price": round(safe_float(bars[-1]["close"]), 4),
+                        "rvol": round(rvol, 2),
+                        "sweep_time": int(bar["time"]),
+                        "sweep_time_label": et_time_label(int(bar["time"])),
+                        "sweep_price": round(low, 4),
+                        "sweep_depth_pct": round(sweep_depth_pct, 2),
+                        "reclaim_close": round(close, 4),
+                        "reject_close": None,
+                        "bars_since_sweep": len(after) - 1 - index,
+                        "notes": [
+                            f"swept below {hour_range['range_label']} low {range_low:.4f}",
+                            f"closed back above range low at {close:.4f}",
+                            f"sweep rvol {rvol:.2f}",
+                        ],
+                    }
+                )
 
             if swept_high:
                 sweep_depth_pct = abs(pct_change(high, range_high))
                 wick_pct = upper_wick(bar) / rng
                 continuation = close < min(safe_float(b["low"]) for b in after[max(0, index - 4):index] or [bar])
+
                 score = self._score_sweep(
                     sweep_depth_pct=sweep_depth_pct,
                     wick_pct=wick_pct,
@@ -452,35 +560,47 @@ class HourlySweepRunnerScanner(ScannerBase):
                     continuation=continuation,
                     bars_since=len(after) - 1 - index,
                 )
-                candidates.append({
-                    "setup": "6/7 HIGH SWEEP REJECT",
-                    "setup_state": "HIGH_SWEEP_REJECT",
-                    "phase": "CONFIRMED" if len(after) - 1 - index <= recent_bars else "WATCH",
-                    "direction": "bearish",
-                    "runner_score": score,
-                    "sweep_score": score,
-                    "last_price": round(safe_float(bars[-1]["close"]), 4),
-                    "rvol": round(rvol, 2),
-                    "sweep_time": int(bar["time"]),
-                    "sweep_time_label": et_time_label(int(bar["time"])),
-                    "sweep_price": round(high, 4),
-                    "sweep_depth_pct": round(sweep_depth_pct, 2),
-                    "reclaim_close": None,
-                    "reject_close": round(close, 4),
-                    "bars_since_sweep": len(after) - 1 - index,
-                    "notes": [
-                        f"swept above {hour_range['range_label']} high {range_high:.4f}",
-                        f"closed back below range high at {close:.4f}",
-                        f"sweep rvol {rvol:.2f}",
-                    ],
-                })
+
+                candidates.append(
+                    {
+                        "setup": "6/7 HIGH SWEEP REJECT",
+                        "setup_state": "HIGH_SWEEP_REJECT",
+                        "phase": "CONFIRMED" if len(after) - 1 - index <= recent_bars else "WATCH",
+                        "direction": "bearish",
+                        "runner_score": score,
+                        "sweep_score": score,
+                        "last_price": round(safe_float(bars[-1]["close"]), 4),
+                        "rvol": round(rvol, 2),
+                        "sweep_time": int(bar["time"]),
+                        "sweep_time_label": et_time_label(int(bar["time"])),
+                        "sweep_price": round(high, 4),
+                        "sweep_depth_pct": round(sweep_depth_pct, 2),
+                        "reclaim_close": None,
+                        "reject_close": round(close, 4),
+                        "bars_since_sweep": len(after) - 1 - index,
+                        "notes": [
+                            f"swept above {hour_range['range_label']} high {range_high:.4f}",
+                            f"closed back below range high at {close:.4f}",
+                            f"sweep rvol {rvol:.2f}",
+                        ],
+                    }
+                )
 
         fresh_candidates = [c for c in candidates if int(c.get("bars_since_sweep") or 999999) <= recent_bars]
         usable = fresh_candidates or candidates
+
         if usable:
-            best = max(usable, key=lambda item: (safe_float(item.get("runner_score")), -safe_float(item.get("bars_since_sweep"))))
+            best = max(
+                usable,
+                key=lambda item: (
+                    safe_float(item.get("runner_score")),
+                    -safe_float(item.get("bars_since_sweep")),
+                ),
+            )
+
             if safe_float(best.get("rvol")) < min_rvol:
                 best["notes"].append(f"below preferred rvol filter {min_rvol:.2f}")
+
             return best
 
         if not include_ready:
@@ -490,10 +610,12 @@ class HourlySweepRunnerScanner(ScannerBase):
         last_close = safe_float(last["close"])
         near_low = abs(last_close - range_low) / range_low <= 0.012 if range_low > 0 else False
         near_high = abs(last_close - range_high) / range_high <= 0.012 if range_high > 0 else False
+
         if near_low or near_high:
             direction = "bullish" if near_low else "bearish"
             setup = "6/7 LOW SWEEP WATCH" if near_low else "6/7 HIGH SWEEP WATCH"
             level = range_low if near_low else range_high
+
             return {
                 "setup": setup,
                 "setup_state": "SWEEP_READY",
@@ -527,17 +649,21 @@ class HourlySweepRunnerScanner(ScannerBase):
         bars_since: int,
     ) -> float:
         body_pct = body / max(rng, 0.000001)
+
         score = 35.0
         score += min(max(sweep_depth_pct, 0.0) * 8.0, 18.0)
         score += min(max(wick_pct, 0.0) * 22.0, 18.0)
         score += min(max(rvol - 1.0, 0.0) * 12.0, 16.0)
         score += min(max(body_pct, 0.0) * 10.0, 8.0)
+
         if continuation:
             score += 10.0
+
         if bars_since <= 2:
             score += 8.0
         elif bars_since <= 6:
             score += 4.0
         elif bars_since > 36:
             score -= 8.0
+
         return round(max(0.0, min(100.0, score)), 2)
