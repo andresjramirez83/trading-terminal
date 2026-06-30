@@ -9,6 +9,7 @@ import ScannerPanel from "../components/ScannerPanel";
 import GlobalHotkeys from "../components/GlobalHotkeys";
 import QuickAlertModal from "../components/QuickAlertModal";
 import QuickOrderModal, { type OrderTemplate } from "../components/QuickOrderModal";
+import { useWatchlists } from "../components/watchlists/WatchlistContext";
 import {
   fetchAlpacaOrders,
   placeAlpacaOrder,
@@ -365,6 +366,7 @@ const TERMINAL_ORDER_POLL_MS = 12000;
 
 export default function TerminalPage() {
   const navigate = useNavigate();
+  const { replaceSymbols } = useWatchlists();
 
   const initialScannerWatchlist = useMemo(() => loadSharedScannerWatchlist(), []);
   const initialSymbol = useMemo(
@@ -537,8 +539,25 @@ export default function TerminalPage() {
   }, []);
 
   useEffect(() => {
-    broadcastManualWatchlist(manualWatchlist);
-  }, [manualWatchlist]);
+    const cleaned = uniqueSymbols(manualWatchlist);
+
+    broadcastManualWatchlist(cleaned);
+
+    replaceSymbols(
+      "manual",
+      cleaned.map((item) => ({
+        symbol: item,
+        tone: "watch",
+        setup: "Manual",
+        note: "Manual watchlist",
+      })),
+      {
+        name: "Manual Watchlist",
+        type: "manual",
+        description: "Symbols added manually from the legacy terminal/chart workflow.",
+      },
+    );
+  }, [manualWatchlist, replaceSymbols]);
 
   useEffect(() => {
     let cancelled = false;
