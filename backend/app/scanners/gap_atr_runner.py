@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from app.analysis.trade_analysis_engine import TradeAnalysisEngine
 from app.scanners.base import ScannerBase
 from app.scanners.scanner_engine import ScannerEngine
 from app.services.polygon_service import PolygonService
@@ -71,24 +72,29 @@ def average(values: List[float]) -> float:
 def calc_atr(bars: List[Dict[str, float]], period: int = 14) -> float:
     if len(bars) < 2:
         return 0.0
+
     true_ranges: List[float] = []
+
     for i in range(1, len(bars)):
         high = float(bars[i]["high"])
         low = float(bars[i]["low"])
         prev_close = float(bars[i - 1]["close"])
         true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+
     return average(true_ranges[-period:])
 
 
 def session_kind(ms: int) -> str:
     dt = datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(ET)
     hhmm = dt.hour * 100 + dt.minute
+
     if 400 <= hhmm < 930:
         return "premarket"
     if 930 <= hhmm < 1600:
         return "regular"
     if 1600 <= hhmm < 2000:
         return "afterhours"
+
     return "closed"
 
 
@@ -102,18 +108,37 @@ def et_time(ms: int) -> str:
 
 def group_regular_bars_by_day(bars: List[Dict[str, float]]) -> "OrderedDict[str, List[Dict[str, float]]]":
     grouped: "OrderedDict[str, List[Dict[str, float]]]" = OrderedDict()
+
     for bar in bars:
         if session_kind(int(bar["time"])) != "regular":
             continue
+
         grouped.setdefault(et_date(int(bar["time"])), []).append(bar)
+
     return grouped
 
+
+def get_analysis_dict(analysis: Any) -> Dict[str, Any]:
+    if analysis is None:
+        return {}
+
+    try:
+        if hasattr(analysis, "to_dict"):
+            data = analysis.to_dict()
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+    return {}
 
 
 class GapAtrRunnerScanner(ScannerBase):
     id = "gap_atr_runner"
     name = "15m Gap ATR Runner"
     description = "Scans the last 5 trading days for clean gap-up 15m ATR expansion candles."
+
+    def __init__(self) -> None:
+        self.trade_analysis_engine = TradeAnalysisEngine()
 
     async def run(
         self,
@@ -135,7 +160,9 @@ class GapAtrRunnerScanner(ScannerBase):
 
         concurrency = max(1, int(kwargs.get("concurrency", 20)))
         universe_limit = max(1000, max_symbols * 10)
+
         engine = ScannerEngine(concurrency=concurrency)
+
         universe = await engine.get_universe(
             polygon=polygon,
             limit=universe_limit,
@@ -147,6 +174,7 @@ class GapAtrRunnerScanner(ScannerBase):
 
         async def worker(item: tuple[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             symbol, snapshot = item
+
             return await self._scan_symbol(
                 polygon,
                 symbol,
@@ -181,12 +209,14 @@ class GapAtrRunnerScanner(ScannerBase):
         rows.sort(
             key=lambda item: (
                 safe_float(item.get("runner_score")),
+                safe_float(item.get("trade_readiness_score")),
                 safe_float(item.get("atr_mult")),
                 safe_float(item.get("gap_pct")),
                 safe_float(item.get("volume_mult")),
             ),
             reverse=True,
         )
+
         rows = rows[:max_symbols]
 
         return {
@@ -206,6 +236,7 @@ class GapAtrRunnerScanner(ScannerBase):
                 "passed": len(rows),
                 "concurrency": concurrency,
                 "elapsed_ms": round(elapsed_ms, 1),
+                "uses_trade_analysis": True,
                 "active_filters": {
                     "max_symbols": max_symbols,
                     "min_price": min_price,
@@ -241,6 +272,24 @@ class GapAtrRunnerScanner(ScannerBase):
         min_volume_mult: float,
         lookback_days: int,
     ) -> Optional[Dict[str, Any]]:
+        symbol = normalize_symbol(symbol)
+
+        if not symbol:
+            return None
+
+        try:
+            trade_analysis = await self.trade_analysis_engine.analyze_symbol(
+                polygon,
+                symbol,
+                snapshot=snapshot,
+                timeframe="15m",
+            )
+        except Exception as exc:
+            print(f"[gap-atr-runner] trade analysis failed {symbol}: {exc}", flush=True)
+            trade_analysis = None
+
+        analysis_data = get_analysis_dict(trade_analysis)
+
         try:
             bars_raw = await polygon.get_bars(symbol, "15m")
         except Exception as exc:
@@ -248,12 +297,18 @@ class GapAtrRunnerScanner(ScannerBase):
             return None
 
         bars = [normalize_bar(bar) for bar in bars_raw]
-        bars = [bar for bar in bars if bar["time"] > 0 and bar["high"] > 0 and bar["low"] > 0 and bar["close"] > 0]
+        bars = [
+            bar
+            for bar in bars
+            if bar["time"] > 0 and bar["high"] > 0 and bar["low"] > 0 and bar["close"] > 0
+        ]
+
         if len(bars) < 35:
             return None
 
         days = group_regular_bars_by_day(bars)
         day_items = list(days.items())
+
         if len(day_items) < 2:
             return None
 
@@ -263,39 +318,47 @@ class GapAtrRunnerScanner(ScannerBase):
 
         for day_key, day_bars in recent_days:
             day_index = all_day_keys.index(day_key)
+
             if day_index <= 0 or not day_bars:
                 continue
+
             prev_day_key, prev_day_bars = day_items[day_index - 1]
+
             if not prev_day_bars:
                 continue
 
             prev_close = safe_float(prev_day_bars[-1].get("close"))
             day_open = safe_float(day_bars[0].get("open"))
             gap_pct = pct_change(day_open, prev_close)
+
             if gap_pct < min_gap_pct:
                 continue
 
-            context_before_day = [bar for key, rows in day_items[:day_index] for bar in rows]
+            context_before_day = [bar for _, rows in day_items[:day_index] for bar in rows]
             combined = context_before_day + day_bars
 
             for local_index, bar in enumerate(day_bars):
                 global_index = len(context_before_day) + local_index
                 prior = combined[max(0, global_index - 30):global_index]
+
                 if len(prior) < 14:
                     continue
 
                 price = safe_float(bar.get("close"))
+
                 if price < min_price or (max_price > 0 and price > max_price):
                     continue
 
                 rng = candle_range(bar)
                 body = candle_body(bar)
+
                 if rng <= 0 or body <= 0:
                     continue
 
                 atr = calc_atr(prior, 14)
                 avg_volume = average([safe_float(item.get("volume")) for item in prior[-20:]])
                 volume = safe_float(bar.get("volume"))
+
                 atr_mult = (rng / atr) if atr > 0 else 0.0
                 body_pct = body / rng if rng > 0 else 0.0
                 upper_pct = upper_wick(bar) / rng if rng > 0 else 0.0
@@ -305,18 +368,31 @@ class GapAtrRunnerScanner(ScannerBase):
 
                 if safe_float(bar.get("close")) <= safe_float(bar.get("open")):
                     continue
+
                 if volume < min_volume:
                     continue
+
                 if atr_mult < min_atr_mult:
                     continue
+
                 if body_pct < min_body_pct:
                     continue
+
                 if upper_pct > max_upper_wick_pct:
                     continue
+
                 if close_position_pct < min_close_position_pct:
                     continue
+
                 if volume_mult < min_volume_mult:
                     continue
+
+                trade_readiness_score = safe_float(analysis_data.get("readiness_score"))
+                trade_readiness_grade = str(
+                    ((analysis_data.get("readiness") or {}).get("grade"))
+                    if isinstance(analysis_data.get("readiness"), dict)
+                    else ""
+                )
 
                 score = 0.0
                 score += min(gap_pct * 4.0, 30.0)
@@ -324,14 +400,23 @@ class GapAtrRunnerScanner(ScannerBase):
                 score += min(body_pct * 24.0, 20.0)
                 score += min(close_position_pct * 16.0, 14.0)
                 score += min(volume_mult * 4.0, 18.0)
+
+                if trade_readiness_score > 0:
+                    score += min(trade_readiness_score * 0.08, 8.0)
+
                 score -= max(0.0, upper_pct - 0.15) * 20.0
                 score = max(0.0, min(100.0, score))
 
                 notes = ["15m gap-up", "ATR expansion", "clean green body"]
+
                 if close_position_pct >= 0.82:
                     notes.append("closed near high")
+
                 if volume_mult >= 2.0:
                     notes.append("volume expansion")
+
+                if trade_readiness_grade:
+                    notes.append(f"readiness: {trade_readiness_grade}")
 
                 candidate = {
                     "symbol": symbol,
@@ -341,6 +426,7 @@ class GapAtrRunnerScanner(ScannerBase):
                     "scanner_id": self.id,
                     "scanner_name": self.name,
                     "type": "gap_atr",
+                    "uses_trade_analysis": True,
                     "scan_date": day_key,
                     "trigger_time": int(bar["time"]),
                     "trigger_time_et": f"{day_key} {et_time(int(bar['time']))} ET",
@@ -365,6 +451,10 @@ class GapAtrRunnerScanner(ScannerBase):
                     "close_position_pct": round(close_position_pct * 100.0, 1),
                     "runner_score": round(score, 2),
                     "score": round(score, 2),
+                    "trade_readiness_score": round(trade_readiness_score, 2),
+                    "trade_readiness_grade": trade_readiness_grade or None,
+                    "trade_analysis_signals": analysis_data.get("signals", []),
+                    "trade_analysis_warnings": analysis_data.get("warnings", []),
                     "notes": notes,
                     "extra": {
                         "bar_open": round(safe_float(bar.get("open")), 4),
@@ -372,6 +462,7 @@ class GapAtrRunnerScanner(ScannerBase):
                         "bar_low": round(safe_float(bar.get("low")), 4),
                         "bar_close": round(price, 4),
                         "previous_regular_day": prev_day_key,
+                        "trade_analysis": analysis_data,
                     },
                 }
 
