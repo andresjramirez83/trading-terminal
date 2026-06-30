@@ -239,6 +239,38 @@ function saveSharedScannerWatchlist(nextWatchlist: string[]) {
   window.dispatchEvent(new CustomEvent<string[]>("scanner-watchlist-change", { detail: uniqueSymbols(nextWatchlist) }));
 }
 
+function broadcastManualWatchlist(nextWatchlist: string[]) {
+  if (typeof window === "undefined") return;
+
+  const cleaned = uniqueSymbols(nextWatchlist);
+  const serialized = JSON.stringify(cleaned);
+
+  window.localStorage.setItem(MANUAL_WATCHLIST_STORAGE_KEY, serialized);
+
+  // Same-tab listeners do not receive the browser's native storage event, so we
+  // broadcast custom events for the new chart/watchlist system and also dispatch
+  // a StorageEvent for any legacy listener that already watches localStorage.
+  window.dispatchEvent(
+    new CustomEvent<string[]>("manual-watchlist-change", { detail: cleaned })
+  );
+  window.dispatchEvent(
+    new CustomEvent<string[]>("alpaca-manual-watchlist-change", { detail: cleaned })
+  );
+
+  try {
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: MANUAL_WATCHLIST_STORAGE_KEY,
+        newValue: serialized,
+        storageArea: window.localStorage,
+      })
+    );
+  } catch {
+    // Some browsers restrict synthetic StorageEvent construction. The custom
+    // events above are the primary same-tab sync path.
+  }
+}
+
 function saveTerminalActiveSymbol(nextSymbol: string) {
   if (typeof window === "undefined") return;
   const cleaned = normalizeSingleSymbol(nextSymbol);
@@ -505,7 +537,7 @@ export default function TerminalPage() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(MANUAL_WATCHLIST_STORAGE_KEY, JSON.stringify(manualWatchlist));
+    broadcastManualWatchlist(manualWatchlist);
   }, [manualWatchlist]);
 
   useEffect(() => {

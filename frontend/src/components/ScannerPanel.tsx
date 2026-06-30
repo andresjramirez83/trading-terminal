@@ -851,30 +851,16 @@ export default function ScannerPanel({
       });
     });
 
-    // Important for the new chart workspace:
-    // scanner/watchlist changes update the watchlist immediately, but the chart only
-    // reloads when the active symbol changes. If the current chart symbol is not in
-    // the newly loaded scanner rows, select the first scanner result right away so
-    // the chart updates without requiring a full page refresh.
-    const current = normalizeSymbol(selectedSymbol || activeSymbol);
-    const firstSymbol = unique[0] ?? "";
-    const currentIsInScannerRows = current ? unique.includes(current) : false;
-
-    if (firstSymbol && !currentIsInScannerRows) {
-      setActiveSymbol(firstSymbol, "scanner");
-      onSelectSymbol?.(firstSymbol);
-    }
+    // Scanner refreshes should only update scanner/watchlist data.
+    // Never auto-select the first scanner row here. The chart symbol should change
+    // only when the user explicitly clicks a scanner row or watchlist symbol.
   }, [
     rows,
     data?.scanner_id,
     data?.scanner_name,
     data?.description,
     selectedScannerId,
-    selectedSymbol,
-    activeSymbol,
-    setActiveSymbol,
     replaceSymbols,
-    onSelectSymbol,
     onWatchlistChange,
   ]);
 
