@@ -3511,10 +3511,10 @@ async def market_ws(
     timeframe: str = Query("1m"),
 ):
     await websocket.accept()
-   print(f"[market_ws] accepted for {symbol} {timeframe}", flush=True)
+    print(f"[market_ws] accepted for {symbol} {timeframe}", flush=True)
 
     try:
-       await polygon_ws_manager.subscribe_client(websocket, symbol, timeframe)
+        await polygon_ws_manager.subscribe_client(websocket, symbol, timeframe)
 
         while True:
             await websocket.receive_text()
