@@ -3505,12 +3505,16 @@ def get_last_trade(symbol: str = Query(..., min_length=1)):
 
 @app.websocket("/ws/market")
 @app.websocket("/ws/chart-bars")
-async def market_ws(websocket: WebSocket, symbol: str = Query(..., min_length=1)):
+async def market_ws(
+    websocket: WebSocket,
+    symbol: str = Query(..., min_length=1),
+    timeframe: str = Query("1m"),
+):
     await websocket.accept()
-    print(f"[market_ws] accepted for {symbol}", flush=True)
+   print(f"[market_ws] accepted for {symbol} {timeframe}", flush=True)
 
     try:
-        await polygon_ws_manager.subscribe_client(websocket, symbol)
+       await polygon_ws_manager.subscribe_client(websocket, symbol, timeframe)
 
         while True:
             await websocket.receive_text()
