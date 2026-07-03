@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 import requests
 import httpx
 from app.history.history_routes import router as history_router
+from app.history.history_singleton import history_engine
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +56,7 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 
 DEBUG_BARS = os.getenv("DEBUG_BARS", "false").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_BACKGROUND = os.getenv("DEBUG_BACKGROUND", "false").strip().lower() in {"1", "true", "yes", "on"}
+USE_HISTORY_ENGINE = os.getenv("USE_HISTORY_ENGINE", "false").strip().lower() in {"1", "true", "yes", "on"}
 registry = ScannerRegistry()
 snapshot_store = ScannerSnapshotStore()
 
@@ -3303,6 +3305,37 @@ async def fetch_chart_bars_async(
     current-day window has no candles yet. If the first request returns no
     bars, walk backward through prior trading days until bars are found.
     """
+    if USE_HISTORY_ENGINE:
+        try:
+            history_bars = await history_engine.get_history(
+                symbol=symbol,
+                timeframe=timeframe,
+                session=session,
+            )
+
+            bars = [
+                Candle(
+                    time=bar.time,
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                )
+                for bar in history_bars
+            ]
+
+            if limit_bars is not None and limit_bars > 0 and len(bars) > limit_bars:
+                bars = bars[-limit_bars:]
+
+            return bars, daily_session_trading_date(bars)
+        except Exception as exc:
+            if DEBUG_BARS:
+                print(
+                    f"[history-engine] fallback to legacy bars symbol={symbol} timeframe={timeframe}: {exc}",
+                    flush=True,
+                )
+
     if is_daily_timeframe(timeframe):
         # Pull 1m data and aggregate it into live 1D candles. This makes the
         # current day form in real time instead of waiting for Polygon's

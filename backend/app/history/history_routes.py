@@ -2,14 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.history.history_engine import HistoryEngine
-from app.history.providers.polygon_provider import PolygonHistoryProvider
+from app.history.history_singleton import history_engine
 
 router = APIRouter(prefix="/history", tags=["history"])
-
-history_engine = HistoryEngine(
-    provider=PolygonHistoryProvider(),
-)
 
 
 @router.get("/bars")
