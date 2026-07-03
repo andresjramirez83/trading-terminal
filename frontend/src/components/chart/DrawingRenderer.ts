@@ -1,4 +1,4 @@
-// src/components/ChartPanelV2/DrawingRenderer.ts
+// src/components/chart/DrawingRenderer.ts
 
 import {
   LineSeries,

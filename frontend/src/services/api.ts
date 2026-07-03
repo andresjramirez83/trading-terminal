@@ -99,42 +99,83 @@ function pruneBarsCache(now = Date.now()): void {
 
 function normalizeLookback(timeframe: string, requested?: string): string {
   if (requested) return requested;
+
   switch (timeframe.toLowerCase()) {
     case "1m":
       return "2d";
+    case "2m":
+    case "3m":
     case "5m":
-      return "3d";
-    case "15m":
       return "5d";
-    case "30m":
+    case "10m":
+    case "15m":
+    case "20m":
       return "10d";
-    case "1h":
+    case "30m":
+    case "45m":
       return "20d";
+    case "1h":
+    case "2h":
+      return "60d";
+    case "4h":
+    case "6h":
+    case "8h":
+    case "12h":
+      return "180d";
     case "1d":
+    case "2d":
+    case "3d":
     case "day":
-      return "6m";
+      return "1y";
+    case "1w":
+    case "week":
+      return "5y";
+    case "1mo":
+    case "1month":
+    case "month":
+      return "10y";
     default:
-      return "3d";
+      return "5d";
   }
 }
 
 function defaultBarsLimit(timeframe: string): number {
   switch (timeframe.toLowerCase()) {
     case "1m":
-      return 220;
+      return 520;
+    case "2m":
+    case "3m":
     case "5m":
-      return 420;
+      return 650;
+    case "10m":
     case "15m":
-      return 350;
+    case "20m":
+      return 650;
     case "30m":
-      return 320;
+    case "45m":
+      return 650;
     case "1h":
-      return 300;
+    case "2h":
+      return 800;
+    case "4h":
+    case "6h":
+    case "8h":
+    case "12h":
+      return 800;
     case "1d":
+    case "2d":
+    case "3d":
     case "day":
-      return 500;
+      return 600;
+    case "1w":
+    case "week":
+      return 520;
+    case "1mo":
+    case "1month":
+    case "month":
+      return 240;
     default:
-      return 420;
+      return 650;
   }
 }
 

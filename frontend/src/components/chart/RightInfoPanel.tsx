@@ -4,7 +4,7 @@ import type { ChartState } from "../chart/ChartState";
 import { DecisionCenterProvider } from "../chart/right-panel/DecisionCenterContext";
 
 import ChartWorkspacePanel from "../chart/right-panel/workspaces/ChartWorkspacePanel";
-import TradeWorkspacePanel from "../chart/right-panel/workspaces/TradeWorkspacePanel";
+import TradingWorkspacePanel from "../chart/right-panel/workspaces/trading/TradingWorkspacePanel";
 import WatchlistsWorkspacePanel from "../chart/right-panel/workspaces/WatchlistsWorkspacePanel";
 import ScannerWorkspacePanel from "../chart/right-panel/workspaces/ScannerWorkspacePanel";
 import NewsWorkspacePanel from "../chart/right-panel/workspaces/NewsWorkspacePanel";
@@ -18,18 +18,20 @@ type Props = {
 
 const WORKSPACES: { id: RightPanelWorkspace; label: string }[] = [
   { id: "chart", label: "Chart" },
-  { id: "trade", label: "Trade" },
+  { id: "trade", label: "Trading" },
   { id: "watchlists", label: "Lists" },
   { id: "scanner", label: "Scanner" },
   { id: "news", label: "News" },
 ];
 
 export default function RightInfoPanel({
+  symbol,
   collapsed,
   onToggleCollapsed,
   chartState,
 }: Props) {
-  const [workspace, setWorkspace] = useState<RightPanelWorkspace>("chart");
+  const [workspace, setWorkspace] =
+    useState<RightPanelWorkspace>("chart");
 
   if (collapsed) {
     return (
@@ -159,9 +161,22 @@ export default function RightInfoPanel({
           }}
         >
           {workspace === "chart" && <ChartWorkspacePanel />}
-          {workspace === "trade" && <TradeWorkspacePanel />}
-          {workspace === "watchlists" && <WatchlistsWorkspacePanel />}
-          {workspace === "scanner" && <ScannerWorkspacePanel />}
+
+          {workspace === "trade" && (
+            <TradingWorkspacePanel
+              symbol={symbol}
+              currentPrice={chartState?.lastPrice ?? 0}
+            />
+          )}
+
+          {workspace === "watchlists" && (
+            <WatchlistsWorkspacePanel />
+          )}
+
+          {workspace === "scanner" && (
+            <ScannerWorkspacePanel />
+          )}
+
           {workspace === "news" && <NewsWorkspacePanel />}
         </div>
       </DecisionCenterProvider>

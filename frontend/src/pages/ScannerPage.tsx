@@ -137,7 +137,7 @@ export default function ScannerPage() {
               fontWeight: 600,
             }}
           >
-            Back to Terminal
+            Back to Chart
           </button>
         </div>
       </div>

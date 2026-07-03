@@ -29,6 +29,13 @@ function hexToRgba(hex: string, opacity: number): string {
   return `rgba(${r},${g},${b},${opacity})`;
 }
 
+function lineWidth(value: number): 1 | 2 | 3 | 4 {
+  if (value <= 1) return 1;
+  if (value === 2) return 2;
+  if (value === 3) return 3;
+  return 4;
+}
+
 export class AnalysisRenderer {
   private chart: IChartApi;
   private lineSeries = new Map<string, ISeriesApi<"Line">>();
@@ -48,22 +55,28 @@ export class AnalysisRenderer {
   renderAll(
     results: FxAnalysisResult[],
     settings: FxAnalysisSettings = DEFAULT_FX_ANALYSIS_SETTINGS,
+    selectedResultId: string | null = null,
   ): void {
     this.clear();
 
     for (const result of results) {
-      this.renderResult(result, settings);
+      this.renderResult(result, settings, selectedResultId);
     }
   }
 
   render(
     result: FxAnalysisResult,
     settings: FxAnalysisSettings = DEFAULT_FX_ANALYSIS_SETTINGS,
+    selectedResultId: string | null = null,
   ): void {
-    this.renderAll([result], settings);
+    this.renderAll([result], settings, selectedResultId);
   }
 
-  private renderResult(result: FxAnalysisResult, settings: FxAnalysisSettings): void {
+  private renderResult(
+    result: FxAnalysisResult,
+    settings: FxAnalysisSettings,
+    selectedResultId: string | null,
+  ): void {
     if (result.tool === "none") return;
 
     const toolSettings = settings[result.tool];
@@ -72,28 +85,35 @@ export class AnalysisRenderer {
     const showVisual = toolSettings.showLine !== false;
     if (!showVisual) return;
 
+    const selected = result.id === selectedResultId;
     const showLabel = toolSettings.showLabels !== false;
     const extendRight = toolSettings.extendRight !== false;
     const from = this.visibleFrom ?? result.anchorTime;
     const to = this.visibleTo ?? result.anchorTime;
+    const selectedColor = "#38bdf8";
+    const baseColor = toolSettings.color;
+    const visualColor = selected ? selectedColor : baseColor;
+    const visualWidth = lineWidth((toolSettings.lineWidth ?? 2) + (selected ? 1 : 0));
 
     if (result.zone) {
       const zoneFrom = result.anchorTime;
       const zoneTo = extendRight ? to : result.anchorTime;
-      const fillColor = hexToRgba(toolSettings.color, toolSettings.opacity);
+      const fillColor = selected
+        ? "rgba(56,189,248,.20)"
+        : hexToRgba(toolSettings.color, toolSettings.opacity);
 
       const zone = this.chart.addSeries(BaselineSeries, {
         baseValue: {
           type: "price",
           price: result.zone.low,
         },
-        topLineColor: toolSettings.color,
-        bottomLineColor: "rgba(0,0,0,0)",
+        topLineColor: visualColor,
+        bottomLineColor: selected ? visualColor : "rgba(0,0,0,0)",
         topFillColor1: fillColor,
         topFillColor2: fillColor,
         bottomFillColor1: "rgba(0,0,0,0)",
         bottomFillColor2: "rgba(0,0,0,0)",
-        lineWidth: toolSettings.lineWidth,
+        lineWidth: visualWidth,
         priceLineVisible: false,
         lastValueVisible: false,
         title: showLabel ? result.zone.title : "",
@@ -114,8 +134,8 @@ export class AnalysisRenderer {
       const lineTo = extendRight ? to : result.anchorTime;
 
       const series = this.chart.addSeries(LineSeries, {
-        color: toolSettings.color || line.color,
-        lineWidth: toolSettings.lineWidth ?? line.lineWidth ?? 2,
+        color: selected ? selectedColor : toolSettings.color || line.color,
+        lineWidth: selected ? visualWidth : lineWidth(toolSettings.lineWidth ?? line.lineWidth ?? 2),
         lineStyle: line.lineStyle,
         priceLineVisible: showLabel,
         lastValueVisible: showLabel,

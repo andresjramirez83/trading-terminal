@@ -1,4 +1,4 @@
-// src/components/ChartPanelV2/DrawingEngine.ts
+// src/components/chart/DrawingEngine.ts
 
 import {
   type IChartApi,
@@ -100,16 +100,58 @@ export class DrawingEngine {
   private priceSeries: ISeriesApi<"Candlestick">;
   private activeTool: DrawingTool = "cursor";
   private defaultStyle: DrawingStyle = cloneStyle(DEFAULT_DRAWING_STYLE);
-  private store = new DrawingStore();
+  private store: DrawingStore;
   private renderer: DrawingRenderer;
   private pendingTrendPoint: DrawingPoint | null = null;
   private selectedDrawingId: string | null = null;
   private dragManager = new DragManager();
+  private redrawFrame: number | null = null;
+  private redrawTimer: number | null = null;
 
-  constructor(chart: IChartApi, priceSeries: ISeriesApi<"Candlestick">) {
+  private readonly handleVisibleRangeChange = (): void => {
+    this.scheduleRenderAll();
+  };
+
+  constructor(
+    chart: IChartApi,
+    priceSeries: ISeriesApi<"Candlestick">,
+    workspace?: { symbol?: string; timeframe?: string }
+  ) {
     this.chart = chart;
     this.priceSeries = priceSeries;
+    this.store = new DrawingStore(workspace?.symbol ?? "SPY", workspace?.timeframe ?? "5m");
     this.renderer = new DrawingRenderer(chart, priceSeries);
+
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
+    this.scheduleRenderAll();
+  }
+
+  setWorkspace(symbol: string, timeframe: string): void {
+    this.store.setWorkspace(symbol, timeframe);
+    this.pendingTrendPoint = null;
+    this.selectedDrawingId = null;
+    this.dragManager.endDrag();
+    this.renderAll();
+  }
+
+  destroy(): void {
+    this.chart.timeScale().unsubscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
+
+    if (this.redrawFrame != null) {
+      window.cancelAnimationFrame(this.redrawFrame);
+      this.redrawFrame = null;
+    }
+
+    if (this.redrawTimer != null) {
+      window.clearTimeout(this.redrawTimer);
+      this.redrawTimer = null;
+    }
+
+    this.renderer.clear();
+    this.pendingTrendPoint = null;
+    this.selectedDrawingId = null;
+    this.dragManager.endDrag();
+    this.setChartNavigationEnabled(true);
   }
 
   setTool(tool: DrawingTool): void {
@@ -289,6 +331,29 @@ export class DrawingEngine {
 
   private renderAll(): void {
     this.renderer.renderAll(this.store.getAll(), this.selectedDrawingId);
+  }
+
+  private scheduleRenderAll(): void {
+    if (this.redrawFrame != null) {
+      window.cancelAnimationFrame(this.redrawFrame);
+    }
+
+    this.redrawFrame = window.requestAnimationFrame(() => {
+      this.redrawFrame = null;
+      this.renderAll();
+    });
+
+    if (this.redrawTimer != null) {
+      window.clearTimeout(this.redrawTimer);
+    }
+
+    // On refresh, Lightweight Charts may not have coordinates ready on the
+    // first frame. This second pass makes extended lines recalculate after
+    // the chart has settled.
+    this.redrawTimer = window.setTimeout(() => {
+      this.redrawTimer = null;
+      this.renderAll();
+    }, 80);
   }
 
   private renderDrawing(drawing: ChartDrawing): void {

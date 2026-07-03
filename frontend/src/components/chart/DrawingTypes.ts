@@ -1,6 +1,6 @@
-// src/components/ChartPanelV2/DrawingTypes.ts
+// src/components/chart/DrawingTypes.ts
 
-import type { CleanBar } from "../../chart/ChartTypes";
+import type { CleanBar } from "./ChartTypes";
 
 export type DrawingTool =
   | "cursor"

@@ -1,24 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import React, { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
-import { fetchSharedAlpacaState } from "../../../../services/api";
 import { useActiveSymbol } from "../../ActiveSymbolContext";
 import {
   useWatchlists,
-  type WatchlistType,
   type WatchlistSymbolTone,
+  type WatchlistType,
 } from "../../../watchlists/WatchlistContext";
 
 type SymbolTone = WatchlistSymbolTone;
-
-const MANUAL_WATCHLIST_STORAGE_KEYS = [
-  "watchlist", // Legacy ScannerPage source of truth
-  "manualWatchlist",
-  "alpacaManualWatchlist",
-  "terminalManualWatchlist",
-  "sharedManualWatchlist",
-  "trading.manual.watchlist",
-];
-const MANUAL_WATCHLIST_STORAGE_KEY = "watchlist";
 
 function normalizeWorkspaceSymbol(value: unknown): string {
   return String(value ?? "")
@@ -27,106 +16,61 @@ function normalizeWorkspaceSymbol(value: unknown): string {
     .replace(/[^A-Z0-9.]/g, "");
 }
 
-function uniqueWorkspaceSymbols(values: unknown[]): string[] {
+function parseSymbols(value: string): string[] {
   const seen = new Set<string>();
-  const out: string[] = [];
+  const symbols: string[] = [];
 
-  for (const value of values) {
-    const symbol = normalizeWorkspaceSymbol(value);
-
-    if (!symbol || seen.has(symbol)) {
-      continue;
-    }
+  for (const raw of value.split(/[\s,;]+/g)) {
+    const symbol = normalizeWorkspaceSymbol(raw);
+    if (!symbol || seen.has(symbol)) continue;
 
     seen.add(symbol);
-    out.push(symbol);
+    symbols.push(symbol);
   }
 
-  return out;
+  return symbols;
 }
 
-function extractSymbolsFromUnknown(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return uniqueWorkspaceSymbols(value);
-  }
-
-  if (value && typeof value === "object") {
-    const data = value as Record<string, unknown>;
-    const possibleLists = [
-      data.manualWatchlist,
-      data.symbols,
-      data.watchlist,
-      data.manualSymbols,
-      data.selectedSymbols,
-    ];
-
-    for (const possibleList of possibleLists) {
-      const symbols = extractSymbolsFromUnknown(possibleList);
-      if (symbols.length) {
-        return symbols;
-      }
-    }
-  }
-
-  if (typeof value === "string") {
-    return uniqueWorkspaceSymbols(value.split(/[\s,;]+/));
-  }
-
-  return [];
-}
-
-function readLegacyManualWatchlist(): string[] | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  for (const key of MANUAL_WATCHLIST_STORAGE_KEYS) {
-    try {
-      const raw = window.localStorage.getItem(key);
-
-      if (raw === null) {
-        continue;
-      }
-
-      let parsed: unknown = raw;
-
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        parsed = raw;
-      }
-
-      return extractSymbolsFromUnknown(parsed);
-    } catch {
-      // Ignore individual bad legacy keys.
-    }
-  }
-
-  return null;
-}
-
-function writeLegacyManualWatchlist(symbols: string[]) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  const cleaned = uniqueWorkspaceSymbols(symbols);
-
-  for (const key of MANUAL_WATCHLIST_STORAGE_KEYS) {
-    try {
-      window.localStorage.setItem(key, JSON.stringify(cleaned));
-    } catch {
-      // Local persistence should never break the panel.
-    }
-  }
-}
-
-function isManualWorkspaceWatchlist(watchlist: { id?: string; name?: string; type?: string } | null | undefined): boolean {
+function isManualWatchlist(watchlist: { id?: string; name?: string; type?: string } | null | undefined): boolean {
   const id = String(watchlist?.id ?? "").toLowerCase();
   const name = String(watchlist?.name ?? "").toLowerCase();
   const type = String(watchlist?.type ?? "").toLowerCase();
 
   return type === "manual" || id.includes("manual") || name.includes("manual");
+}
+
+function getTypeLabel(type: WatchlistType): string {
+  if (type === "scanner") return "Scanner";
+  if (type === "manual") return "Manual";
+  return "Custom";
+}
+
+function getToneColors(tone: SymbolTone): {
+  color: string;
+  background: string;
+  border: string;
+} {
+  if (tone === "ready") {
+    return {
+      color: "#6ee7b7",
+      background: "rgba(6, 78, 59, 0.35)",
+      border: "#047857",
+    };
+  }
+
+  if (tone === "weak") {
+    return {
+      color: "#fca5a5",
+      background: "rgba(69, 10, 10, 0.35)",
+      border: "#991b1b",
+    };
+  }
+
+  return {
+    color: "#fcd34d",
+    background: "rgba(69, 26, 3, 0.35)",
+    border: "#b45309",
+  };
 }
 
 const styles: Record<string, CSSProperties> = {
@@ -224,7 +168,7 @@ const styles: Record<string, CSSProperties> = {
   },
   tableHeader: {
     display: "grid",
-    gridTemplateColumns: "28px 1fr 52px 58px",
+    gridTemplateColumns: "28px 1fr 52px 58px 26px",
     gap: 7,
     padding: "0 8px 5px",
     fontSize: 9,
@@ -235,7 +179,7 @@ const styles: Record<string, CSSProperties> = {
   },
   row: {
     display: "grid",
-    gridTemplateColumns: "28px 1fr 52px 58px",
+    gridTemplateColumns: "28px 1fr 52px 58px 26px",
     gap: 7,
     alignItems: "center",
     width: "100%",
@@ -246,6 +190,7 @@ const styles: Record<string, CSSProperties> = {
     color: "#e5e7eb",
     cursor: "pointer",
     textAlign: "left",
+    userSelect: "none",
   },
   emptyState: {
     border: "1px dashed #334155",
@@ -257,45 +202,45 @@ const styles: Record<string, CSSProperties> = {
     color: "#8b949e",
     textAlign: "center",
   },
+  addRow: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto",
+    gap: 7,
+    alignItems: "center",
+    marginTop: 6,
+    border: "1px dashed #334155",
+    background: "#080b10",
+    borderRadius: 9,
+    padding: 8,
+  },
+  addInput: {
+    height: 30,
+    border: "1px solid #27313d",
+    background: "#020617",
+    color: "#f8fafc",
+    borderRadius: 8,
+    padding: "0 10px",
+    fontSize: 12,
+    fontWeight: 850,
+    outline: "none",
+    minWidth: 0,
+  },
+  addButton: {
+    height: 30,
+    border: "1px solid #047857",
+    background: "rgba(6,78,59,.25)",
+    color: "#6ee7b7",
+    borderRadius: 8,
+    padding: "0 10px",
+    fontSize: 10,
+    fontWeight: 950,
+    cursor: "pointer",
+  },
 };
-
-function getToneColors(tone: SymbolTone): {
-  color: string;
-  background: string;
-  border: string;
-} {
-  if (tone === "ready") {
-    return {
-      color: "#6ee7b7",
-      background: "rgba(6, 78, 59, 0.35)",
-      border: "#047857",
-    };
-  }
-
-  if (tone === "weak") {
-    return {
-      color: "#fca5a5",
-      background: "rgba(69, 10, 10, 0.35)",
-      border: "#991b1b",
-    };
-  }
-
-  return {
-    color: "#fcd34d",
-    background: "rgba(69, 26, 3, 0.35)",
-    border: "#b45309",
-  };
-}
-
-function getTypeLabel(type: WatchlistType): string {
-  if (type === "scanner") return "Scanner";
-  if (type === "manual") return "Manual";
-  return "Custom";
-}
-
 
 export default function WatchlistsWorkspacePanel() {
   const { activeSymbol, setActiveSymbol } = useActiveSymbol();
+
   const {
     watchlists,
     activeWatchlist,
@@ -304,161 +249,66 @@ export default function WatchlistsWorkspacePanel() {
     createWatchlist,
     renameWatchlist,
     deleteWatchlist,
+    addSymbol,
+    removeSymbol,
   } = useWatchlists();
 
-  const [legacyManualSymbols, setLegacyManualSymbols] = useState<string[] | null>(() =>
-    readLegacyManualWatchlist()
-  );
+  const [addText, setAddText] = useState("");
+  const [hoveredSymbol, setHoveredSymbol] = useState<string | null>(null);
 
   const selectedWatchlist = activeWatchlist ?? watchlists[0];
-  const selectedIsManual = isManualWorkspaceWatchlist(selectedWatchlist);
-
-  const syncLegacyManualSymbols = useCallback((nextSymbols?: unknown) => {
-    const incoming =
-      nextSymbols === undefined
-        ? readLegacyManualWatchlist()
-        : extractSymbolsFromUnknown(nextSymbols);
-
-    if (incoming === null) {
-      return;
-    }
-
-    const next = uniqueWorkspaceSymbols(incoming);
-
-    setLegacyManualSymbols((prev) => {
-      if (
-        prev !== null &&
-        prev.length === next.length &&
-        prev.every((item, index) => item === next[index])
-      ) {
-        return prev;
-      }
-
-      writeLegacyManualWatchlist(next);
-      return next;
-    });
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function refreshRemoteManualSymbols() {
-      try {
-        const remote = await fetchSharedAlpacaState();
-        if (cancelled || !remote) {
-          return;
-        }
-
-        if (Object.prototype.hasOwnProperty.call(remote as any, "manualWatchlist")) {
-          syncLegacyManualSymbols((remote as any).manualWatchlist);
-        }
-      } catch {
-        // Remote sync should never break the watchlist panel.
-      }
-    }
-
-    function refreshAllManualSymbols() {
-      syncLegacyManualSymbols();
-      void refreshRemoteManualSymbols();
-    }
-
-    function handleManualWatchlistEvent(event: Event) {
-      syncLegacyManualSymbols((event as CustomEvent<unknown>).detail);
-    }
-
-    function handleStorage(event: StorageEvent) {
-      if (event.key && !MANUAL_WATCHLIST_STORAGE_KEYS.includes(event.key)) {
-        return;
-      }
-
-      if (event.newValue) {
-        try {
-          syncLegacyManualSymbols(JSON.parse(event.newValue));
-          return;
-        } catch {
-          syncLegacyManualSymbols(event.newValue);
-          return;
-        }
-      }
-
-      syncLegacyManualSymbols();
-    }
-
-    window.addEventListener("manual-watchlist-change", handleManualWatchlistEvent);
-    window.addEventListener("scanner-watchlist-change", handleManualWatchlistEvent);
-    window.addEventListener("alpaca-manual-watchlist-change", handleManualWatchlistEvent);
-    window.addEventListener("shared-manual-watchlist-change", handleManualWatchlistEvent);
-    window.addEventListener("storage", handleStorage);
-    window.addEventListener("focus", refreshAllManualSymbols);
-    document.addEventListener("visibilitychange", refreshAllManualSymbols);
-
-    refreshAllManualSymbols();
-
-    const intervalId = window.setInterval(refreshAllManualSymbols, 1500);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-      window.removeEventListener("manual-watchlist-change", handleManualWatchlistEvent);
-      window.removeEventListener("scanner-watchlist-change", handleManualWatchlistEvent);
-      window.removeEventListener("alpaca-manual-watchlist-change", handleManualWatchlistEvent);
-      window.removeEventListener("shared-manual-watchlist-change", handleManualWatchlistEvent);
-      window.removeEventListener("storage", handleStorage);
-      window.removeEventListener("focus", refreshAllManualSymbols);
-      document.removeEventListener("visibilitychange", refreshAllManualSymbols);
-    };
-  }, [syncLegacyManualSymbols]);
-
-  const displaySymbols = useMemo(() => {
-    const baseSymbols = selectedWatchlist?.symbols ?? [];
-
-    if (!selectedIsManual) {
-      return baseSymbols;
-    }
-
-    if (legacyManualSymbols === null) {
-      return baseSymbols;
-    }
-
-    return legacyManualSymbols.map((symbol) => ({
-      symbol,
-      score: 0,
-      tone: "watch" as SymbolTone,
-      setup: "Manual",
-      note: "Legacy manual watchlist",
-    }));
-  }, [legacyManualSymbols, selectedIsManual, selectedWatchlist?.symbols]);
+  const selectedIsManual = isManualWatchlist(selectedWatchlist);
+  const displaySymbols = selectedWatchlist?.symbols ?? [];
 
   const sortedSymbols = useMemo(() => {
-    return [...displaySymbols].sort(
-      (a, b) => (b.score ?? 0) - (a.score ?? 0)
-    );
-  }, [displaySymbols]);
+    if (selectedIsManual) return displaySymbols;
+    return [...displaySymbols].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  }, [displaySymbols, selectedIsManual]);
 
-  const readyCount = displaySymbols.filter(
-    (item) => item.tone === "ready"
-  ).length;
-
-  const weakCount = displaySymbols.filter(
-    (item) => item.tone === "weak"
-  ).length;
+  const readyCount = displaySymbols.filter((item) => item.tone === "ready").length;
+  const weakCount = displaySymbols.filter((item) => item.tone === "weak").length;
 
   const averageScore =
     displaySymbols.length === 0
       ? 0
       : Math.round(
-          displaySymbols.reduce(
-            (total, item) => total + (item.score ?? 0),
-            0
-          ) / displaySymbols.length
+          displaySymbols.reduce((total, item) => total + (item.score ?? 0), 0) /
+            displaySymbols.length
         );
+
+  function handleAddSymbols(raw: string) {
+    if (!selectedIsManual || !selectedWatchlist?.id) return;
+
+    const symbols = parseSymbols(raw);
+    if (!symbols.length) return;
+
+    for (const symbol of symbols) {
+      addSymbol(selectedWatchlist.id, symbol);
+    }
+
+    setAddText("");
+  }
+
+  function handleRemoveSymbol(symbol: string) {
+    if (!selectedIsManual || !selectedWatchlist?.id) return;
+
+    const normalized = normalizeWorkspaceSymbol(symbol);
+    removeSymbol(selectedWatchlist.id, normalized);
+
+    if (activeSymbol.toUpperCase() === normalized) {
+      const remaining = displaySymbols
+        .map((item) => item.symbol)
+        .filter((item) => item !== normalized);
+
+      if (remaining.length > 0) {
+        setActiveSymbol(remaining[0], "watchlist-remove");
+      }
+    }
+  }
 
   function handleCreateWatchlist() {
     const name = window.prompt("New watchlist name:");
-
-    if (!name?.trim()) {
-      return;
-    }
+    if (!name?.trim()) return;
 
     createWatchlist(name.trim(), "custom");
   }
@@ -467,10 +317,7 @@ export default function WatchlistsWorkspacePanel() {
     if (!selectedWatchlist) return;
 
     const name = window.prompt("Rename watchlist:", selectedWatchlist.name);
-
-    if (!name?.trim()) {
-      return;
-    }
+    if (!name?.trim()) return;
 
     renameWatchlist(selectedWatchlist.id, name.trim());
   }
@@ -487,9 +334,7 @@ export default function WatchlistsWorkspacePanel() {
       `Delete "${selectedWatchlist.name}"? This will remove the watchlist from this workspace.`
     );
 
-    if (!confirmed) {
-      return;
-    }
+    if (!confirmed) return;
 
     deleteWatchlist(selectedWatchlist.id);
   }
@@ -537,11 +382,7 @@ export default function WatchlistsWorkspacePanel() {
             + New
           </button>
 
-          <button
-            type="button"
-            onClick={handleRenameWatchlist}
-            style={styles.actionButton}
-          >
+          <button type="button" onClick={handleRenameWatchlist} style={styles.actionButton}>
             Rename
           </button>
 
@@ -584,7 +425,7 @@ export default function WatchlistsWorkspacePanel() {
       </Card>
 
       <Card
-        title="Ranked Opportunities"
+        title={selectedIsManual ? "Manual Watchlist" : "Ranked Opportunities"}
         right={
           <span
             style={{
@@ -601,7 +442,9 @@ export default function WatchlistsWorkspacePanel() {
       >
         {sortedSymbols.length === 0 ? (
           <div style={styles.emptyState}>
-            This watchlist is empty. Scanner-generated lists and manual symbols will populate here automatically.
+            {selectedIsManual
+              ? "Manual watchlist is empty. Add symbols below."
+              : "This watchlist is empty. Scanner-generated lists will populate here automatically."}
           </div>
         ) : (
           <div style={styles.table}>
@@ -610,28 +453,39 @@ export default function WatchlistsWorkspacePanel() {
               <div>Symbol</div>
               <div>Score</div>
               <div>Status</div>
+              <div />
             </div>
 
             {sortedSymbols.map((item, index) => {
               const selected =
                 activeSymbol.toUpperCase() === item.symbol.toUpperCase();
-              const tone = getToneColors(item.tone);
+              const tone = getToneColors(item.tone ?? "watch");
+              const hovered = hoveredSymbol === item.symbol;
 
               return (
-                <button
+                <div
                   key={item.symbol}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   onClick={() => handleSymbolSelect(item.symbol)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      handleSymbolSelect(item.symbol);
+                    }
+                  }}
+                  onMouseEnter={() => setHoveredSymbol(item.symbol)}
+                  onMouseLeave={() => setHoveredSymbol(null)}
                   style={{
                     ...styles.row,
-                    border: selected
-                      ? "1px solid #22d3ee"
-                      : styles.row.border,
+                    border: selected ? "1px solid #22d3ee" : styles.row.border,
                     background: selected
-                      ? "rgba(8, 47, 73, 0.55)"
-                      : styles.row.background,
+                      ? "rgba(8,47,73,.55)"
+                      : hovered
+                        ? "#0b111a"
+                        : styles.row.background,
                     boxShadow: selected
-                      ? "0 0 0 1px rgba(34, 211, 238, 0.12) inset"
+                      ? "0 0 0 1px rgba(34,211,238,.12) inset"
                       : "none",
                   }}
                 >
@@ -654,13 +508,7 @@ export default function WatchlistsWorkspacePanel() {
                   </div>
 
                   <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                      }}
-                    >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <span
                         style={{
                           fontSize: 14,
@@ -673,13 +521,7 @@ export default function WatchlistsWorkspacePanel() {
                       </span>
 
                       {selected ? (
-                        <span
-                          style={{
-                            fontSize: 9,
-                            fontWeight: 900,
-                            color: "#67e8f9",
-                          }}
-                        >
+                        <span style={{ fontSize: 9, fontWeight: 900, color: "#67e8f9" }}>
                           ACTIVE
                         </span>
                       ) : null}
@@ -704,17 +546,18 @@ export default function WatchlistsWorkspacePanel() {
                       style={{
                         fontSize: 15,
                         fontWeight: 950,
+                        textAlign: "right",
                         color:
                           (item.score ?? 0) >= 70
                             ? "#6ee7b7"
                             : (item.score ?? 0) <= 45
                               ? "#fca5a5"
                               : "#e5e7eb",
-                        textAlign: "right",
                       }}
                     >
                       {item.score ?? 0}
                     </div>
+
                     <div
                       style={{
                         marginTop: 3,
@@ -740,28 +583,83 @@ export default function WatchlistsWorkspacePanel() {
                     </div>
                   </div>
 
-                  <Badge
-                    color={tone.color}
-                    background={tone.background}
-                    border={tone.border}
-                  >
-                    {item.tone}
+                  <Badge color={tone.color} background={tone.background} border={tone.border}>
+                    {item.tone ?? "watch"}
                   </Badge>
-                </button>
+
+                  {selectedIsManual ? (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        handleRemoveSymbol(item.symbol);
+                      }}
+                      title={`Remove ${item.symbol}`}
+                      style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: 999,
+                        border: "1px solid rgba(248,113,113,.35)",
+                        background: hovered
+                          ? "rgba(127,29,29,.52)"
+                          : "rgba(15,23,42,.1)",
+                        color: hovered ? "#fecaca" : "rgba(248,113,113,.38)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: 14,
+                        fontWeight: 950,
+                        cursor: "pointer",
+                        padding: 0,
+                      }}
+                    >
+                      ×
+                    </button>
+                  ) : (
+                    <div />
+                  )}
+                </div>
               );
             })}
           </div>
         )}
+
+        {selectedIsManual ? (
+          <div style={styles.addRow}>
+            <input
+              value={addText}
+              onChange={(event) => setAddText(event.target.value.toUpperCase())}
+              onPaste={(event) => {
+                const pasted = event.clipboardData.getData("text");
+                if (parseSymbols(pasted).length > 1) {
+                  event.preventDefault();
+                  handleAddSymbols(pasted);
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  handleAddSymbols(addText);
+                }
+              }}
+              placeholder="+ Add Symbol..."
+              style={styles.addInput}
+            />
+
+            <button
+              type="button"
+              onClick={() => handleAddSymbols(addText)}
+              style={styles.addButton}
+            >
+              ADD
+            </button>
+          </div>
+        ) : null}
       </Card>
 
       <Card title="Routing">
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 7,
-          }}
-        >
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
           <RoutePill label="Chart" value={activeSymbol} good />
           <RoutePill label="Decision" value="Linked" good />
           <RoutePill label="Scanner" value="Ready" good />

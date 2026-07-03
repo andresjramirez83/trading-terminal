@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 import httpx
+from app.history.history_routes import router as history_router
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -78,6 +79,7 @@ app.add_middleware(
 # Registered before legacy in-main endpoints so web workers never own trade state.
 app.include_router(professional_auto_trade_router)
 app.include_router(backtest_router)
+app.include_router(history_router)
 
 
 class Candle(BaseModel):

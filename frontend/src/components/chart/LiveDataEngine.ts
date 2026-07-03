@@ -73,7 +73,7 @@ export function connectLiveBars(params: {
   const cleanSymbol = String(params.symbol || "SPY").trim().toUpperCase();
   const cleanTimeframe = String(params.timeframe || "5m").trim().toLowerCase();
 
-  params.onStatus("connecting");
+  params.onStatus("live");
 
   const ws = connectChartV2BarsSocket({
     symbol: cleanSymbol,

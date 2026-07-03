@@ -52,6 +52,36 @@ function volumeColor(bar: CleanBar): string {
     : "rgba(239, 68, 68, 0.35)";
 }
 
+
+const PACIFIC_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function chartTimeToTimestampMs(time: Time): number | null {
+  if (typeof time === "number") return time * 1000;
+
+  if (typeof time === "string") {
+    const parsed = Date.parse(time);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  if (time && typeof time === "object" && "year" in time) {
+    return Date.UTC(time.year, time.month - 1, time.day);
+  }
+
+  return null;
+}
+
+function formatPacificChartTime(time: Time): string {
+  const timestamp = chartTimeToTimestampMs(time);
+  if (timestamp == null) return "";
+
+  return PACIFIC_TIME_FORMATTER.format(new Date(timestamp));
+}
+
 const NEW_YORK_TIME_PARTS_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   hour: "2-digit",
@@ -245,8 +275,18 @@ export class ChartEngine {
           bottom: 0.25,
         },
       },
+      localization: {
+        locale: "en-US",
+        timeFormatter: (time: Time) => formatPacificChartTime(time),
+      },
       timeScale: {
+        visible: true,
         borderVisible: false,
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 12,
+        barSpacing: 8,
+        tickMarkFormatter: (time: Time) => formatPacificChartTime(time),
       },
     });
 
@@ -923,11 +963,19 @@ export class ChartEngine {
     return this.bars;
   }
 
-  setMarketContext(symbol?: string, timeframe?: string): void {
-    this.symbol = symbol;
-    this.timeframe = timeframe;
+setMarketContext(symbol?: string, timeframe?: string): void {
+  const nextSymbol = symbol;
+  const nextTimeframe = timeframe;
+
+  if (this.symbol === nextSymbol && this.timeframe === nextTimeframe) {
+    return;
   }
 
+  this.symbol = nextSymbol;
+  this.timeframe = nextTimeframe;
+
+  this.analysisStore.setWorkspace(symbol, timeframe);
+}
   private buildAutoScalePriceRange(
     baseRange: { minValue: number; maxValue: number } | null,
   ): { minValue: number; maxValue: number } | null {
@@ -1092,7 +1140,40 @@ export class ChartEngine {
       firstBar ? firstBar.time : fallback,
       lastBar ? lastBar.time : fallback,
     );
-    this.analysisRenderer.renderAll(results, this.fxAnalysisSettings);
+    this.analysisRenderer.renderAll(
+      results,
+      this.fxAnalysisSettings,
+      this.analysisStore.getSelectedId(),
+    );
+  }
+
+
+
+  selectFxAnalysisAtPoint(point: ChartPointerPoint): boolean {
+    const hit = this.analysisStore.hitTestAt({
+      time: point.time,
+      price: point.rawPrice ?? point.price,
+    });
+
+    this.analysisStore.select(hit?.resultId ?? null);
+    this.renderFxAnalysis();
+
+    return hit != null;
+  }
+
+  clearFxAnalysisSelection(): void {
+    if (!this.analysisStore.getSelectedId()) return;
+
+    this.analysisStore.select(null);
+    this.renderFxAnalysis();
+  }
+
+  removeSelectedFxAnalysis(): boolean {
+    const removed = this.analysisStore.removeSelected();
+    if (!removed) return false;
+
+    this.renderFxAnalysis();
+    return true;
   }
 
   runFxAnalysisTool(tool: FxAnalysisToolId, bar: CleanBar | null): void {

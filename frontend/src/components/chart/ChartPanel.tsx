@@ -1,16 +1,16 @@
-// src/components/ChartPanelV2/ChartPanel.tsx
+// src/components/chart/ChartPanel.tsx
 
 import { memo, useEffect, useRef, useState } from "react";
 
-import { ChartEngine } from "../chart/ChartEngine";
-import type { ChartState } from "../chart/ChartState";
+import { ChartEngine } from "./ChartEngine";
+import type { ChartState } from "./ChartState";
 import type {
   CrosshairInfo,
   LiveStatus,
   StudyVisibility,
-} from "../chart/ChartTypes";
-import { connectLiveBars, loadHistoricalBars } from "../chart/LiveDataEngine";
-import { useActiveSymbol } from "../chart/ActiveSymbolContext";
+} from "./ChartTypes";
+import { connectLiveBars, loadHistoricalBars } from "./LiveDataEngine";
+import { useActiveSymbol } from "./ActiveSymbolContext";
 import ChartToolbarV2 from "./ChartToolbarV2";
 import ChartViewport from "./ChartViewport";
 import LeftDrawingBar from "./LeftDrawingBar";
@@ -23,12 +23,12 @@ import {
   DEFAULT_FX_ANALYSIS_SETTINGS,
   type FxAnalysisSettings,
   type FxAnalysisToolId,
-} from "../chart/analysis";
+} from "./analysis";
 import {
   DEFAULT_CHART_SETTINGS,
   normalizeChartSettings,
   type ChartSettings,
-} from "../chart/ChartSettingsTypes";
+} from "./ChartSettingsTypes";
 
 const TIMEFRAME_STORAGE_KEY = "chartv2.timeframe";
 const STUDY_STORAGE_KEY = "chartv2.studyVisibility";
@@ -119,13 +119,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const engineRef = useRef<ChartEngine | null>(null);
   const drawingEngineRef = useRef<DrawingEngine | null>(null);
   const fxAnalysisToolRef = useRef<FxAnalysisToolId>("none");
+  const drawingToolRef = useRef<DrawingTool>("cursor");
 
   const { activeSymbol, setActiveSymbol } = useActiveSymbol();
   const symbol = activeSymbol;
-
-useEffect(() => {
-  console.log("ChartPanel activeSymbol:", activeSymbol);
-}, [activeSymbol]);
 
   const [timeframe, setTimeframe] = useState(
     () => localStorage.getItem(TIMEFRAME_STORAGE_KEY) || initialTimeframe
@@ -160,7 +157,7 @@ useEffect(() => {
   function commitChartState(engine: ChartEngine, reason: string): void {
     const nextState = engine.getState();
 
-    console.log("ChartPanel setting chartState", {
+    console.log("ChartPanelV2 setting chartState", {
       reason,
       symbol: nextState.symbol,
       timeframe: nextState.timeframe,
@@ -181,11 +178,18 @@ useEffect(() => {
   }
 
   useEffect(() => {
+    console.log("ChartPanelV2 activeSymbol:", activeSymbol);
+  }, [activeSymbol]);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const engine = new ChartEngine(container);
-    const drawingEngine = new DrawingEngine(engine.chart, engine.series.candles);
+    const drawingEngine = new DrawingEngine(engine.chart, engine.series.candles, {
+      symbol,
+      timeframe,
+    });
 
     engine.setStudyVisibility(studyVisibility);
     engine.setFxAnalysisSettings(fxAnalysisSettings);
@@ -206,11 +210,24 @@ useEffect(() => {
         return;
       }
 
-      drawingEngine.handleClick(point);
+      const created = drawingEngine.handleClick(point);
+
+      if (created) {
+        engine.clearFxAnalysisSelection();
+      }
     });
 
     const unsubscribePointerDown = engine.subscribePointerDown((point) => {
-      drawingEngine.handlePointerDown(point);
+      const drawingHandled = drawingEngine.handlePointerDown(point);
+
+      if (drawingHandled) {
+        engine.clearFxAnalysisSelection();
+        return;
+      }
+
+      if (drawingToolRef.current === "cursor" && fxAnalysisToolRef.current === "none") {
+        engine.selectFxAnalysisAtPoint(point);
+      }
     });
 
     const unsubscribePointerMove = engine.subscribePointerMove((point) => {
@@ -237,7 +254,7 @@ useEffect(() => {
       unsubscribePointerDown();
       unsubscribePointerMove();
       unsubscribePointerUp();
-      drawingEngine.clear();
+      drawingEngine.destroy();
       drawingEngineRef.current = null;
       engine.destroy();
       engineRef.current = null;
@@ -251,12 +268,22 @@ useEffect(() => {
   }, [studyVisibility]);
 
   useEffect(() => {
+    drawingToolRef.current = drawingTool;
     drawingEngineRef.current?.setTool(drawingTool);
+
+    if (drawingTool !== "cursor") {
+      engineRef.current?.clearFxAnalysisSelection();
+    }
   }, [drawingTool]);
 
   useEffect(() => {
     fxAnalysisToolRef.current = fxAnalysisTool;
     localStorage.setItem(FX_ANALYSIS_TOOL_STORAGE_KEY, fxAnalysisTool);
+
+    if (fxAnalysisTool !== "none") {
+      drawingEngineRef.current?.selectDrawing(null);
+      engineRef.current?.clearFxAnalysisSelection();
+    }
   }, [fxAnalysisTool]);
 
   useEffect(() => {
@@ -310,25 +337,28 @@ useEffect(() => {
         const engine = engineRef.current;
         if (!engine) return;
 
+        setCrosshairInfo(null);
+        setChartState(null);
+        engine.setMarketContext(symbol, timeframe);
+
         const bars = await loadHistoricalBars({
           symbol,
           timeframe,
-          lookback: "5d",
-          limit: 500,
+          forceRefresh: true,
         });
 
         if (cancelled) return;
 
         engine.setMarketContext(symbol, timeframe);
         engine.setBars(bars);
+        drawingEngineRef.current?.setWorkspace(symbol, timeframe);
         commitChartState(engine, "historical-bars-loaded");
-        engine.clearFxAnalysis();
         engine.setStudyVisibility(studyVisibility);
         setCrosshairInfo(engine.getLastBarInfo());
         engine.resize();
         engine.fitContent();
       } catch (err) {
-        console.error("ChartPanel load failed", err);
+        console.error("ChartPanelV2 load failed", err);
       }
     }
 
@@ -337,7 +367,7 @@ useEffect(() => {
     return () => {
       cancelled = true;
     };
-  }, [symbol, timeframe, studyVisibility]);
+  }, [symbol, timeframe]);
 
   useEffect(() => {
     setLiveStatus("connecting");
@@ -360,7 +390,38 @@ useEffect(() => {
     });
 
     return cleanup;
-  }, [symbol, timeframe, studyVisibility]);
+  }, [symbol, timeframe]);
+
+
+  useEffect(() => {
+    function isTypingTarget(target: EventTarget | null): boolean {
+      if (!(target instanceof HTMLElement)) return false;
+
+      const tag = target.tagName.toLowerCase();
+      return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (isTypingTarget(event.target)) return;
+
+      const removedDrawing = drawingEngineRef.current?.removeSelectedDrawing() ?? false;
+      const removedFx = removedDrawing
+        ? false
+        : engineRef.current?.removeSelectedFxAnalysis() ?? false;
+
+      if (removedDrawing || removedFx) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
 
   function handleClearDrawings() {
     drawingEngineRef.current?.clear();
@@ -398,6 +459,7 @@ useEffect(() => {
       <ChartToolbarV2
         symbol={symbol}
         timeframe={timeframe}
+        liveStatus={liveStatus}
         crosshairInfo={crosshairInfo}
         studyVisibility={studyVisibility}
         onSymbolChange={handleSymbolChange}
