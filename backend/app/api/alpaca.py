@@ -57,12 +57,17 @@ def get_positions(mode: AlpacaMode = Query("paper")):
 @router.get("/orders")
 def get_orders(
     mode: AlpacaMode = Query("paper"),
-    status: str = "open",
-    limit: int = 50,
+    status: str = Query("open"),
+    limit: int = Query(50, ge=1, le=500),
+    nested: bool = Query(True),
 ):
     try:
         alpaca = get_service(mode)
-        return alpaca.get_orders(status=status, limit=limit)
+        return alpaca.get_orders(
+            status=status,
+            limit=limit,
+            nested=nested,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
