@@ -1,13 +1,13 @@
 import { useState } from "react";
-import type { RightPanelWorkspace } from "../chart/right-panel/RightPanelTypes";
-import type { ChartState } from "../chart/ChartState";
-import { DecisionCenterProvider } from "../chart/right-panel/DecisionCenterContext";
+import type { RightPanelWorkspace } from "./right-panel/RightPanelTypes";
+import type { ChartState } from "./ChartState";
+import { DecisionCenterProvider } from "./right-panel/DecisionCenterContext";
 
-import ChartWorkspacePanel from "../chart/right-panel/workspaces/ChartWorkspacePanel";
-import TradingWorkspacePanel from "../chart/right-panel/workspaces/trading/TradingWorkspacePanel";
-import WatchlistsWorkspacePanel from "../chart/right-panel/workspaces/WatchlistsWorkspacePanel";
-import ScannerWorkspacePanel from "../chart/right-panel/workspaces/ScannerWorkspacePanel";
-import NewsWorkspacePanel from "../chart/right-panel/workspaces/NewsWorkspacePanel";
+import ChartWorkspacePanel from "./right-panel/workspaces/ChartWorkspacePanel";
+import TradingWorkspacePanel from "./right-panel/workspaces/trading/TradingWorkspacePanel";
+import WatchlistsWorkspacePanel from "./right-panel/workspaces/WatchlistsWorkspacePanel";
+import ScannerWorkspacePanel from "./right-panel/workspaces/ScannerWorkspacePanel";
+import NewsWorkspacePanel from "./right-panel/workspaces/NewsWorkspacePanel";
 
 type Props = {
   symbol: string;
@@ -30,8 +30,7 @@ export default function RightInfoPanel({
   onToggleCollapsed,
   chartState,
 }: Props) {
-  const [workspace, setWorkspace] =
-    useState<RightPanelWorkspace>("chart");
+  const [workspace, setWorkspace] = useState<RightPanelWorkspace>("chart");
 
   if (collapsed) {
     return (
@@ -169,13 +168,9 @@ export default function RightInfoPanel({
             />
           )}
 
-          {workspace === "watchlists" && (
-            <WatchlistsWorkspacePanel />
-          )}
+          {workspace === "watchlists" && <WatchlistsWorkspacePanel />}
 
-          {workspace === "scanner" && (
-            <ScannerWorkspacePanel />
-          )}
+          {workspace === "scanner" && <ScannerWorkspacePanel />}
 
           {workspace === "news" && <NewsWorkspacePanel />}
         </div>

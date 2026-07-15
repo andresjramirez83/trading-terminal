@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import os
@@ -41,7 +40,7 @@ from app.scanner import build_scanner
 from app.scanners.registry import ScannerRegistry
 from app.services.alpaca_service import AlpacaService
 from app.services.polygon_service import PolygonService
-from app.services.polygon_ws import polygon_ws_manager
+from app.services.alpaca_ws import alpaca_ws_manager
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 from app.services.signal_engine import (
     SignalEngineConfig,
@@ -2876,6 +2875,11 @@ async def on_shutdown() -> None:
         await stop_scanner_task()
         # Dedicated auto-trade worker is stopped by systemd, not the web backend.
         release_background_worker_lock()
+    try:
+        await alpaca_ws_manager.close()
+    except Exception as exc:
+        print(f"[alpaca_ws] shutdown error: {exc}", flush=True)
+
     if POLYGON_HTTP_CLIENT is not None and not POLYGON_HTTP_CLIENT.is_closed:
         await POLYGON_HTTP_CLIENT.aclose()
 
@@ -3511,18 +3515,18 @@ async def market_ws(
     timeframe: str = Query("1m"),
 ):
     await websocket.accept()
-    print(f"[market_ws] accepted for {symbol} {timeframe}", flush=True)
+    print(f"[market_ws/alpaca] accepted for {symbol} {timeframe}", flush=True)
 
     try:
-        await polygon_ws_manager.subscribe_client(websocket, symbol, timeframe)
+        await alpaca_ws_manager.subscribe_client(websocket, symbol, timeframe)
 
         while True:
             await websocket.receive_text()
 
     except WebSocketDisconnect:
-        print(f"[market_ws] frontend disconnected for {symbol}", flush=True)
+        print(f"[market_ws/alpaca] frontend disconnected for {symbol}", flush=True)
     except Exception as exc:
-        print(f"[market_ws] error for {symbol}: {exc}", flush=True)
+        print(f"[market_ws/alpaca] error for {symbol}: {exc}", flush=True)
         traceback.print_exc()
         try:
             await websocket.send_text(
@@ -3539,9 +3543,9 @@ async def market_ws(
         except Exception:
             pass
     finally:
-        print(f"[market_ws] closing for {symbol}", flush=True)
+        print(f"[market_ws/alpaca] closing for {symbol}", flush=True)
         try:
-            await polygon_ws_manager.unsubscribe_client(websocket)
+            await alpaca_ws_manager.unsubscribe_client(websocket)
         except Exception:
             pass
         try:

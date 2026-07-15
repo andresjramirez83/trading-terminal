@@ -1,14 +1,28 @@
+import type { PerformanceSnapshot } from "./TradingTypes";
+
 type PerformanceWidgetProps = {
   symbol: string;
+  performance?: PerformanceSnapshot | null;
 };
 
-const MOCK_EQUITY = [
-  { label: "Mon", value: 0 },
-  { label: "Tue", value: 180 },
-  { label: "Wed", value: 95 },
-  { label: "Thu", value: 410 },
-  { label: "Fri", value: 685 },
-];
+const EMPTY_PERFORMANCE: PerformanceSnapshot = {
+  totalTrades: 0,
+  closedTrades: 0,
+  openTrades: 0,
+  wins: 0,
+  losses: 0,
+  winRate: 0,
+  grossProfit: 0,
+  grossLoss: 0,
+  netPnl: 0,
+  profitFactor: 0,
+  expectancy: 0,
+  averageWinner: 0,
+  averageLoser: 0,
+  averageR: 0,
+  largestWinner: 0,
+  largestLoser: 0,
+};
 
 function money(value: number): string {
   return value.toLocaleString(undefined, {
@@ -18,8 +32,24 @@ function money(value: number): string {
   });
 }
 
-export default function PerformanceWidget({ symbol }: PerformanceWidgetProps) {
-  const maxValue = Math.max(...MOCK_EQUITY.map((item) => item.value), 1);
+function number(value: number, digits = 2): string {
+  if (!Number.isFinite(value)) return "0.00";
+  return value.toFixed(digits);
+}
+
+export default function PerformanceWidget({
+  symbol,
+  performance,
+}: PerformanceWidgetProps) {
+  const stats = performance ?? EMPTY_PERFORMANCE;
+
+  const chartItems = [
+    { label: "Profit", value: Math.max(0, stats.grossProfit) },
+    { label: "Loss", value: Math.max(0, stats.grossLoss) },
+    { label: "Net", value: Math.abs(stats.netPnl) },
+  ];
+
+  const maxValue = Math.max(...chartItems.map((item) => item.value), 1);
 
   return (
     <section style={styles.card}>
@@ -33,24 +63,84 @@ export default function PerformanceWidget({ symbol }: PerformanceWidgetProps) {
       </div>
 
       <div style={styles.metrics}>
-        <Metric label="Win Rate" value="62.5%" good />
-        <Metric label="Profit Factor" value="2.14" good />
-        <Metric label="Average R" value="1.18R" good />
-        <Metric label="Average Winner" value={money(248)} good />
-        <Metric label="Average Loser" value={money(-92)} danger />
-        <Metric label="Best Strategy" value="6/7 Sweep" />
-        <Metric label="Best Time" value="6:45 AM" />
-        <Metric label="Best Weekday" value="Tuesday" />
+        <Metric
+          label="Net P/L"
+          value={money(stats.netPnl)}
+          good={stats.netPnl > 0}
+          danger={stats.netPnl < 0}
+        />
+        <Metric
+          label="Win Rate"
+          value={`${number(stats.winRate)}%`}
+          good={stats.winRate > 50}
+        />
+        <Metric
+          label="Profit Factor"
+          value={number(stats.profitFactor)}
+          good={stats.profitFactor > 1}
+          danger={stats.profitFactor > 0 && stats.profitFactor < 1}
+        />
+        <Metric
+          label="Average R"
+          value={`${number(stats.averageR)}R`}
+          good={stats.averageR > 0}
+          danger={stats.averageR < 0}
+        />
+        <Metric
+          label="Expectancy"
+          value={money(stats.expectancy)}
+          good={stats.expectancy > 0}
+          danger={stats.expectancy < 0}
+        />
+        <Metric label="Closed Trades" value={String(stats.closedTrades)} />
+        <Metric
+          label="Average Winner"
+          value={money(stats.averageWinner)}
+          good={stats.averageWinner > 0}
+        />
+        <Metric
+          label="Average Loser"
+          value={money(-Math.abs(stats.averageLoser))}
+          danger={stats.averageLoser > 0}
+        />
+        <Metric
+          label="Largest Winner"
+          value={money(stats.largestWinner)}
+          good={stats.largestWinner > 0}
+        />
+        <Metric
+          label="Largest Loser"
+          value={money(stats.largestLoser)}
+          danger={stats.largestLoser < 0}
+        />
+      </div>
+
+      <div style={styles.summaryRow}>
+        <Summary label="Total" value={stats.totalTrades} />
+        <Summary label="Open" value={stats.openTrades} />
+        <Summary label="Wins" value={stats.wins} good />
+        <Summary label="Losses" value={stats.losses} danger />
       </div>
 
       <div style={styles.curveCard}>
         <div style={styles.curveHeader}>
-          <span>Equity Curve</span>
-          <strong>{money(MOCK_EQUITY[MOCK_EQUITY.length - 1].value)}</strong>
+          <span>Realized Performance</span>
+          <strong
+            style={{
+              color:
+                stats.netPnl > 0
+                  ? "#22c55e"
+                  : stats.netPnl < 0
+                    ? "#ef4444"
+                    : "#e5e7eb",
+            }}
+          >
+            {money(stats.netPnl)}
+          </strong>
         </div>
 
         <div style={styles.chart}>
-          {MOCK_EQUITY.map((item) => {
+          {chartItems.map((item) => {
             const height = Math.max(8, (item.value / maxValue) * 74);
 
             return (
@@ -64,6 +154,13 @@ export default function PerformanceWidget({ symbol }: PerformanceWidgetProps) {
           })}
         </div>
       </div>
+
+      {stats.closedTrades === 0 && (
+        <div style={styles.empty}>
+          Performance will populate after the first closed trade is matched to
+          its Alpaca fills.
+        </div>
+      )}
     </section>
   );
 }
@@ -81,6 +178,31 @@ function Metric({
 }) {
   return (
     <div style={styles.metric}>
+      <span>{label}</span>
+      <strong
+        style={{
+          color: good ? "#22c55e" : danger ? "#ef4444" : "#e5e7eb",
+        }}
+      >
+        {value}
+      </strong>
+    </div>
+  );
+}
+
+function Summary({
+  label,
+  value,
+  good,
+  danger,
+}: {
+  label: string;
+  value: number;
+  good?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <div style={styles.summary}>
       <span>{label}</span>
       <strong
         style={{
@@ -143,6 +265,24 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     color: "#94a3b8",
   },
+  summaryRow: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, 1fr)",
+    gap: 7,
+    marginTop: 10,
+  },
+  summary: {
+    display: "grid",
+    justifyItems: "center",
+    gap: 3,
+    border: "1px solid rgba(148,163,184,.14)",
+    background: "rgba(15,23,42,.6)",
+    borderRadius: 10,
+    padding: "8px 5px",
+    color: "#64748b",
+    fontSize: 9,
+    fontWeight: 800,
+  },
   curveCard: {
     marginTop: 12,
     border: "1px solid rgba(148,163,184,.16)",
@@ -160,8 +300,8 @@ const styles: Record<string, React.CSSProperties> = {
   chart: {
     height: 105,
     display: "grid",
-    gridTemplateColumns: "repeat(5, 1fr)",
-    gap: 8,
+    gridTemplateColumns: "repeat(3, 1fr)",
+    gap: 10,
     alignItems: "end",
   },
   barWrap: {
@@ -186,5 +326,15 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     borderRadius: 999,
     background: "linear-gradient(180deg, #22c55e, #2563eb)",
+  },
+  empty: {
+    marginTop: 10,
+    border: "1px dashed rgba(148,163,184,.22)",
+    borderRadius: 12,
+    padding: 10,
+    color: "#64748b",
+    fontSize: 10,
+    lineHeight: 1.35,
+    textAlign: "center",
   },
 };

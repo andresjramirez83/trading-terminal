@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from app.models.market import BarsResponse, LastTradeResponse
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import get_market_data_provider
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
@@ -13,24 +13,53 @@ async def bars(
     session: str = Query("extended"),
 ):
     """
-    Chart bars endpoint.
+    Historical chart bars.
 
-    Uses PolygonService.get_bars() so 1m, 5m, and 15m all get a proper
-    lookback window instead of relying on the old function-style fetch.
+    Uses the configured MarketDataProvider.
+
+    MARKET_DATA_PROVIDER=alpaca
+
+    (Polygon remains available temporarily as a rollback provider during
+    migration.)
     """
     try:
-        polygon = PolygonService()
-        data = await polygon.get_bars(symbol, timeframe, session=session)
-        return BarsResponse(symbol=symbol.upper(), timeframe=timeframe, bars=data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Bars error: {e}")
+        provider = get_market_data_provider()
+
+        data = await provider.get_bars(
+            symbol=symbol,
+            timeframe=timeframe,
+            session=session,
+        )
+
+        return BarsResponse(
+            symbol=symbol.upper(),
+            timeframe=timeframe,
+            bars=data,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Bars error: {exc}",
+        )
 
 
 @router.get("/last-trade", response_model=LastTradeResponse)
-async def last_trade(symbol: str = Query(..., min_length=1, max_length=10)):
+async def last_trade(
+    symbol: str = Query(..., min_length=1, max_length=10),
+):
     try:
-        polygon = PolygonService()
-        price = await polygon.get_last_trade(symbol)
-        return LastTradeResponse(symbol=symbol.upper(), price=price)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Last trade error: {e}")
+        provider = get_market_data_provider()
+
+        price = await provider.get_last_trade(symbol)
+
+        return LastTradeResponse(
+            symbol=symbol.upper(),
+            price=price,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Last trade error: {exc}",
+        )

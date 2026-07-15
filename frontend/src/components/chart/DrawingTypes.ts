@@ -9,6 +9,7 @@ export type DrawingTool =
   | "ray"
   | "rectangle"
   | "priceRange"
+  | "longPosition"
   | "dateRange"
   | "text"
   | "magnet"
@@ -58,4 +59,38 @@ export type TrendlineDrawing = {
   selected?: boolean;
 };
 
-export type ChartDrawing = HorizontalLineDrawing | TrendlineDrawing;
+export type RectangleDrawing = {
+  id: string;
+  type: "rectangle";
+  p1: DrawingPoint;
+  p2: DrawingPoint;
+  style: DrawingStyle;
+  selected?: boolean;
+};
+
+export type PriceRangeDrawing = {
+  id: string;
+  type: "priceRange";
+  p1: DrawingPoint;
+  p2: DrawingPoint;
+  style: DrawingStyle;
+  selected?: boolean;
+};
+
+export type LongPositionDrawing = {
+  id: string;
+  type: "longPosition";
+  tradeId?: string | null;
+  entry: DrawingPoint;
+  stop: DrawingPoint;
+  target: DrawingPoint;
+  style: DrawingStyle;
+  selected?: boolean;
+};
+
+export type ChartDrawing =
+  | HorizontalLineDrawing
+  | TrendlineDrawing
+  | RectangleDrawing
+  | PriceRangeDrawing
+  | LongPositionDrawing;

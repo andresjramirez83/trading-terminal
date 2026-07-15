@@ -1,11 +1,12 @@
 import { calculateQuickOrderEstimate } from "./OrderCalculator";
+import TradingNumberInput from "./TradingNumberInput";
 import type { OrderType, QuickOrderState } from "./TradingTypes";
 
 type QuickOrderWidgetProps = {
   order: QuickOrderState;
   currentPrice: number;
   onChange: (patch: Partial<QuickOrderState>) => void;
-  onSubmit: (estimatedShares: number) => void;
+  onSubmit: (estimatedShares: number) => void | Promise<void>;
 };
 
 function money(value: number): string {
@@ -16,8 +17,15 @@ function money(value: number): string {
   });
 }
 
-function num(value: number): string {
-  return Number.isFinite(value) && value > 0 ? value.toString() : "";
+function getSubmitWarning(order: QuickOrderState, currentPrice: number, estimatedShares: number): string | null {
+  if (!order.symbol || order.symbol === "—") return "No symbol selected.";
+  if (estimatedShares <= 0) return "Estimated shares is 0.";
+  if (order.orderType === "limit" && order.limitPrice <= 0) return "Limit price is required.";
+  if (order.orderType === "stop") return "Stop orders are not wired yet. Use market or limit.";
+  if (order.bracketEnabled && order.bracketTarget <= 0 && order.bracketStop <= 0) {
+    return "Bracket needs a target or stop, or turn bracket off.";
+  }
+  return null;
 }
 
 export default function QuickOrderWidget({
@@ -28,9 +36,30 @@ export default function QuickOrderWidget({
 }: QuickOrderWidgetProps) {
   const estimate = calculateQuickOrderEstimate(order, currentPrice);
   const isBuy = order.side === "buy";
+  const warning = getSubmitWarning(order, currentPrice, estimate.estimatedShares);
+  const canSubmit = !warning;
+
+  async function handleSubmit() {
+    console.log("[QuickOrderWidget] submit clicked", {
+      canSubmit,
+      warning,
+      currentPrice,
+      estimatedShares: estimate.estimatedShares,
+      order,
+    });
+
+    if (!canSubmit) return;
+
+    await onSubmit(estimate.estimatedShares);
+  }
 
   return (
-    <section style={styles.card}>
+    <section
+      style={styles.card}
+      onPointerDown={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
       <div style={styles.top}>
         <div>
           <div style={styles.kicker}>Execution</div>
@@ -43,6 +72,7 @@ export default function QuickOrderWidget({
       <div style={styles.buySellGrid}>
         <button
           type="button"
+          onPointerDown={(event) => event.stopPropagation()}
           onClick={() => onChange({ side: "buy" })}
           style={{
             ...styles.bigSideButton,
@@ -59,6 +89,7 @@ export default function QuickOrderWidget({
 
         <button
           type="button"
+          onPointerDown={(event) => event.stopPropagation()}
           onClick={() => onChange({ side: "sell" })}
           style={{
             ...styles.bigSideButton,
@@ -85,6 +116,7 @@ export default function QuickOrderWidget({
           label="Shares"
           onClick={() => onChange({ sizingMode: "shares" })}
         />
+
         <Tab
           active={order.sizingMode === "dollars"}
           label="Dollars"
@@ -147,6 +179,7 @@ export default function QuickOrderWidget({
           <input
             type="checkbox"
             checked={order.extendedHours}
+            onPointerDown={(event) => event.stopPropagation()}
             onChange={(event) =>
               onChange({ extendedHours: event.target.checked })
             }
@@ -158,6 +191,7 @@ export default function QuickOrderWidget({
           <input
             type="checkbox"
             checked={order.bracketEnabled}
+            onPointerDown={(event) => event.stopPropagation()}
             onChange={(event) =>
               onChange({ bracketEnabled: event.target.checked })
             }
@@ -189,40 +223,32 @@ export default function QuickOrderWidget({
         <Stat label="R Multiple" value={`${estimate.rMultiple.toFixed(2)}R`} />
       </div>
 
-      <div style={styles.presets}>
-        <button type="button" style={styles.presetButton}>
-          BE
-        </button>
-        <button type="button" style={styles.presetButton}>
-          25%
-        </button>
-        <button type="button" style={styles.presetButton}>
-          50%
-        </button>
-        <button type="button" style={styles.presetButton}>
-          75%
-        </button>
-        <button type="button" style={styles.presetButton}>
-          100%
-        </button>
-      </div>
+      {warning && <div style={styles.warning}>{warning}</div>}
 
       <button
         type="button"
-        onClick={() => onSubmit(estimate.estimatedShares)}
+        onPointerDown={(event) => event.stopPropagation()}
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void handleSubmit();
+        }}
         style={{
           ...styles.submit,
+          opacity: canSubmit ? 1 : 0.65,
+          cursor: "pointer",
           background: isBuy
             ? "linear-gradient(135deg, #16a34a, #22c55e)"
             : "linear-gradient(135deg, #dc2626, #ef4444)",
         }}
       >
-        {isBuy ? "Buy" : "Sell"} {estimate.estimatedShares} Shares
+        Send Live {isBuy ? "Buy" : "Sell"} Order · {estimate.estimatedShares} Shares
       </button>
 
-      <button type="button" style={styles.flatten}>
-        Flatten Position
-      </button>
+      <div style={styles.footer}>
+        Orders route through TradeExecutionService → Alpaca.
+      </div>
     </section>
   );
 }
@@ -239,7 +265,11 @@ function Tab({
   return (
     <button
       type="button"
-      onClick={onClick}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
       style={{
         ...styles.tab,
         background: active ? "rgba(37, 99, 235, 0.28)" : "rgba(15,23,42,.8)",
@@ -268,13 +298,7 @@ function NumberField({
   return (
     <label style={{ ...styles.field, opacity: disabled ? 0.45 : 1 }}>
       <span>{label}</span>
-      <input
-        type="number"
-        value={num(value)}
-        disabled={disabled}
-        onChange={(event) => onChange(Number(event.target.value))}
-        style={styles.input}
-      />
+      <TradingNumberInput value={value} disabled={disabled} onChange={onChange} />
     </label>
   );
 }
@@ -394,18 +418,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     fontWeight: 800,
   },
-  input: {
-    width: "100%",
-    boxSizing: "border-box",
-    background: "rgba(2,6,23,.95)",
-    border: "1px solid rgba(148,163,184,.24)",
-    borderRadius: 11,
-    color: "#e5e7eb",
-    padding: "9px 10px",
-    outline: "none",
-    fontSize: 13,
-    fontWeight: 800,
-  },
   bracketHeader: {
     display: "flex",
     justifyContent: "space-between",
@@ -436,21 +448,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     color: "#94a3b8",
   },
-  presets: {
-    display: "grid",
-    gridTemplateColumns: "repeat(5, 1fr)",
-    gap: 7,
+  warning: {
     marginTop: 10,
-  },
-  presetButton: {
-    border: "1px solid rgba(148,163,184,.18)",
-    background: "rgba(15,23,42,.85)",
-    color: "#cbd5e1",
-    borderRadius: 10,
-    padding: "8px 0",
+    border: "1px solid rgba(250,204,21,.3)",
+    background: "rgba(113,63,18,.2)",
+    color: "#fde68a",
+    borderRadius: 12,
+    padding: "8px 10px",
     fontSize: 11,
-    fontWeight: 900,
-    cursor: "pointer",
+    fontWeight: 800,
   },
   submit: {
     width: "100%",
@@ -459,20 +465,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#fff",
     padding: "13px 10px",
     marginTop: 12,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: 950,
-    cursor: "pointer",
   },
-  flatten: {
-    width: "100%",
-    border: "1px solid rgba(248,113,113,.35)",
-    borderRadius: 14,
-    background: "rgba(127,29,29,.18)",
-    color: "#fecaca",
-    padding: "11px",
-    marginTop: 8,
-    fontSize: 12,
-    fontWeight: 950,
-    cursor: "pointer",
+  footer: {
+    marginTop: 10,
+    color: "#64748b",
+    fontSize: 11,
+    lineHeight: 1.35,
   },
 };

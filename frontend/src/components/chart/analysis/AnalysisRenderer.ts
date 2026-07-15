@@ -118,6 +118,7 @@ export class AnalysisRenderer {
         lastValueVisible: false,
         title: showLabel ? result.zone.title : "",
         priceScaleId: "right",
+        autoscaleInfoProvider: () => null,
       });
 
       zone.setData([
@@ -141,6 +142,7 @@ export class AnalysisRenderer {
         lastValueVisible: showLabel,
         title: showLabel ? line.title : "",
         priceScaleId: "right",
+        autoscaleInfoProvider: () => null,
       });
 
       series.setData([

@@ -25,8 +25,6 @@ export function resolveApiBaseUrl(): string {
       const hasExplicitPort = Boolean(url.port);
       const isBareOrigin = url.pathname === "/" || url.pathname === "";
 
-      // If env/config is only http://165.22.145.148, that hits frontend/nginx.
-      // FastAPI is on :8000, so force :8000 for bare origins with no explicit port.
       if (!hasExplicitPort && isBareOrigin) {
         url.port = "8000";
       }
@@ -51,10 +49,6 @@ export function resolveApiBaseUrl(): string {
 
 export const API_BASE = resolveApiBaseUrl();
 
-/* =========================
-   CORE FETCH HELPER
-   ========================= */
-
 async function parseJson<T>(res: Response): Promise<T> {
   const text = await res.text();
 
@@ -70,10 +64,6 @@ async function parseJson<T>(res: Response): Promise<T> {
     throw new Error(`Expected JSON but got: ${text.slice(0, 200)}`);
   }
 }
-
-/* =========================
-   MARKET DATA
-   ========================= */
 
 type BarsCacheEntry = {
   expiresAt: number;
@@ -146,17 +136,14 @@ function defaultBarsLimit(timeframe: string): number {
     case "2m":
     case "3m":
     case "5m":
-      return 650;
     case "10m":
     case "15m":
     case "20m":
-      return 650;
     case "30m":
     case "45m":
       return 650;
     case "1h":
     case "2h":
-      return 800;
     case "4h":
     case "6h":
     case "8h":
@@ -218,15 +205,26 @@ export async function fetchBars(
 
   if (options?.date) params.set("date", options.date);
   if (normalizedLookback) params.set("lookback", normalizedLookback);
-  const normalizedSession = options?.session === "regular" ? "regular" : options?.session === "extended" ? "extended" : undefined;
+
+  const normalizedSession =
+    options?.session === "regular"
+      ? "regular"
+      : options?.session === "extended"
+        ? "extended"
+        : undefined;
+
   if (normalizedSession) params.set("session", normalizedSession);
-  const limit = Math.max(50, Math.min(5000, Math.floor(options?.limit ?? defaultBarsLimit(normalizedTimeframe))));
+
+  const limit = Math.max(
+    50,
+    Math.min(
+      5000,
+      Math.floor(options?.limit ?? defaultBarsLimit(normalizedTimeframe)),
+    ),
+  );
+
   params.set("limit", String(limit));
 
-  // Force a real backend round-trip for live chart refreshes. Without this, the
-  // frontend can skip the in-memory cache but still receive a browser/proxy-cached
-  // /bars response, which makes the chart show old candles even when the server
-  // has newer bars.
   if (options?.forceRefresh) {
     params.set("_ts", String(Date.now()));
   }
@@ -241,13 +239,9 @@ export async function fetchBars(
       return cached.data;
     }
 
-    // Only reuse an inflight request when the caller did not pass AbortController.
-    // Sharing a request with a caller-owned signal can accidentally cancel other charts.
     if (!options?.signal) {
       const inflight = barsInflight.get(cacheKey);
-      if (inflight) {
-        return inflight;
-      }
+      if (inflight) return inflight;
     }
   }
 
@@ -277,6 +271,7 @@ export async function fetchBars(
   if (!options?.signal) {
     barsInflight.set(cacheKey, request);
   }
+
   return request;
 }
 
@@ -288,10 +283,6 @@ export async function fetchLastTrade(symbol: string): Promise<LastTradeResponse>
   const res = await fetch(`${API_BASE}/last-trade?${params.toString()}`);
   return parseJson<LastTradeResponse>(res);
 }
-
-/* =========================
-   SCANNER
-   ========================= */
 
 export async function fetchScanner(params?: {
   max_symbols?: number;
@@ -331,23 +322,34 @@ export async function fetchScannerCache(): Promise<ScannerCacheResponse> {
   return parseJson<ScannerCacheResponse>(res);
 }
 
-export type ScannerRefreshParams = Record<string, string | number | boolean | null | undefined>;
+export type ScannerRefreshParams = Record<
+  string,
+  string | number | boolean | null | undefined
+>;
 
-function appendScannerParams(qs: URLSearchParams, params?: ScannerRefreshParams) {
+function appendScannerParams(
+  qs: URLSearchParams,
+  params?: ScannerRefreshParams,
+) {
   if (!params) return;
+
   Object.entries(params).forEach(([key, value]) => {
     if (value === undefined || value === null || value === "") return;
     qs.set(key, String(value));
   });
 }
 
-export async function refreshScannerCache(params?: ScannerRefreshParams): Promise<ScannerCacheResponse> {
+export async function refreshScannerCache(
+  params?: ScannerRefreshParams,
+): Promise<ScannerCacheResponse> {
   const qs = new URLSearchParams();
   appendScannerParams(qs, params);
 
-  const res = await fetch(`${API_BASE}/scanner/cache/refresh${qs.toString() ? `?${qs.toString()}` : ""}`, {
-    method: "POST",
-  });
+  const res = await fetch(
+    `${API_BASE}/scanner/cache/refresh${qs.toString() ? `?${qs.toString()}` : ""}`,
+    { method: "POST" },
+  );
+
   return parseJson<ScannerCacheResponse>(res);
 }
 
@@ -357,36 +359,49 @@ export async function fetchScannerDefinitions(): Promise<ScannerDefinition[]> {
 }
 
 export async function fetchOvernightSnapshots(
-  scannerId: string
+  scannerId: string,
 ): Promise<OvernightSnapshotListResponse> {
   const qs = new URLSearchParams({ scanner_id: scannerId });
-  const res = await fetch(`${API_BASE}/scanner-v2/overnight/snapshots?${qs.toString()}`);
+  const res = await fetch(
+    `${API_BASE}/scanner-v2/overnight/snapshots?${qs.toString()}`,
+  );
   return parseJson<OvernightSnapshotListResponse>(res);
 }
 
-export async function saveAfterhoursSnapshot(params: ScannerRefreshParams & { scanner_id: string }): Promise<OvernightSnapshotSaveResponse> {
+export async function saveAfterhoursSnapshot(
+  params: ScannerRefreshParams & { scanner_id: string },
+): Promise<OvernightSnapshotSaveResponse> {
   const qs = new URLSearchParams({ scanner_id: String(params.scanner_id) });
   appendScannerParams(qs, params);
 
-  const res = await fetch(`${API_BASE}/scanner-v2/overnight/save-ah?${qs.toString()}`, {
-    method: "POST",
-  });
+  const res = await fetch(
+    `${API_BASE}/scanner-v2/overnight/save-ah?${qs.toString()}`,
+    { method: "POST" },
+  );
 
   return parseJson<OvernightSnapshotSaveResponse>(res);
 }
 
-export async function runScannerV2(params: ScannerRefreshParams & { scanner_id: string; workflow?: "auto" | "combined" | "live" }): Promise<ScannerV2Response> {
+export async function runScannerV2(
+  params: ScannerRefreshParams & {
+    scanner_id: string;
+    workflow?: "auto" | "combined" | "live";
+  },
+): Promise<ScannerV2Response> {
   const qs = new URLSearchParams({
     scanner_id: String(params.scanner_id),
     workflow: String(params.workflow ?? "combined"),
   });
+
   appendScannerParams(qs, params);
 
   const res = await fetch(`${API_BASE}/scanner-v2/run?${qs.toString()}`);
   return parseJson<ScannerV2Response>(res);
 }
 
-export async function runIfvgHtfScanner(params: ScannerRefreshParams = {}): Promise<ScannerV2Response> {
+export async function runIfvgHtfScanner(
+  params: ScannerRefreshParams = {},
+): Promise<ScannerV2Response> {
   return runScannerV2({
     scanner_id: "ifvg_htf",
     workflow: "combined",
@@ -399,10 +414,6 @@ export async function runIfvgHtfScanner(params: ScannerRefreshParams = {}): Prom
     ...params,
   });
 }
-
-/* =========================
-   BACKEND ALERTS
-   ========================= */
 
 export type BackendAlertSetup =
   | "compression_abs_breakout"
@@ -422,7 +433,7 @@ export type BackendAlertSetup =
 
 export type BackendAlertsConfig = {
   symbols: string[];
-  timeframe?: string; // legacy single-timeframe field; backend still accepts it
+  timeframe?: string;
   timeframes?: string[];
   confluence_mode?: "any" | "all";
   alert_setups?: BackendAlertSetup[];
@@ -465,7 +476,6 @@ export type BackendAlertResult = {
 export type BackendAlertsStatus = {
   enabled: boolean;
   running?: boolean;
-
   symbols?: string[];
   effective_symbols?: string[];
   selected_symbols?: string[];
@@ -481,18 +491,14 @@ export type BackendAlertsStatus = {
   notify_webhook?: boolean;
   webhook_url?: string | null;
   alert_on_prealert?: boolean;
-
   config?: Partial<BackendAlertsConfig>;
-
   last_check?: string | null;
   last_error?: string | null;
   last_alert_at?: string | null;
   last_alert?: BackendAlertResult | null;
   recent_results?: BackendAlertResult[];
-
   signal_config?: Record<string, any>;
 };
-
 
 export type SelectedAlertSymbolsResponse = {
   ok?: boolean;
@@ -508,8 +514,17 @@ export async function fetchSelectedAlertSymbols(): Promise<SelectedAlertSymbolsR
   return parseJson<SelectedAlertSymbolsResponse>(res);
 }
 
-export async function saveSelectedAlertSymbols(symbols: string[]): Promise<SelectedAlertSymbolsResponse> {
-  const clean = Array.from(new Set(symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean)));
+export async function saveSelectedAlertSymbols(
+  symbols: string[],
+): Promise<SelectedAlertSymbolsResponse> {
+  const clean = Array.from(
+    new Set(
+      symbols
+        .map((symbol) => String(symbol).trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  );
+
   const res = await fetch(`${API_BASE}/backend-alerts/selected-symbols`, {
     method: "PUT",
     headers: {
@@ -517,20 +532,31 @@ export async function saveSelectedAlertSymbols(symbols: string[]): Promise<Selec
     },
     body: JSON.stringify({ symbols: clean }),
   });
+
   return parseJson<SelectedAlertSymbolsResponse>(res);
 }
 
-export async function toggleSelectedAlertSymbol(symbol: string, enabled?: boolean): Promise<SelectedAlertSymbolsResponse> {
-  const payload: { symbol: string; enabled?: boolean } = { symbol: String(symbol).trim().toUpperCase() };
+export async function toggleSelectedAlertSymbol(
+  symbol: string,
+  enabled?: boolean,
+): Promise<SelectedAlertSymbolsResponse> {
+  const payload: { symbol: string; enabled?: boolean } = {
+    symbol: String(symbol).trim().toUpperCase(),
+  };
+
   if (enabled !== undefined) payload.enabled = enabled;
 
-  const res = await fetch(`${API_BASE}/backend-alerts/selected-symbols/toggle`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const res = await fetch(
+    `${API_BASE}/backend-alerts/selected-symbols/toggle`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-  });
+  );
+
   return parseJson<SelectedAlertSymbolsResponse>(res);
 }
 
@@ -540,7 +566,7 @@ export async function fetchBackendAlertsStatus(): Promise<BackendAlertsStatus> {
 }
 
 export async function startBackendAlerts(
-  payload: Partial<BackendAlertsConfig> = {}
+  payload: Partial<BackendAlertsConfig> = {},
 ): Promise<BackendAlertsStatus> {
   const res = await fetch(`${API_BASE}/backend-alerts/start`, {
     method: "POST",
@@ -562,7 +588,7 @@ export async function stopBackendAlerts(): Promise<BackendAlertsStatus> {
 }
 
 export async function updateBackendAlertsConfig(
-  payload: Partial<BackendAlertsConfig>
+  payload: Partial<BackendAlertsConfig>,
 ): Promise<BackendAlertsStatus> {
   const res = await fetch(`${API_BASE}/backend-alerts/config`, {
     method: "POST",
@@ -574,7 +600,6 @@ export async function updateBackendAlertsConfig(
 
   return parseJson<BackendAlertsStatus>(res);
 }
-
 
 export type InstantChartAlertPayload = {
   symbol: string;
@@ -589,7 +614,9 @@ export type InstantChartAlertPayload = {
   debounce_key?: string;
 };
 
-export async function sendInstantChartAlert(payload: InstantChartAlertPayload): Promise<any> {
+export async function sendInstantChartAlert(
+  payload: InstantChartAlertPayload,
+): Promise<any> {
   const res = await fetch(`${API_BASE}/backend-alerts/instant-chart`, {
     method: "POST",
     headers: {
@@ -604,25 +631,18 @@ export async function sendInstantChartAlert(payload: InstantChartAlertPayload): 
 
 export async function sendBackendTestAlert(
   title: string,
-  message: string
+  message: string,
 ): Promise<any> {
   const res = await fetch(`${API_BASE}/alerts/push`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      title,
-      message,
-    }),
+    body: JSON.stringify({ title, message }),
   });
 
   return parseJson(res);
 }
-
-/* =========================
-   ALPACA API
-   ========================= */
 
 export type AlpacaMode = "paper" | "live";
 export type AlpacaSide = "buy" | "sell";
@@ -652,32 +672,72 @@ export type PlaceAlpacaOrderRequest = {
   stop_loss?: AlpacaStopLoss;
 };
 
+const ALPACA_NO_CACHE_HEADERS = {
+  "Cache-Control": "no-cache, no-store, must-revalidate",
+  Pragma: "no-cache",
+};
+
 export async function fetchAlpacaAccount(mode: AlpacaMode = "paper") {
-  const res = await fetch(`${API_BASE}/alpaca/account?mode=${mode}`);
+  const params = new URLSearchParams({
+    mode,
+    _ts: String(Date.now()),
+  });
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/account?${params.toString()}`,
+    {
+      cache: "no-store",
+      headers: ALPACA_NO_CACHE_HEADERS,
+    },
+  );
+
   return parseJson(res);
 }
 
 export async function fetchAlpacaPositions(mode: AlpacaMode = "paper") {
-  const res = await fetch(`${API_BASE}/alpaca/positions?mode=${mode}`);
+  const params = new URLSearchParams({
+    mode,
+    _ts: String(Date.now()),
+  });
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/positions?${params.toString()}`,
+    {
+      cache: "no-store",
+      headers: ALPACA_NO_CACHE_HEADERS,
+    },
+  );
+
   return parseJson(res);
 }
 
 export async function fetchAlpacaOrders(
   mode: AlpacaMode = "paper",
   status: "open" | "closed" | "all" = "open",
-  nested = true
+  nested = true,
 ) {
   const params = new URLSearchParams({
     mode,
     status,
     nested: String(nested),
     limit: "100",
+    _ts: String(Date.now()),
   });
-  const res = await fetch(`${API_BASE}/alpaca/orders?${params.toString()}`);
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/orders?${params.toString()}`,
+    {
+      cache: "no-store",
+      headers: ALPACA_NO_CACHE_HEADERS,
+    },
+  );
+
   return parseJson(res);
 }
 
-export async function placeAlpacaOrder(payload: PlaceAlpacaOrderRequest) {
+export async function placeAlpacaOrder(
+  payload: PlaceAlpacaOrderRequest,
+) {
   const cleanPayload = {
     ...payload,
     symbol: payload.symbol.toUpperCase(),
@@ -692,7 +752,7 @@ export async function placeAlpacaOrder(payload: PlaceAlpacaOrderRequest) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Cache-Control": "no-cache",
+      ...ALPACA_NO_CACHE_HEADERS,
     },
     cache: "no-store",
     body: JSON.stringify(cleanPayload),
@@ -712,43 +772,61 @@ export type UpdateAlpacaOrderRequest = {
 export async function updateAlpacaOrder(
   orderId: string,
   payload: UpdateAlpacaOrderRequest,
-  mode: AlpacaMode = "paper"
+  mode: AlpacaMode = "paper",
 ) {
-  const res = await fetch(`${API_BASE}/alpaca/order/${orderId}?mode=${mode}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      ...payload,
-      mode: payload.mode ?? mode,
-    }),
+  const params = new URLSearchParams({
+    mode,
+    _ts: String(Date.now()),
   });
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/order/${orderId}?${params.toString()}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        ...ALPACA_NO_CACHE_HEADERS,
+      },
+      cache: "no-store",
+      body: JSON.stringify({
+        ...payload,
+        mode: payload.mode ?? mode,
+      }),
+    },
+  );
 
   return parseJson(res);
 }
 
 export async function cancelAlpacaOrder(
   orderId: string,
-  mode: AlpacaMode = "paper"
+  mode: AlpacaMode = "paper",
 ) {
-  const res = await fetch(`${API_BASE}/alpaca/order/${orderId}?mode=${mode}`, {
-    method: "DELETE",
+  const params = new URLSearchParams({
+    mode,
+    _ts: String(Date.now()),
   });
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/order/${orderId}?${params.toString()}`,
+    {
+      method: "DELETE",
+      cache: "no-store",
+      headers: ALPACA_NO_CACHE_HEADERS,
+    },
+  );
 
   return parseJson(res);
 }
-
-
-/* =========================
-   AUTO TRADE API
-   ========================= */
 
 export type AutoTradeSource = "manual" | "scanner" | "both";
 export type AutoTradeSizingMode = "dollars" | "shares";
 export type AutoTradeRunnerMode = "off" | "scale_trail";
 export type AutoTradeEntryTriggerMode = "reclaim_close" | "sweep_touch";
-export type AutoTradeStrategy = "six_seven_sweep" | "five_am_sweep" | "overnite_hail_mary";
+export type AutoTradeStrategy =
+  | "six_seven_sweep"
+  | "five_am_sweep"
+  | "overnite_hail_mary";
 
 export type AutoTradeStrategyConfig = {
   enabled: boolean;
@@ -807,31 +885,43 @@ export async function fetchAutoTradeStatus(): Promise<AutoTradeStatus> {
   return parseJson<AutoTradeStatus>(res);
 }
 
-export async function updateAutoTradeConfig(payload: AutoTradeConfigUpdate): Promise<AutoTradeStatus> {
+export async function updateAutoTradeConfig(
+  payload: AutoTradeConfigUpdate,
+): Promise<AutoTradeStatus> {
   const res = await fetch(`${API_BASE}/auto-trade/config`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
   return parseJson<AutoTradeStatus>(res);
 }
 
-export async function startAutoTrade(payload: AutoTradeConfigUpdate = {}): Promise<AutoTradeStatus> {
+export async function startAutoTrade(
+  payload: AutoTradeConfigUpdate = {},
+): Promise<AutoTradeStatus> {
   const res = await fetch(`${API_BASE}/auto-trade/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
   return parseJson<AutoTradeStatus>(res);
 }
 
 export async function stopAutoTrade(): Promise<AutoTradeStatus> {
-  const res = await fetch(`${API_BASE}/auto-trade/stop`, { method: "POST" });
+  const res = await fetch(`${API_BASE}/auto-trade/stop`, {
+    method: "POST",
+  });
+
   return parseJson<AutoTradeStatus>(res);
 }
 
 export async function checkAutoTradeOnce(): Promise<any> {
-  const res = await fetch(`${API_BASE}/auto-trade/check-once`, { method: "POST" });
+  const res = await fetch(`${API_BASE}/auto-trade/check-once`, {
+    method: "POST",
+  });
+
   return parseJson<any>(res);
 }
 
@@ -847,7 +937,9 @@ export type ManualTradePlanRequest = {
   note?: string;
 };
 
-export async function queueOverniteHailMaryPlan(payload: ManualTradePlanRequest): Promise<AutoTradeStatus> {
+export async function queueOverniteHailMaryPlan(
+  payload: ManualTradePlanRequest,
+): Promise<AutoTradeStatus> {
   const res = await fetch(`${API_BASE}/auto-trade/overnite-hail-mary`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -857,23 +949,26 @@ export async function queueOverniteHailMaryPlan(payload: ManualTradePlanRequest)
       setup: "overnite_hail_mary_limit_entry_stop_target",
     }),
   });
+
   return parseJson<AutoTradeStatus>(res);
 }
 
-export async function queueManualTradePlan(payload: ManualTradePlanRequest): Promise<AutoTradeStatus> {
+export async function queueManualTradePlan(
+  payload: ManualTradePlanRequest,
+): Promise<AutoTradeStatus> {
   const res = await fetch(`${API_BASE}/auto-trade/manual-plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
   return parseJson<AutoTradeStatus>(res);
 }
 
-/* =========================
-   SHARED APP STATE SYNC
-   ========================= */
-
-export type SharedChartRange = { from: number; to: number };
+export type SharedChartRange = {
+  from: number;
+  to: number;
+};
 
 export type SharedAlpacaStatePayload = {
   selectedSymbol?: string | null;
@@ -892,18 +987,17 @@ export async function fetchSharedAlpacaState(): Promise<SharedAlpacaStatePayload
   return parseJson<SharedAlpacaStatePayload | null>(res);
 }
 
-export async function saveSharedAlpacaState(payload: SharedAlpacaStatePayload): Promise<SharedAlpacaStatePayload> {
+export async function saveSharedAlpacaState(
+  payload: SharedAlpacaStatePayload,
+): Promise<SharedAlpacaStatePayload> {
   const res = await fetch(`${API_BASE}/app-state/alpaca`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
   return parseJson<SharedAlpacaStatePayload>(res);
 }
-
-/* =========================
-   V2 LIVE CHART WEBSOCKET
-   ========================= */
 
 export type LiveBarMessage = {
   type?: string;
@@ -939,9 +1033,9 @@ export function connectChartV2BarsSocket(params: {
     timeframe,
   });
 
-  // If your backend websocket route has a different name,
-  // this is the only line we need to change.
-  const ws = new WebSocket(`${resolveWsBaseUrl()}/ws/chart-bars?${qs.toString()}`);
+  const ws = new WebSocket(
+    `${resolveWsBaseUrl()}/ws/chart-bars?${qs.toString()}`,
+  );
 
   ws.onopen = () => {
     console.log("[ChartV2 WS] connected", symbol, timeframe);
@@ -951,7 +1045,6 @@ export function connectChartV2BarsSocket(params: {
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-
       const bar = msg?.bar ?? msg;
 
       if (

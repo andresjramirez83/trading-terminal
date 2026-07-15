@@ -1,8 +1,8 @@
-// src/components/ChartPanelV2/LeftDrawingBar.tsx
+// src/components/chart/LeftDrawingBar.tsx
 
 import type { ReactNode } from "react";
 import type { DrawingTool } from "./DrawingTypes";
-import type { FxAnalysisToolId } from "../../chart/analysis";
+import type { FxAnalysisToolId } from "./analysis";
 import {
   CursorIcon,
   DateRangeIcon,
@@ -52,9 +52,10 @@ const TOOLS: ToolItem[] = [
   { key: "cursor", label: "Cursor", shortcut: "Esc", icon: <CursorIcon /> },
   { key: "trendline", label: "Trendline", shortcut: "T", icon: <TrendlineIcon /> },
   { key: "horizontal", label: "Horizontal Line", shortcut: "H", icon: <HorizontalLineIcon /> },
+  { key: "rectangle", label: "Rectangle", shortcut: "R", icon: <RectangleIcon /> },
   { key: "ray", label: "Ray", icon: <RayIcon />, disabled: true },
-  { key: "rectangle", label: "Rectangle", icon: <RectangleIcon />, disabled: true },
-  { key: "priceRange", label: "Price Range", icon: <PriceRangeIcon />, disabled: true },
+  { key: "priceRange", label: "Price Range", shortcut: "P", icon: <PriceRangeIcon /> },
+  { key: "longPosition", label: "Long Position", shortcut: "L", icon: <PriceRangeIcon /> },
   { key: "dateRange", label: "Date Range", icon: <DateRangeIcon />, disabled: true },
   { key: "text", label: "Text", icon: <TextIcon />, disabled: true },
   { key: "magnet", label: "Magnet", icon: <MagnetIcon />, disabled: true },

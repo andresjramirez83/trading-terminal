@@ -1,10 +1,6 @@
 // src/components/chart/DrawingEngine.ts
 
-import {
-  type IChartApi,
-  type ISeriesApi,
-  type Time,
-} from "lightweight-charts";
+import { type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 
 import type {
   ChartDrawing,
@@ -13,17 +9,33 @@ import type {
   DrawingStyle,
   DrawingTool,
   HorizontalLineDrawing,
+  RectangleDrawing,
+  PriceRangeDrawing,
+  LongPositionDrawing,
   TrendlineDrawing,
 } from "./DrawingTypes";
 import { DEFAULT_DRAWING_STYLE } from "./DrawingTypes";
 import { DrawingStore } from "./DrawingStore";
 import { DrawingRenderer } from "./DrawingRenderer";
 import { DragManager, type DragMode } from "./DragManager";
+import { roundToTick } from "../../trading/pricing/TickSizeManager";
 
+type HitResult = { drawingId: string; mode: DragMode } | null;
 
-type HitResult =
-  | { drawingId: string; mode: DragMode }
-  | null;
+export type DrawingChangeReason =
+  | "workspace"
+  | "create"
+  | "update"
+  | "remove"
+  | "clear"
+  | "select"
+  | "duplicate"
+  | "trade-sync";
+
+export type DrawingChangeListener = (
+  drawings: ChartDrawing[],
+  reason: DrawingChangeReason,
+) => void;
 
 function makeId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -49,10 +61,30 @@ function clonePoint(point: DrawingPoint): DrawingPoint {
   };
 }
 
+function cloneTickPoint(point: DrawingPoint): DrawingPoint {
+  const price = roundToTick(Number(point.price));
+
+  return {
+    ...clonePoint(point),
+    price,
+    rawPrice: price,
+  };
+}
+
 function cloneDrawing(drawing: ChartDrawing): ChartDrawing {
   if (drawing.type === "horizontal") {
     return {
       ...drawing,
+      style: cloneStyle(drawing.style),
+    };
+  }
+
+  if (drawing.type === "longPosition") {
+    return {
+      ...drawing,
+      entry: cloneTickPoint(drawing.entry),
+      stop: cloneTickPoint(drawing.stop),
+      target: cloneTickPoint(drawing.target),
       style: cloneStyle(drawing.style),
     };
   }
@@ -75,7 +107,7 @@ function distanceToSegment(
   x1: number,
   y1: number,
   x2: number,
-  y2: number
+  y2: number,
 ): number {
   const dx = x2 - x1;
   const dy = y2 - y1;
@@ -86,7 +118,7 @@ function distanceToSegment(
 
   const t = Math.max(
     0,
-    Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy))
+    Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)),
   );
 
   const closestX = x1 + t * dx;
@@ -104,6 +136,7 @@ export class DrawingEngine {
   private renderer: DrawingRenderer;
   private pendingTrendPoint: DrawingPoint | null = null;
   private selectedDrawingId: string | null = null;
+  private drawingChangeListeners = new Set<DrawingChangeListener>();
   private dragManager = new DragManager();
   private redrawFrame: number | null = null;
   private redrawTimer: number | null = null;
@@ -115,15 +148,38 @@ export class DrawingEngine {
   constructor(
     chart: IChartApi,
     priceSeries: ISeriesApi<"Candlestick">,
-    workspace?: { symbol?: string; timeframe?: string }
+    workspace?: { symbol?: string; timeframe?: string },
+    container?: HTMLDivElement,
   ) {
     this.chart = chart;
     this.priceSeries = priceSeries;
-    this.store = new DrawingStore(workspace?.symbol ?? "SPY", workspace?.timeframe ?? "5m");
-    this.renderer = new DrawingRenderer(chart, priceSeries);
+    this.store = new DrawingStore(
+      workspace?.symbol ?? "SPY",
+      workspace?.timeframe ?? "5m",
+    );
+    this.renderer = new DrawingRenderer(chart, priceSeries, container);
 
-    this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
+    this.chart
+      .timeScale()
+      .subscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
     this.scheduleRenderAll();
+  }
+
+  subscribeDrawings(listener: DrawingChangeListener): () => void {
+    this.drawingChangeListeners.add(listener);
+    listener(this.getDrawings(), "workspace");
+
+    return () => {
+      this.drawingChangeListeners.delete(listener);
+    };
+  }
+
+  private emitDrawingChange(reason: DrawingChangeReason): void {
+    const drawings = this.getDrawings();
+
+    for (const listener of this.drawingChangeListeners) {
+      listener(drawings, reason);
+    }
   }
 
   setWorkspace(symbol: string, timeframe: string): void {
@@ -132,10 +188,13 @@ export class DrawingEngine {
     this.selectedDrawingId = null;
     this.dragManager.endDrag();
     this.renderAll();
+    this.emitDrawingChange("workspace");
   }
 
   destroy(): void {
-    this.chart.timeScale().unsubscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
+    this.chart
+      .timeScale()
+      .unsubscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
 
     if (this.redrawFrame != null) {
       window.cancelAnimationFrame(this.redrawFrame);
@@ -152,12 +211,13 @@ export class DrawingEngine {
     this.selectedDrawingId = null;
     this.dragManager.endDrag();
     this.setChartNavigationEnabled(true);
+    this.drawingChangeListeners.clear();
   }
 
   setTool(tool: DrawingTool): void {
     this.activeTool = tool;
     this.pendingTrendPoint = null;
-    this.setChartNavigationEnabled(tool === "cursor");
+    this.setChartNavigationEnabled(tool === "cursor" || tool === "trendline");
   }
 
   getTool(): DrawingTool {
@@ -168,41 +228,247 @@ export class DrawingEngine {
     this.defaultStyle = cloneStyle(style);
   }
 
-  handleClick(point: DrawingPoint): ChartDrawing | null {
-    if (this.activeTool === "horizontal") {
-      const drawing: HorizontalLineDrawing = {
-        id: makeId("hline"),
-        type: "horizontal",
-        price: point.price,
-        style: cloneStyle(this.defaultStyle),
-      };
+  getDefaultStyle(): DrawingStyle {
+    return cloneStyle(this.defaultStyle);
+  }
 
-      this.store.add(drawing);
-      this.selectedDrawingId = drawing.id;
-      this.renderAll();
-      return drawing;
+  createHorizontalAtPoint(
+    point: DrawingPoint,
+    style: DrawingStyle = this.defaultStyle,
+  ): HorizontalLineDrawing {
+    const drawing: HorizontalLineDrawing = {
+      id: makeId("hline"),
+      type: "horizontal",
+      price: Number(point.price),
+      style: cloneStyle(style),
+    };
+
+    this.store.add(drawing);
+    this.selectedDrawingId = drawing.id;
+    this.renderAll();
+    this.emitDrawingChange("create");
+    return drawing;
+  }
+
+  createRectangleFromPoints(
+    p1: DrawingPoint,
+    p2: DrawingPoint,
+    style: DrawingStyle = this.defaultStyle,
+  ): RectangleDrawing | null {
+    if (
+      Number(p1.time) === Number(p2.time) &&
+      Number(p1.price) === Number(p2.price)
+    ) {
+      return null;
     }
 
+    const drawing: RectangleDrawing = {
+      id: makeId("rect"),
+      type: "rectangle",
+      p1: clonePoint(p1),
+      p2: clonePoint(p2),
+      style: cloneStyle(style),
+      selected: true,
+    };
+
+    this.pendingTrendPoint = null;
+    this.store.add(drawing);
+    this.selectedDrawingId = drawing.id;
+    this.renderAll();
+    this.scheduleRenderAll();
+    this.emitDrawingChange("create");
+    return drawing;
+  }
+
+  createPriceRangeFromPoints(
+    p1: DrawingPoint,
+    p2: DrawingPoint,
+    style: DrawingStyle = this.defaultStyle,
+  ): PriceRangeDrawing | null {
+    if (
+      Number(p1.time) === Number(p2.time) &&
+      Number(p1.price) === Number(p2.price)
+    ) {
+      return null;
+    }
+
+    const drawing: PriceRangeDrawing = {
+      id: makeId("priceRange"),
+      type: "priceRange",
+      p1: clonePoint(p1),
+      p2: clonePoint(p2),
+      style: cloneStyle(style),
+      selected: true,
+    };
+
+    this.pendingTrendPoint = null;
+    this.store.add(drawing);
+    this.selectedDrawingId = drawing.id;
+    this.renderAll();
+    this.scheduleRenderAll();
+    this.emitDrawingChange("create");
+    return drawing;
+  }
+
+  createLongPositionFromPoints(
+    entry: DrawingPoint,
+    stop: DrawingPoint,
+    target: DrawingPoint,
+    style: DrawingStyle = this.defaultStyle,
+  ): LongPositionDrawing | null {
+    const snappedEntry = cloneTickPoint(entry);
+    const snappedStop = cloneTickPoint(stop);
+    const snappedTarget = cloneTickPoint(target);
+
+    const entryPrice = Number(snappedEntry.price);
+    const stopPrice = Number(snappedStop.price);
+    const targetPrice = Number(snappedTarget.price);
+
+    if (
+      !Number.isFinite(entryPrice) ||
+      !Number.isFinite(stopPrice) ||
+      !Number.isFinite(targetPrice) ||
+      (entryPrice === stopPrice && entryPrice === targetPrice)
+    ) {
+      return null;
+    }
+
+    const drawing: LongPositionDrawing = {
+      id: makeId("longPosition"),
+      type: "longPosition",
+      tradeId: null,
+      entry: snappedEntry,
+      stop: snappedStop,
+      target: snappedTarget,
+      style: cloneStyle(style),
+      selected: true,
+    };
+
+    this.pendingTrendPoint = null;
+    this.store.add(drawing);
+    this.selectedDrawingId = drawing.id;
+    this.renderAll();
+    this.scheduleRenderAll();
+    this.emitDrawingChange("create");
+    return drawing;
+  }
+
+  linkLongPositionToTrade(
+    drawingId: string,
+    tradeId: string | null,
+  ): LongPositionDrawing | null {
+    const drawing = this.findDrawing(drawingId);
+    if (!drawing || drawing.type !== "longPosition") return null;
+
+    const updated: LongPositionDrawing = {
+      ...drawing,
+      tradeId,
+      entry: clonePoint(drawing.entry),
+      stop: clonePoint(drawing.stop),
+      target: clonePoint(drawing.target),
+      style: cloneStyle(drawing.style),
+    };
+
+    this.store.update(updated);
+    this.renderAll();
+    this.emitDrawingChange("update");
+    return cloneDrawing(updated) as LongPositionDrawing;
+  }
+
+  updateLongPositionFromTrade(params: {
+    tradeId: string;
+    entry?: number | null;
+    stop?: number | null;
+    target?: number | null;
+  }): LongPositionDrawing | null {
+    const drawing = this.store
+      .getAll()
+      .find((item): item is LongPositionDrawing => {
+        return item.type === "longPosition" && item.tradeId === params.tradeId;
+      });
+
+    if (!drawing) return null;
+
+    const updated: LongPositionDrawing = {
+      ...drawing,
+      entry: clonePoint(drawing.entry),
+      stop: clonePoint(drawing.stop),
+      target: clonePoint(drawing.target),
+      style: cloneStyle(drawing.style),
+    };
+
+    if (params.entry != null && Number.isFinite(Number(params.entry))) {
+      const price = roundToTick(Number(params.entry));
+      updated.entry.price = price;
+      updated.entry.rawPrice = price;
+    }
+
+    if (params.stop != null && Number.isFinite(Number(params.stop))) {
+      const price = roundToTick(Number(params.stop));
+      updated.stop.price = price;
+      updated.stop.rawPrice = price;
+    }
+
+    if (params.target != null && Number.isFinite(Number(params.target))) {
+      const price = roundToTick(Number(params.target));
+      updated.target.price = price;
+      updated.target.rawPrice = price;
+    }
+
+    this.store.update(updated);
+    this.renderAll();
+    this.emitDrawingChange("trade-sync");
+    return cloneDrawing(updated) as LongPositionDrawing;
+  }
+
+  createTrendlineFromPoints(
+    p1: DrawingPoint,
+    p2: DrawingPoint,
+    style: DrawingStyle = this.defaultStyle,
+  ): TrendlineDrawing | null {
+    if (
+      Number(p1.time) === Number(p2.time) &&
+      Number(p1.price) === Number(p2.price)
+    ) {
+      return null;
+    }
+
+    const drawing: TrendlineDrawing = {
+      id: makeId("trend"),
+      type: "trendline",
+      p1: clonePoint(p1),
+      p2: clonePoint(p2),
+      style: cloneStyle(style),
+      selected: true,
+    };
+
+    this.pendingTrendPoint = null;
+    this.store.add(drawing);
+    this.selectedDrawingId = drawing.id;
+    this.renderAll();
+    this.emitDrawingChange("create");
+    return drawing;
+  }
+
+  cancelPendingDrawing(): void {
+    this.pendingTrendPoint = null;
+  }
+
+  handleClick(point: DrawingPoint): ChartDrawing | null {
+    if (this.activeTool === "horizontal") {
+      return this.createHorizontalAtPoint(point);
+    }
+
+    // Legacy fallback only. The new interaction path owns trendline clicks in
+    // interaction/tools/TrendlineTool.ts. Keeping this fallback prevents older
+    // callers from breaking while the remaining tools migrate.
     if (this.activeTool === "trendline") {
       if (!this.pendingTrendPoint) {
         this.pendingTrendPoint = clonePoint(point);
         return null;
       }
 
-      const drawing: TrendlineDrawing = {
-        id: makeId("trend"),
-        type: "trendline",
-        p1: clonePoint(this.pendingTrendPoint),
-        p2: clonePoint(point),
-        style: cloneStyle(this.defaultStyle),
-        selected: true,
-      };
-
-      this.pendingTrendPoint = null;
-      this.store.add(drawing);
-      this.selectedDrawingId = drawing.id;
-      this.renderAll();
-      return drawing;
+      return this.createTrendlineFromPoints(this.pendingTrendPoint, point);
     }
 
     return null;
@@ -250,8 +516,19 @@ export class DrawingEngine {
     const updated = this.dragManager.updateDrag(drawing, point);
     if (!updated) return false;
 
-    this.store.update(updated);
-    this.renderDrawing(updated);
+    const normalized =
+      updated.type === "longPosition"
+        ? {
+            ...updated,
+            entry: cloneTickPoint(updated.entry),
+            stop: cloneTickPoint(updated.stop),
+            target: cloneTickPoint(updated.target),
+          }
+        : updated;
+
+    this.store.update(normalized);
+    this.renderDrawing(normalized);
+    this.emitDrawingChange("update");
     return true;
   }
 
@@ -266,6 +543,7 @@ export class DrawingEngine {
   clear(): void {
     this.renderer.clear();
     this.store.clear();
+    this.emitDrawingChange("clear");
     this.pendingTrendPoint = null;
     this.selectedDrawingId = null;
     this.dragManager.endDrag();
@@ -276,10 +554,10 @@ export class DrawingEngine {
     return this.store.getAll().map(cloneDrawing);
   }
 
-
   selectDrawing(id: string | null): void {
     this.selectedDrawingId = id;
     this.renderAll();
+    this.emitDrawingChange("select");
   }
 
   getSelectedDrawingId(): string | null {
@@ -300,15 +578,31 @@ export class DrawingEngine {
     if (!source) return null;
 
     const cloned = cloneDrawing(source);
-    cloned.id = makeId(source.type === "horizontal" ? "hline" : "trend");
+    cloned.id = makeId(
+      source.type === "horizontal"
+        ? "hline"
+        : source.type === "rectangle"
+          ? "rect"
+          : source.type === "priceRange"
+            ? "priceRange"
+            : source.type === "longPosition"
+              ? "longPosition"
+              : "trend",
+    );
 
-    if (cloned.type === "trendline") {
+    if (
+      cloned.type === "trendline" ||
+      cloned.type === "rectangle" ||
+      cloned.type === "priceRange" ||
+      cloned.type === "longPosition"
+    ) {
       cloned.selected = true;
     }
 
     this.store.add(cloned);
     this.selectedDrawingId = cloned.id;
     this.renderAll();
+    this.emitDrawingChange("duplicate");
     return cloneDrawing(cloned);
   }
 
@@ -327,6 +621,7 @@ export class DrawingEngine {
     this.renderer.removeDrawing(id);
     this.store.remove(id);
     if (this.selectedDrawingId === id) this.selectedDrawingId = null;
+    this.emitDrawingChange("remove");
   }
 
   private renderAll(): void {
@@ -444,6 +739,16 @@ export class DrawingEngine {
         const hit = this.hitTestHorizontal(drawing, x, y);
         if (hit) return hit;
       }
+
+      if (drawing.type === "rectangle" || drawing.type === "priceRange") {
+        const hit = this.hitTestRectangle(drawing, x, y);
+        if (hit) return hit;
+      }
+
+      if (drawing.type === "longPosition") {
+        const hit = this.hitTestLongPosition(drawing, x, y);
+        if (hit) return hit;
+      }
     }
 
     return null;
@@ -452,11 +757,15 @@ export class DrawingEngine {
   private hitTestTrendline(
     drawing: TrendlineDrawing,
     x: number,
-    y: number
+    y: number,
   ): HitResult {
-    const p1x = this.chart.timeScale().timeToCoordinate(Number(drawing.p1.time) as Time);
+    const p1x = this.chart
+      .timeScale()
+      .timeToCoordinate(Number(drawing.p1.time) as Time);
     const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
-    const p2x = this.chart.timeScale().timeToCoordinate(Number(drawing.p2.time) as Time);
+    const p2x = this.chart
+      .timeScale()
+      .timeToCoordinate(Number(drawing.p2.time) as Time);
     const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
 
     if (p1x == null || p1y == null || p2x == null || p2y == null) return null;
@@ -470,9 +779,13 @@ export class DrawingEngine {
     }
 
     const rendered = this.getRenderedTrendlinePoints(drawing);
-    const r1x = this.chart.timeScale().timeToCoordinate(rendered.p1Time as Time);
+    const r1x = this.chart
+      .timeScale()
+      .timeToCoordinate(rendered.p1Time as Time);
     const r1y = this.priceSeries.priceToCoordinate(rendered.p1Price);
-    const r2x = this.chart.timeScale().timeToCoordinate(rendered.p2Time as Time);
+    const r2x = this.chart
+      .timeScale()
+      .timeToCoordinate(rendered.p2Time as Time);
     const r2y = this.priceSeries.priceToCoordinate(rendered.p2Price);
 
     if (r1x == null || r1y == null || r2x == null || r2y == null) return null;
@@ -484,10 +797,155 @@ export class DrawingEngine {
     return null;
   }
 
+  private hitTestRectangle(
+    drawing: RectangleDrawing | PriceRangeDrawing,
+    x: number,
+    y: number,
+  ): HitResult {
+    const p1x = this.chart
+      .timeScale()
+      .timeToCoordinate(Number(drawing.p1.time) as Time);
+    const p2x = this.chart
+      .timeScale()
+      .timeToCoordinate(Number(drawing.p2.time) as Time);
+    const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
+    const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
+
+    if (p1x == null || p2x == null || p1y == null || p2y == null) return null;
+
+    const left = Math.min(p1x, p2x);
+    const right = Math.max(p1x, p2x);
+    const top = Math.min(p1y, p2y);
+    const bottom = Math.max(p1y, p2y);
+    const midX = (left + right) / 2;
+    const midY = (top + bottom) / 2;
+    const handleTolerance = 12;
+    const edgeTolerance = 8;
+
+    const handles: Array<{ x: number; y: number; mode: DragMode }> = [
+      { x: left, y: top, mode: "rectangle-nw" },
+      { x: midX, y: top, mode: "rectangle-n" },
+      { x: right, y: top, mode: "rectangle-ne" },
+      { x: right, y: midY, mode: "rectangle-e" },
+      { x: right, y: bottom, mode: "rectangle-se" },
+      { x: midX, y: bottom, mode: "rectangle-s" },
+      { x: left, y: bottom, mode: "rectangle-sw" },
+      { x: left, y: midY, mode: "rectangle-w" },
+    ];
+
+    for (const handle of handles) {
+      if (pointDistance(x, y, handle.x, handle.y) <= handleTolerance) {
+        return { drawingId: drawing.id, mode: handle.mode };
+      }
+    }
+
+    const onLeft =
+      Math.abs(x - left) <= edgeTolerance &&
+      y >= top - edgeTolerance &&
+      y <= bottom + edgeTolerance;
+    const onRight =
+      Math.abs(x - right) <= edgeTolerance &&
+      y >= top - edgeTolerance &&
+      y <= bottom + edgeTolerance;
+    const onTop =
+      Math.abs(y - top) <= edgeTolerance &&
+      x >= left - edgeTolerance &&
+      x <= right + edgeTolerance;
+    const onBottom =
+      Math.abs(y - bottom) <= edgeTolerance &&
+      x >= left - edgeTolerance &&
+      x <= right + edgeTolerance;
+    const inside = x > left && x < right && y > top && y < bottom;
+
+    if (onLeft) return { drawingId: drawing.id, mode: "rectangle-w" };
+    if (onRight) return { drawingId: drawing.id, mode: "rectangle-e" };
+    if (onTop) return { drawingId: drawing.id, mode: "rectangle-n" };
+    if (onBottom) return { drawingId: drawing.id, mode: "rectangle-s" };
+
+    if (inside) {
+      return { drawingId: drawing.id, mode: "rectangle" };
+    }
+
+    return null;
+  }
+
+  private hitTestLongPosition(
+    drawing: LongPositionDrawing,
+    x: number,
+    y: number,
+  ): HitResult {
+    const entryX = this.chart
+      .timeScale()
+      .timeToCoordinate(Number(drawing.entry.time) as Time);
+    const stopX = this.chart
+      .timeScale()
+      .timeToCoordinate(Number(drawing.stop.time) as Time);
+    const targetX = this.chart
+      .timeScale()
+      .timeToCoordinate(Number(drawing.target.time) as Time);
+    const entryY = this.priceSeries.priceToCoordinate(
+      Number(drawing.entry.price),
+    );
+    const stopY = this.priceSeries.priceToCoordinate(
+      Number(drawing.stop.price),
+    );
+    const targetY = this.priceSeries.priceToCoordinate(
+      Number(drawing.target.price),
+    );
+
+    if (
+      entryX == null ||
+      stopX == null ||
+      targetX == null ||
+      entryY == null ||
+      stopY == null ||
+      targetY == null
+    ) {
+      return null;
+    }
+
+    const left = Math.min(entryX, stopX, targetX);
+    const right = Math.max(entryX, stopX, targetX);
+    const top = Math.min(entryY, stopY, targetY);
+    const bottom = Math.max(entryY, stopY, targetY);
+    const levelTolerance = 8;
+
+    if (
+      Math.abs(y - entryY) <= levelTolerance &&
+      x >= left - 8 &&
+      x <= right + 8
+    ) {
+      return { drawingId: drawing.id, mode: "long-entry" };
+    }
+
+    if (
+      Math.abs(y - stopY) <= levelTolerance &&
+      x >= left - 8 &&
+      x <= right + 8
+    ) {
+      return { drawingId: drawing.id, mode: "long-stop" };
+    }
+
+    if (
+      Math.abs(y - targetY) <= levelTolerance &&
+      x >= left - 8 &&
+      x <= right + 8
+    ) {
+      return { drawingId: drawing.id, mode: "long-target" };
+    }
+
+    const inside = x >= left && x <= right && y >= top && y <= bottom;
+    if (inside) {
+      return { drawingId: drawing.id, mode: "long-position" };
+    }
+
+    return null;
+  }
+
   private hitTestHorizontal(
     drawing: HorizontalLineDrawing,
     _x: number,
-    y: number
+    y: number,
   ): HitResult {
     const lineY = this.priceSeries.priceToCoordinate(drawing.price);
     if (lineY == null) return null;

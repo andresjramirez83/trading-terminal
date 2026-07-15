@@ -2,8 +2,8 @@ import type { OpenOrderState } from "./TradingTypes";
 
 type OpenOrdersWidgetProps = {
   orders: OpenOrderState[];
-  onCancelOrder: (orderId: string) => void;
-  onFillOrder: (orderId: string) => void;
+  onCancelOrder: (orderId: string) => void | Promise<void>;
+  onFillOrder?: (orderId: string) => void;
 };
 
 function money(value?: number): string {
@@ -19,21 +19,20 @@ function money(value?: number): string {
 export default function OpenOrdersWidget({
   orders,
   onCancelOrder,
-  onFillOrder,
 }: OpenOrdersWidgetProps) {
   return (
     <section style={styles.card}>
       <div style={styles.top}>
         <div>
           <div style={styles.kicker}>Orders</div>
-          <div style={styles.title}>Open Orders</div>
+          <div style={styles.title}>Live Open Orders</div>
         </div>
 
         <div style={styles.countBadge}>{orders.length}</div>
       </div>
 
       {orders.length === 0 ? (
-        <div style={styles.empty}>No open orders.</div>
+        <div style={styles.empty}>No live open Alpaca orders for this symbol.</div>
       ) : (
         <div style={styles.list}>
           {orders.map((order) => (
@@ -82,16 +81,8 @@ export default function OpenOrdersWidget({
               </div>
 
               <div style={styles.actions}>
-                <button
-                  type="button"
-                  style={styles.fillButton}
-                  onClick={() => onFillOrder(order.id)}
-                >
-                  Fill
-                </button>
-
-                <button type="button" style={styles.modifyButton}>
-                  Modify
+                <button type="button" style={styles.modifyButton} disabled>
+                  Modify Soon
                 </button>
 
                 <button
@@ -99,13 +90,17 @@ export default function OpenOrdersWidget({
                   style={styles.cancelButton}
                   onClick={() => onCancelOrder(order.id)}
                 >
-                  Cancel
+                  Cancel Live Order
                 </button>
               </div>
             </div>
           ))}
         </div>
       )}
+
+      <div style={styles.footer}>
+        These orders come from Alpaca. The old mock fill button was removed.
+      </div>
     </section>
   );
 }
@@ -224,29 +219,19 @@ const styles: Record<string, React.CSSProperties> = {
   },
   actions: {
     display: "grid",
-    gridTemplateColumns: "1fr 1fr 1fr",
+    gridTemplateColumns: "1fr 1fr",
     gap: 8,
     marginTop: 10,
   },
-  fillButton: {
-    border: "1px solid rgba(34,197,94,.35)",
-    background: "rgba(22,163,74,.16)",
-    color: "#bbf7d0",
-    borderRadius: 11,
-    padding: "9px",
-    fontSize: 11,
-    fontWeight: 900,
-    cursor: "pointer",
-  },
   modifyButton: {
-    border: "1px solid rgba(96,165,250,.35)",
-    background: "rgba(37,99,235,.16)",
-    color: "#bfdbfe",
+    border: "1px solid rgba(96,165,250,.2)",
+    background: "rgba(37,99,235,.08)",
+    color: "#64748b",
     borderRadius: 11,
     padding: "9px",
     fontSize: 11,
     fontWeight: 900,
-    cursor: "pointer",
+    cursor: "not-allowed",
   },
   cancelButton: {
     border: "1px solid rgba(248,113,113,.35)",
@@ -257,5 +242,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     fontWeight: 900,
     cursor: "pointer",
+  },
+  footer: {
+    marginTop: 10,
+    color: "#64748b",
+    fontSize: 11,
+    lineHeight: 1.35,
   },
 };

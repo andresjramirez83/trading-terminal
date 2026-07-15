@@ -26,6 +26,10 @@ import {
 } from "./ChartSettingsTypes";
 import { getSmartSnapPrice } from "./SnapManager";
 import { StudyRenderer } from "./studies/StudyRenderer";
+import { ChartInteractionManager } from "./interaction/ChartInteractionManager";
+import type { ChartTool, ChartToolId } from "./interaction/ChartTool";
+import type { ChartFocusSelection } from "./interaction/ToolContext";
+import { ChartAutoScaleManager } from "./ChartAutoScaleManager";
 import { getCurrentVWAP } from "./studies/VWAPStudy";
 import { getCurrentATR } from "./studies/ATRStudy";
 import { buildMarketStructure } from "./analysis/MarketStructureEngine";
@@ -45,6 +49,8 @@ import type {
   CrosshairInfo,
   StudyVisibility,
 } from "./ChartTypes";
+import { PositionOverlayEngine } from "../../trading/overlay/PositionOverlayEngine";
+import { PositionOverlayRenderer } from "../../trading/overlay/PositionOverlayRenderer";
 
 function volumeColor(bar: CleanBar): string {
   return bar.close >= bar.open
@@ -199,22 +205,13 @@ export class ChartEngine {
   private bars: CleanBar[] = [];
   private container: HTMLDivElement;
   private crosshairListeners = new Set<(info: CrosshairInfo | null) => void>();
-  private clickListeners = new Set<(point: ChartPointerPoint) => void>();
-  private pointerDownListeners = new Set<(point: ChartPointerPoint) => void>();
-  private pointerMoveListeners = new Set<(point: ChartPointerPoint) => void>();
-  private pointerUpListeners = new Set<(point: ChartPointerPoint) => void>();
-  private contextMenuListeners = new Set<(point: ChartPointerPoint) => void>();
+  private interactionManager: ChartInteractionManager;
   private handleCrosshairMove: (param: MouseEventParams<Time>) => void;
-  private handleClick: (param: MouseEventParams<Time>) => void;
-  private handlePointerDown: (event: PointerEvent) => void;
-  private handlePointerMove: (event: PointerEvent) => void;
-  private handlePointerUp: (event: PointerEvent) => void;
-  private handleContextMenu: (event: MouseEvent) => void;
-  private lastPointerPoint: ChartPointerPoint | null = null;
   private lastCrosshairInfo: (CrosshairInfo & { range: number }) | null = null;
   private analysisRenderer: AnalysisRenderer;
   private studyRenderer: StudyRenderer;
   private analysisStore = new AnalysisStore();
+  private autoScaleManager = new ChartAutoScaleManager();
   private fxAnalysisSettings: FxAnalysisSettings = DEFAULT_FX_ANALYSIS_SETTINGS;
   private chartSettings: ChartSettings = DEFAULT_CHART_SETTINGS;
   private symbol?: string;
@@ -222,6 +219,9 @@ export class ChartEngine {
   private sessionOverlay: HTMLDivElement;
   private sessionRenderFrame: number | null = null;
   private handleVisibleRangeChange: () => void;
+  private positionOverlayEngine: PositionOverlayEngine;
+  private positionOverlayRenderer: PositionOverlayRenderer;
+  private unsubscribePositionOverlay: (() => void) | null = null;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -342,6 +342,14 @@ export class ChartEngine {
 
     this.analysisRenderer = new AnalysisRenderer(this.chart);
     this.studyRenderer = new StudyRenderer(this.chart, this.container, this.series.candles);
+    this.positionOverlayEngine = new PositionOverlayEngine();
+    this.positionOverlayRenderer = new PositionOverlayRenderer(
+      this.series.candles,
+      this.container,
+    );
+    this.unsubscribePositionOverlay = this.positionOverlayEngine.subscribe((state) => {
+      this.positionOverlayRenderer.update(state);
+    });
 
     // Keep the chart fast: this autoscale provider only scans the current
     // in-memory 500 bars and the small FX analysis store. No DOM work, no
@@ -397,72 +405,22 @@ export class ChartEngine {
       this.emitCrosshairInfo(nextInfo);
     };
 
-    this.handleClick = (param) => {
-      const point = this.buildPointFromChartClick(param);
-      if (!point) return;
 
-      for (const listener of this.clickListeners) {
-        listener(point);
-      }
-    };
-
-    this.handlePointerDown = (event) => {
-      const point = this.buildPointFromPointerEvent(event);
-      if (!point) return;
-
-      this.lastPointerPoint = point;
-
-      for (const listener of this.pointerDownListeners) {
-        listener(point);
-      }
-    };
-
-    this.handlePointerMove = (event) => {
-      const point = this.buildPointFromPointerEvent(event);
-      if (!point) return;
-
-      this.lastPointerPoint = point;
-
-      for (const listener of this.pointerMoveListeners) {
-        listener(point);
-      }
-    };
-
-    this.handlePointerUp = (event) => {
-      // Always emit pointer-up. If the mouse is released outside the chart area
-      // or outside the time scale, coordinateToTime can return null. When that
-      // happened, DrawingEngine never ended the drag and chart navigation stayed
-      // disabled, which made the page feel frozen until reload.
-      const point =
-        this.buildPointFromPointerEvent(event) ??
-        this.lastPointerPoint ??
-        this.buildFallbackPointFromMouseEvent(event);
-
-      if (!point) return;
-
-      this.lastPointerPoint = null;
-
-      for (const listener of this.pointerUpListeners) {
-        listener(point);
-      }
-    };
-
-    this.handleContextMenu = (event) => {
-      const point = this.buildPointFromMouseEvent(event);
-      if (!point) return;
-
-      for (const listener of this.contextMenuListeners) {
-        listener(point);
-      }
-    };
+    this.interactionManager = new ChartInteractionManager({
+      container: this.container,
+      chart: this.chart,
+      buildPointFromClick: (param) => this.buildPointFromChartClick(param),
+      buildPointFromPointerEvent: (event) => this.buildPointFromPointerEvent(event),
+      buildFallbackPointFromMouseEvent: (event) =>
+        this.buildFallbackPointFromMouseEvent(event),
+      focusSelection: (selection) => this.focusSelection(selection),
+      resetFocus: () => this.resetFocus(),
+      setChartNavigationEnabled: (enabled) =>
+        this.setChartNavigationEnabled(enabled),
+    });
 
     this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
     this.chart.subscribeCrosshairMove(this.handleCrosshairMove);
-    this.chart.subscribeClick(this.handleClick);
-    this.container.addEventListener("pointerdown", this.handlePointerDown);
-    this.container.addEventListener("pointermove", this.handlePointerMove);
-    window.addEventListener("pointerup", this.handlePointerUp);
-    this.container.addEventListener("contextmenu", this.handleContextMenu);
   }
 
   subscribeCrosshairInfo(
@@ -475,50 +433,39 @@ export class ChartEngine {
     };
   }
 
-  subscribeClick(listener: (point: ChartPointerPoint) => void): () => void {
-    this.clickListeners.add(listener);
 
-    return () => {
-      this.clickListeners.delete(listener);
-    };
+  registerInteractionTool(tool: ChartTool): void {
+    this.interactionManager.registerTool(tool);
+  }
+
+  activateInteractionTool(toolId: ChartToolId): boolean {
+    return this.interactionManager.activateTool(toolId);
+  }
+
+  subscribeClick(listener: (point: ChartPointerPoint) => void): () => void {
+    return this.interactionManager.subscribeClick(listener);
   }
 
   subscribePointerDown(
     listener: (point: ChartPointerPoint) => void,
   ): () => void {
-    this.pointerDownListeners.add(listener);
-
-    return () => {
-      this.pointerDownListeners.delete(listener);
-    };
+    return this.interactionManager.subscribePointerDown(listener);
   }
 
   subscribePointerMove(
     listener: (point: ChartPointerPoint) => void,
   ): () => void {
-    this.pointerMoveListeners.add(listener);
-
-    return () => {
-      this.pointerMoveListeners.delete(listener);
-    };
+    return this.interactionManager.subscribePointerMove(listener);
   }
 
   subscribePointerUp(listener: (point: ChartPointerPoint) => void): () => void {
-    this.pointerUpListeners.add(listener);
-
-    return () => {
-      this.pointerUpListeners.delete(listener);
-    };
+    return this.interactionManager.subscribePointerUp(listener);
   }
 
   subscribeContextMenu(
     listener: (point: ChartPointerPoint) => void,
   ): () => void {
-    this.contextMenuListeners.add(listener);
-
-    return () => {
-      this.contextMenuListeners.delete(listener);
-    };
+    return this.interactionManager.subscribeContextMenu(listener);
   }
 
   getContainer(): HTMLDivElement {
@@ -697,13 +644,16 @@ export class ChartEngine {
   }
 
   setDrawingMode(_active: boolean): void {
-    // Keep chart navigation enabled.
-    // Disabling handleScroll/handleScale made the chart feel locked after
-    // selecting a drawing tool. Drawing zoom-outs were caused by drawing
-    // series affecting autoscale, which is fixed in DrawingEngine.
+    // Keep chart navigation enabled for normal drawing tools.
+    // Temporary tools such as Focus Box can disable navigation through
+    // setChartNavigationEnabled while their gesture is active.
+    this.setChartNavigationEnabled(true);
+  }
+
+  setChartNavigationEnabled(enabled: boolean): void {
     this.chart.applyOptions({
-      handleScroll: true,
-      handleScale: true,
+      handleScroll: enabled,
+      handleScale: enabled,
     });
   }
 
@@ -868,6 +818,11 @@ export class ChartEngine {
     this.bars = bars.slice(-500);
     this.lastCrosshairInfo = this.getLastBarInfo();
 
+    const newestBar = this.bars[this.bars.length - 1];
+    if (newestBar) {
+      this.positionOverlayEngine.updateMarketPrice(newestBar.close);
+    }
+
     const candleBars = this.buildCandleSeriesData();
 
     const volumeBars: HistogramData<Time>[] = this.bars.map((bar) => ({
@@ -897,6 +852,7 @@ export class ChartEngine {
 
     this.bars = this.bars.slice(-500);
     this.lastCrosshairInfo = buildCrosshairInfoFromBar(bar);
+    this.positionOverlayEngine.updateMarketPrice(bar.close);
 
     this.series.candles.update({
       time: bar.time,
@@ -949,6 +905,63 @@ export class ChartEngine {
     this.chart.timeScale().fitContent();
   }
 
+  focusSelection(selection: ChartFocusSelection): void {
+    const leftX = Number(selection.leftX);
+    const rightX = Number(selection.rightX);
+    const topPrice = Number(selection.topPrice);
+    const bottomPrice = Number(selection.bottomPrice);
+
+    if (
+      !Number.isFinite(leftX) ||
+      !Number.isFinite(rightX) ||
+      !Number.isFinite(topPrice) ||
+      !Number.isFinite(bottomPrice) ||
+      rightX <= leftX ||
+      topPrice <= bottomPrice
+    ) {
+      return;
+    }
+
+    const timeScale = this.chart.timeScale() as unknown as {
+      coordinateToLogical?: (coordinate: number) => number | null;
+      setVisibleLogicalRange?: (range: { from: number; to: number }) => void;
+    };
+
+    const fromLogical = timeScale.coordinateToLogical?.(leftX);
+    const toLogical = timeScale.coordinateToLogical?.(rightX);
+
+    if (
+      fromLogical != null &&
+      toLogical != null &&
+      Number.isFinite(Number(fromLogical)) &&
+      Number.isFinite(Number(toLogical))
+    ) {
+      const from = Math.min(Number(fromLogical), Number(toLogical));
+      const to = Math.max(Number(fromLogical), Number(toLogical));
+
+      if (to - from >= 0.5) {
+        timeScale.setVisibleLogicalRange?.({ from, to });
+      }
+    }
+
+    this.autoScaleManager.setFocusedPriceRange({
+      minValue: bottomPrice,
+      maxValue: topPrice,
+    });
+    this.refreshCandleAutoscale();
+  }
+
+  resetFocus(): void {
+    this.autoScaleManager.clearFocusedPriceRange();
+    this.refreshCandleAutoscale();
+    this.chart.timeScale().fitContent();
+  }
+
+  private refreshCandleAutoscale(): void {
+    this.series.candles.setData(this.buildCandleSeriesData());
+    this.renderFxAnalysis();
+  }
+
   getLastBarInfo(): CrosshairInfo | null {
     const lastBar = this.bars[this.bars.length - 1];
 
@@ -974,47 +987,16 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   this.symbol = nextSymbol;
   this.timeframe = nextTimeframe;
 
+  this.positionOverlayEngine.setSymbol(symbol);
   this.analysisStore.setWorkspace(symbol, timeframe);
 }
   private buildAutoScalePriceRange(
     baseRange: { minValue: number; maxValue: number } | null,
   ): { minValue: number; maxValue: number } | null {
-    let minValue = Number.POSITIVE_INFINITY;
-    let maxValue = Number.NEGATIVE_INFINITY;
-
-    if (baseRange) {
-      minValue = Math.min(minValue, baseRange.minValue);
-      maxValue = Math.max(maxValue, baseRange.maxValue);
-    }
-
-    const fxRange = this.analysisStore.getAutoScalePriceRange(this.fxAnalysisSettings);
-
-    if (fxRange) {
-      minValue = Math.min(minValue, fxRange.minValue);
-      maxValue = Math.max(maxValue, fxRange.maxValue);
-    }
-
-    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
-      return baseRange;
-    }
-
-    if (minValue === maxValue) {
-      const padding = Math.max(Math.abs(minValue) * 0.02, 0.01);
-      return {
-        minValue: minValue - padding,
-        maxValue: maxValue + padding,
-      };
-    }
-
-    // Small padding keeps far-away FX support/resistance labels from sitting
-    // directly on the top/bottom edge while avoiding heavy visual compression.
-    const range = maxValue - minValue;
-    const padding = Math.max(range * 0.08, Math.abs(maxValue) * 0.002, 0.01);
-
-    return {
-      minValue: minValue - padding,
-      maxValue: maxValue + padding,
-    };
+    return this.autoScaleManager.buildPriceScaleRange({
+      baseRange,
+      bars: this.bars,
+    });
   }
 
   fitFxAnalysisLevels(): void {
@@ -1050,12 +1032,6 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     const compression = buildCompression(this.bars);
     const momentum = buildMomentum(this.bars);
 
-    console.log("ChartEngine.getState()", {
-      price: lastBar?.close,
-      vwap,
-      bars: this.bars.length,
-      structure,
-    });
 
     return {
       symbol: this.symbol,
@@ -1201,18 +1177,13 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   destroy(): void {
     this.chart.timeScale().unsubscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
     this.chart.unsubscribeCrosshairMove(this.handleCrosshairMove);
-    this.chart.unsubscribeClick(this.handleClick);
-    this.container.removeEventListener("pointerdown", this.handlePointerDown);
-    this.container.removeEventListener("pointermove", this.handlePointerMove);
-    window.removeEventListener("pointerup", this.handlePointerUp);
-    this.container.removeEventListener("contextmenu", this.handleContextMenu);
+    this.interactionManager.destroy();
     this.crosshairListeners.clear();
-    this.clickListeners.clear();
-    this.pointerDownListeners.clear();
-    this.pointerMoveListeners.clear();
-    this.pointerUpListeners.clear();
-    this.contextMenuListeners.clear();
     this.analysisRenderer.clear();
+    this.unsubscribePositionOverlay?.();
+    this.unsubscribePositionOverlay = null;
+    this.positionOverlayRenderer.destroy();
+    this.positionOverlayEngine.destroy();
     this.studyRenderer.destroy();
     this.clearSessionBands();
 

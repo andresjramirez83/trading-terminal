@@ -87,12 +87,77 @@ export type OpenOrderState = {
   createdAt: string;
 };
 
+export type FilledOrderState = {
+  id: string;
+  orderId: string;
+  symbol: string;
+  side: TradeSide;
+  shares: number;
+  type: OrderType | "bracket" | "unknown";
+  averageFillPrice: number;
+  limitPrice?: number;
+  stopPrice?: number;
+  targetPrice?: number;
+  filledAt: string;
+  submittedAt?: string;
+  status: "filled";
+  raw?: any;
+};
+
+export type TradeLifecycleStatus =
+  | "open"
+  | "closed"
+  | "partial"
+  | "unknown";
+
+export type TradeHistoryEntry = {
+  id: string;
+  symbol: string;
+  side: TradeSide;
+  positionSide: PositionSide;
+  status: TradeLifecycleStatus;
+  shares: number;
+  openShares: number;
+  entryPrice: number;
+  exitPrice: number;
+  entryTime: string;
+  exitTime?: string;
+  grossPnl: number;
+  netPnl: number;
+  commission: number;
+  rMultiple: number;
+  exitReason: JournalExitReason;
+  sourceOrderIds: string[];
+  notes: string;
+  rawOrders?: any[];
+};
+
+export type PerformanceSnapshot = {
+  totalTrades: number;
+  closedTrades: number;
+  openTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  grossProfit: number;
+  grossLoss: number;
+  netPnl: number;
+  profitFactor: number;
+  expectancy: number;
+  averageWinner: number;
+  averageLoser: number;
+  averageR: number;
+  largestWinner: number;
+  largestLoser: number;
+};
+
 export type JournalExitReason =
   | "target"
   | "stop"
   | "manual"
   | "scale-out"
-  | "mock-fill";
+  | "mock-fill"
+  | "unknown";
 
 export type JournalTradeState = {
   id: string;
