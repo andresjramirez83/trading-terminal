@@ -287,7 +287,39 @@ class MarketSocketManager {
       }
 
       const incoming = Array.isArray(payload) ? payload : [payload];
-      entry.pendingPayloads.push(...incoming);
+
+      // The Alpaca backend sends normalized chart bars:
+      // { time, open, high, low, close, volume, complete }.
+      // ChartPanel still consumes the existing Polygon-compatible AM shape.
+      // Convert normalized Alpaca bars here so the rest of the chart pipeline
+      // remains unchanged during the provider migration.
+      const normalizedIncoming = incoming.map((item) => {
+        if (!item || typeof item !== "object") return item;
+
+        const row = item as Record<string, unknown>;
+        const hasNormalizedBar =
+          typeof row.time === "number" &&
+          typeof row.open === "number" &&
+          typeof row.high === "number" &&
+          typeof row.low === "number" &&
+          typeof row.close === "number";
+
+        if (!hasNormalizedBar) return item;
+
+        return {
+          ev: "AM",
+          sym: entry.symbol,
+          s: row.time,
+          o: row.open,
+          h: row.high,
+          l: row.low,
+          c: row.close,
+          v: typeof row.volume === "number" ? row.volume : 0,
+          complete: row.complete === true,
+        };
+      });
+
+      entry.pendingPayloads.push(...normalizedIncoming);
 
       if (entry.messageFlushTimer != null) return;
 

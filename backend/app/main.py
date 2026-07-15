@@ -39,6 +39,7 @@ except Exception:
 from app.scanner import build_scanner
 from app.scanners.registry import ScannerRegistry
 from app.services.alpaca_service import AlpacaService
+from app.services.alpaca_market_service import AlpacaMarketService
 from app.services.polygon_service import PolygonService
 from app.services.alpaca_ws import alpaca_ws_manager
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
@@ -65,6 +66,15 @@ BARS_CACHE_TTL_SECONDS = 45
 MAX_BARS_DEFAULT = 650
 IN_FLIGHT_BARS_REQUESTS: Dict[str, asyncio.Task] = {}
 POLYGON_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+ALPACA_MARKET_SERVICE: Optional[AlpacaMarketService] = None
+
+
+def get_alpaca_market_service() -> AlpacaMarketService:
+    """Return the shared Alpaca SIP historical/latest-data client."""
+    global ALPACA_MARKET_SERVICE
+    if ALPACA_MARKET_SERVICE is None:
+        ALPACA_MARKET_SERVICE = AlpacaMarketService()
+    return ALPACA_MARKET_SERVICE
 
 app = FastAPI(title="Trading Terminal Backend")
 
@@ -2880,6 +2890,11 @@ async def on_shutdown() -> None:
     except Exception as exc:
         print(f"[alpaca_ws] shutdown error: {exc}", flush=True)
 
+    try:
+        await AlpacaMarketService.close_shared_client()
+    except Exception as exc:
+        print(f"[alpaca_market] shutdown error: {exc}", flush=True)
+
     if POLYGON_HTTP_CLIENT is not None and not POLYGON_HTTP_CLIENT.is_closed:
         await POLYGON_HTTP_CLIENT.aclose()
 
@@ -2928,6 +2943,11 @@ def put_shared_alpaca_state(payload: SharedAlpacaStatePayload):
 def health():
     return {
         "ok": True,
+        "market_data_provider": os.getenv("MARKET_DATA_PROVIDER", "alpaca"),
+        "alpaca_sip_configured": bool(
+            os.getenv("APCA_API_KEY_ID_LIVE", "").strip()
+            and os.getenv("APCA_API_SECRET_KEY_LIVE", "").strip()
+        ),
         "polygon_key_loaded": bool(POLYGON_API_KEY),
         "scanner_ids": [item["id"] for item in registry.list()],
         "pushover_configured": bool(
@@ -3486,25 +3506,27 @@ async def get_bars(
     return response
 
 @app.get("/last-trade", response_model=LastTradeResponse)
-def get_last_trade(symbol: str = Query(..., min_length=1)):
-    if not POLYGON_API_KEY:
-        return LastTradeResponse(symbol=symbol.upper(), price=None)
+async def get_last_trade(symbol: str = Query(..., min_length=1)):
+    """Return the latest consolidated SIP trade from Alpaca."""
+    normalized_symbol = symbol.upper().strip()
 
     try:
-        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{symbol.upper()}"
-        params = {"apiKey": POLYGON_API_KEY}
-
-        r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-
-        ticker = data.get("ticker", {}) or {}
-        price = ticker.get("lastTrade", {}).get("p") or ticker.get("day", {}).get("c")
-
-        return LastTradeResponse(symbol=symbol.upper(), price=price)
-
-    except Exception:
-        return LastTradeResponse(symbol=symbol.upper(), price=None)
+        price = await get_alpaca_market_service().get_last_trade(
+            normalized_symbol
+        )
+        return LastTradeResponse(
+            symbol=normalized_symbol,
+            price=price,
+        )
+    except Exception as exc:
+        print(
+            f"[last-trade/alpaca] error for {normalized_symbol}: {exc}",
+            flush=True,
+        )
+        return LastTradeResponse(
+            symbol=normalized_symbol,
+            price=None,
+        )
 
 
 @app.websocket("/ws/market")

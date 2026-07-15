@@ -1045,17 +1045,23 @@ export function connectChartV2BarsSocket(params: {
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      const bar = msg?.bar ?? msg;
 
-      if (
-        bar &&
-        bar.time != null &&
-        bar.open != null &&
-        bar.high != null &&
-        bar.low != null &&
-        bar.close != null
-      ) {
-        params.onBar(bar as LiveBarMessage);
+      // The Alpaca backend sends chart updates as an array containing one
+      // normalized candle. Keep compatibility with older object and { bar }
+      // payloads as well.
+      const candidates = Array.isArray(msg) ? msg : [msg?.bar ?? msg];
+
+      for (const bar of candidates) {
+        if (
+          bar &&
+          bar.time != null &&
+          bar.open != null &&
+          bar.high != null &&
+          bar.low != null &&
+          bar.close != null
+        ) {
+          params.onBar(bar as LiveBarMessage);
+        }
       }
     } catch (err) {
       console.error("[ChartV2 WS] bad message", event.data, err);
