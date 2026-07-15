@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 
 
 def _debug_enabled() -> bool:
@@ -29,7 +29,7 @@ def _clone_dict(row: Dict[str, Any]) -> Dict[str, Any]:
 class ScannerCacheService:
     """Small async in-memory cache for scanner data.
 
-    This prevents every scanner cycle from hammering Polygon for the same bars
+    This prevents every scanner cycle from hammering the active market provider for the same bars
     and ticker details. It is intentionally process-local because the scanner
     loop is already protected by the background worker lock.
     """
@@ -85,7 +85,7 @@ class ScannerCacheService:
 
     async def get_recent_1m_bars(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         symbol: str,
         *,
         hours_back: int = 96,
@@ -102,7 +102,7 @@ class ScannerCacheService:
         task = self._bars_in_flight.get(key)
         if task is None or task.done():
             task = asyncio.create_task(
-                polygon.get_recent_1m_bars(symbol_u, hours_back=safe_hours_back)
+                market.get_recent_1m_bars(symbol_u, hours_back=safe_hours_back)
             )
             self._bars_in_flight[key] = task
 
@@ -121,7 +121,7 @@ class ScannerCacheService:
 
     async def get_ticker_details(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         symbol: str,
     ) -> Dict[str, Any]:
         symbol_u = str(symbol or "").upper().strip()
@@ -134,7 +134,7 @@ class ScannerCacheService:
 
         task = self._details_in_flight.get(key)
         if task is None or task.done():
-            task = asyncio.create_task(polygon.get_ticker_details(symbol_u))
+            task = asyncio.create_task(market.get_ticker_details(symbol_u))
             self._details_in_flight[key] = task
 
         try:
@@ -179,23 +179,41 @@ scanner_cache_service = ScannerCacheService()
 
 
 async def get_scanner_recent_1m_bars(
-    polygon: PolygonService,
-    symbol: str,
+    market: Optional[MarketDataProvider] = None,
+    symbol: str = "",
     *,
+    polygon: Optional[MarketDataProvider] = None,
     hours_back: int = 96,
 ) -> List[Dict[str, Any]]:
+    provider = market or polygon
+    if provider is None:
+        raise RuntimeError(
+            "get_scanner_recent_1m_bars requires a market-data provider"
+        )
+
     return await scanner_cache_service.get_recent_1m_bars(
-        polygon,
+        provider,
         symbol,
         hours_back=hours_back,
     )
 
 
 async def get_scanner_ticker_details(
-    polygon: PolygonService,
-    symbol: str,
+    market: Optional[MarketDataProvider] = None,
+    symbol: str = "",
+    *,
+    polygon: Optional[MarketDataProvider] = None,
 ) -> Dict[str, Any]:
-    return await scanner_cache_service.get_ticker_details(polygon, symbol)
+    provider = market or polygon
+    if provider is None:
+        raise RuntimeError(
+            "get_scanner_ticker_details requires a market-data provider"
+        )
+
+    return await scanner_cache_service.get_ticker_details(
+        provider,
+        symbol,
+    )
 
 
 def scanner_cache_status() -> Dict[str, Any]:
@@ -204,3 +222,13 @@ def scanner_cache_status() -> Dict[str, Any]:
 
 def clear_scanner_cache() -> Dict[str, Any]:
     return scanner_cache_service.clear()
+
+
+__all__ = [
+    "ScannerCacheService",
+    "scanner_cache_service",
+    "get_scanner_recent_1m_bars",
+    "get_scanner_ticker_details",
+    "scanner_cache_status",
+    "clear_scanner_cache",
+]

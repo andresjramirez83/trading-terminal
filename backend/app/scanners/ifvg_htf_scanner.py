@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.scanners.base import ScannerBase
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 
 
@@ -328,7 +328,7 @@ def _find_5m_entry_confirmation(
     This prevents the bot from buying the 15m flip candle. It only fires
     after the lower-timeframe reclaim confirms buyers defended the IFVG.
     """
-    # Polygon aggregate timestamps are normally bar start times. For a 15m
+    # Market-data aggregate timestamps are normally bar start times. For a 15m
     # setup candle, the earliest valid 5m trigger should begin after that 15m
     # flip candle has closed, so we do not accidentally enter on the flip itself.
     earliest_trigger_time = int(flipped_time or 0) + int(setup_bar_ms or 0)
@@ -537,7 +537,7 @@ class IFVGHTFScanner(ScannerBase):
 
     async def _discover_candidates(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         *,
         max_candidates: int,
         min_price: float,
@@ -570,9 +570,9 @@ class IFVGHTFScanner(ScannerBase):
 
         request_limit = max(50, min(max_candidates * 2, 250))
         await asyncio.gather(
-            add_snapshot_rows(polygon.get_snapshot_gainers(limit=request_limit), "gainers"),
-            add_snapshot_rows(polygon.get_snapshot_actives(limit=request_limit), "active"),
-            add_snapshot_rows(polygon.get_snapshot_losers(limit=request_limit), "losers"),
+            add_snapshot_rows(market.get_snapshot_gainers(limit=request_limit), "gainers"),
+            add_snapshot_rows(market.get_snapshot_actives(limit=request_limit), "active"),
+            add_snapshot_rows(market.get_snapshot_losers(limit=request_limit), "losers"),
         )
 
         for raw_symbol in extra_symbols or []:
@@ -597,7 +597,7 @@ class IFVGHTFScanner(ScannerBase):
 
     async def _scan_symbol_timeframe(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         candidate: Dict[str, Any],
         timeframe: str,
         *,
@@ -620,7 +620,7 @@ class IFVGHTFScanner(ScannerBase):
             return None
 
         try:
-            bars_raw = await polygon.get_bars(symbol, timeframe)
+            bars_raw = await market.get_bars(symbol, timeframe)
         except Exception as exc:
             print(f"[ifvg-htf] bars failed {symbol} {timeframe}: {exc}", flush=True)
             return None
@@ -645,7 +645,7 @@ class IFVGHTFScanner(ScannerBase):
             return None
 
         try:
-            trigger_raw = await polygon.get_bars(symbol, trigger_timeframe)
+            trigger_raw = await market.get_bars(symbol, trigger_timeframe)
         except Exception as exc:
             print(f"[ifvg-htf] trigger bars failed {symbol} {trigger_timeframe}: {exc}", flush=True)
             return None
@@ -737,7 +737,7 @@ class IFVGHTFScanner(ScannerBase):
 
     async def run(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -775,7 +775,7 @@ class IFVGHTFScanner(ScannerBase):
             extra_symbols = [part.strip() for part in extra_symbols.split(",")]
 
         candidates = await self._discover_candidates(
-            polygon,
+            market,
             max_candidates=max_candidates,
             min_price=min_price,
             max_price=max_price,
@@ -788,7 +788,7 @@ class IFVGHTFScanner(ScannerBase):
         async def guarded(candidate: Dict[str, Any], tf: str) -> Optional[Dict[str, Any]]:
             async with sem:
                 return await self._scan_symbol_timeframe(
-                    polygon,
+                    market,
                     candidate,
                     tf,
                     trigger_timeframe=trigger_timeframe,
@@ -873,3 +873,6 @@ class IFVGHTFScanner(ScannerBase):
                 },
             },
         }
+
+
+__all__ = ["IFVGHTFScanner"]

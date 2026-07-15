@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 
 
@@ -13,7 +13,7 @@ class ScannerBase(ABC):
     @abstractmethod
     async def run(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -21,7 +21,7 @@ class ScannerBase(ABC):
 
     async def save_afterhours_snapshot(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -29,3 +29,6 @@ class ScannerBase(ABC):
 
     def list_saved_snapshot_dates(self, snapshot_store: ScannerSnapshotStore) -> List[str]:
         return snapshot_store.list_snapshot_dates(self.id, "ah")
+
+
+__all__ = ["ScannerBase"]

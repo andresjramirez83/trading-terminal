@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 
 
 def _debug_enabled() -> bool:
@@ -50,7 +50,7 @@ def _clone_universe(universe: "OrderedDict[str, Dict[str, Any]]") -> "OrderedDic
 class ScannerUniverseService:
     """Central symbol universe provider for scanner modules.
 
-    Scanners should not depend directly on live Polygon snapshot endpoints because those
+    Scanners should not depend directly on one provider's snapshot endpoints because those
     can be empty on weekends, holidays, or during endpoint outages. This service uses
     snapshot gainers/actives/losers first, then falls back to a cached/reference universe.
     """
@@ -97,22 +97,22 @@ class ScannerUniverseService:
         except Exception as exc:
             _debug(f"cache write failed: {exc}")
 
-    async def _snapshot_universe(self, polygon: PolygonService, *, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
+    async def _snapshot_universe(self, market: MarketDataProvider, *, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
         gainers: List[Dict[str, Any]] = []
         actives: List[Dict[str, Any]] = []
         losers: List[Dict[str, Any]] = []
 
         try:
-            gainers = await polygon.get_snapshot_gainers(limit=limit)
+            gainers = await market.get_snapshot_gainers(limit=limit)
         except Exception as exc:
             _debug(f"gainers failed: {exc}")
 
         try:
-            actives = await polygon.get_snapshot_actives(limit=limit)
+            actives = await market.get_snapshot_actives(limit=limit)
         except Exception as exc:
             _debug(f"actives failed: {exc}")
 
-        get_losers = getattr(polygon, "get_snapshot_losers", None)
+        get_losers = getattr(market, "get_snapshot_losers", None)
         if callable(get_losers):
             try:
                 losers = await get_losers(limit=limit)
@@ -133,8 +133,8 @@ class ScannerUniverseService:
                 universe[symbol] = row
         return universe
 
-    async def _reference_universe(self, polygon: PolygonService, *, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
-        get_ticker_universe = getattr(polygon, "get_ticker_universe", None)
+    async def _reference_universe(self, market: MarketDataProvider, *, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
+        get_ticker_universe = getattr(market, "get_ticker_universe", None)
         if not callable(get_ticker_universe):
             return OrderedDict()
 
@@ -166,18 +166,24 @@ class ScannerUniverseService:
 
     async def get_universe(
         self,
-        polygon: PolygonService,
+        market: Optional[MarketDataProvider] = None,
         *,
+        polygon: Optional[MarketDataProvider] = None,
         limit: int = 1000,
         min_limit: Optional[int] = None,
         allow_stale_cache: bool = True,
     ) -> "OrderedDict[str, Dict[str, Any]]":
+        provider = market or polygon
+        if provider is None:
+            raise RuntimeError(
+                "ScannerUniverseService.get_universe requires a market-data provider"
+            )
         requested_limit = max(1, int(limit or 1000))
         default_min = int(os.getenv("SCANNER_UNIVERSE_MIN_LIMIT", "1000") or "1000")
         safe_limit = max(requested_limit, int(min_limit or default_min))
         safe_limit = min(safe_limit, int(os.getenv("SCANNER_UNIVERSE_MAX_LIMIT", "5000") or "5000"))
 
-        snapshot = await self._snapshot_universe(polygon, limit=safe_limit)
+        snapshot = await self._snapshot_universe(provider, limit=safe_limit)
         if snapshot:
             self._write_cached_map(snapshot)
             _debug(f"source=snapshot count={len(snapshot)}")
@@ -191,7 +197,7 @@ class ScannerUniverseService:
             _debug(f"source=cached count={len(cached)}")
             return _clone_universe(cached)
 
-        reference = await self._reference_universe(polygon, limit=safe_limit)
+        reference = await self._reference_universe(provider, limit=safe_limit)
         if reference:
             self._write_cached_map(reference)
             _debug(f"source=reference count={len(reference)}")
@@ -213,13 +219,22 @@ scanner_universe_service = ScannerUniverseService()
 
 
 async def get_scanner_universe(
-    polygon: PolygonService,
+    market: Optional[MarketDataProvider] = None,
     *,
+    polygon: Optional[MarketDataProvider] = None,
     limit: int = 1000,
     min_limit: Optional[int] = None,
 ) -> "OrderedDict[str, Dict[str, Any]]":
     return await scanner_universe_service.get_universe(
-        polygon,
+        market=market,
+        polygon=polygon,
         limit=limit,
         min_limit=min_limit,
     )
+
+
+__all__ = [
+    "ScannerUniverseService",
+    "scanner_universe_service",
+    "get_scanner_universe",
+]

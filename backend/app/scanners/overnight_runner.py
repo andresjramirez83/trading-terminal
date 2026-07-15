@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from app.analysis.trade_analysis_engine import TradeAnalysisEngine
 from app.scanners.base import ScannerBase
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 from app.services.scanner_universe_service import get_scanner_universe
 from app.services.scanner_cache_service import get_scanner_recent_1m_bars, get_scanner_ticker_details
@@ -23,7 +23,7 @@ PT = ZoneInfo("America/Los_Angeles")
 def get_scanner_concurrency(default: int = 20) -> int:
     """Bounded scanner concurrency.
 
-    Keeps scans fast without letting one scanner launch hundreds of Polygon/detail
+    Keeps scans fast without letting one scanner launch hundreds of market-data/detail
     requests at once. Can be tuned from .env with OVERNIGHT_SCANNER_CONCURRENCY.
     """
     try:
@@ -66,7 +66,7 @@ class OvernightRunnerScanner(ScannerBase):
     async def _attach_trade_analysis(
         self,
         row: Dict[str, Any],
-        polygon: PolygonService,
+        market: MarketDataProvider,
         symbol: str,
         snapshot: Dict[str, Any],
         *,
@@ -75,7 +75,7 @@ class OvernightRunnerScanner(ScannerBase):
     ) -> Dict[str, Any]:
         try:
             analysis = await self.trade_analysis_engine.analyze_symbol(
-                polygon,
+                market,
                 symbol,
                 snapshot=snapshot,
                 timeframe=timeframe,
@@ -114,7 +114,7 @@ class OvernightRunnerScanner(ScannerBase):
 
     async def save_afterhours_snapshot(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -126,7 +126,7 @@ class OvernightRunnerScanner(ScannerBase):
         min_dollar_volume = float(kwargs.get("min_dollar_volume", 100_000.0))
         hours_back = int(kwargs.get("hours_back", 96))
 
-        universe_map = await build_snapshot_universe(polygon, limit=max_symbols * 4)
+        universe_map = await build_snapshot_universe(market, limit=max_symbols * 4)
         rows: List[Dict[str, Any]] = []
         session_date_used: Optional[str] = None
         debug_counts: Dict[str, int] = {
@@ -142,7 +142,7 @@ class OvernightRunnerScanner(ScannerBase):
 
         for symbol, snapshot in list(universe_map.items())[: max_symbols * 5]:
             debug_counts["checked"] += 1
-            row = await self._build_afterhours_row(symbol, snapshot, polygon, hours_back=hours_back)
+            row = await self._build_afterhours_row(symbol, snapshot, market, hours_back=hours_back)
             if row is None:
                 debug_counts["no_afterhours_bars"] += 1
                 continue
@@ -248,7 +248,7 @@ class OvernightRunnerScanner(ScannerBase):
 
     async def run(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -256,9 +256,9 @@ class OvernightRunnerScanner(ScannerBase):
         workflow = requested_workflow if requested_workflow != "auto" else choose_workflow()
 
         if workflow == "live":
-            result = await self._run_live_only(polygon, snapshot_store, **kwargs)
+            result = await self._run_live_only(market, snapshot_store, **kwargs)
         else:
-            result = await self._run_combined(polygon, snapshot_store, **kwargs)
+            result = await self._run_combined(market, snapshot_store, **kwargs)
 
         result.setdefault("meta", {})
         result["meta"]["workflow_requested"] = requested_workflow
@@ -268,7 +268,7 @@ class OvernightRunnerScanner(ScannerBase):
 
     async def _run_live_only(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -288,7 +288,7 @@ class OvernightRunnerScanner(ScannerBase):
         low_float_only = str(kwargs.get("low_float_only", "false")).lower() in ("1", "true", "yes", "on")
         hours_back = int(kwargs.get("hours_back", 96))
 
-        universe_map = await build_snapshot_universe(polygon, limit=max_symbols * 4)
+        universe_map = await build_snapshot_universe(market, limit=max_symbols * 4)
         rows: List[Dict[str, Any]] = []
         debug_counts = make_filter_debug_counts()
         debug_counts["universe_count"] = len(universe_map)
@@ -304,7 +304,7 @@ class OvernightRunnerScanner(ScannerBase):
         async def build_live_item(symbol: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
             async with semaphore:
                 try:
-                    row = await self._build_premarket_row(symbol, snapshot, polygon, hours_back=hours_back)
+                    row = await self._build_premarket_row(symbol, snapshot, market, hours_back=hours_back)
                     return {"symbol": symbol, "row": row, "error": None}
                 except Exception as exc:
                     return {"symbol": symbol, "row": None, "error": str(exc)}
@@ -459,7 +459,7 @@ class OvernightRunnerScanner(ScannerBase):
 
     async def _run_combined(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -486,7 +486,7 @@ class OvernightRunnerScanner(ScannerBase):
             else snapshot_store.load_latest_snapshot(self.id, "ah")
         )
         if ah_snapshot is None:
-            live_result = await self._run_live_only(polygon, snapshot_store, **kwargs)
+            live_result = await self._run_live_only(market, snapshot_store, **kwargs)
             live_result.setdefault("meta", {})
             live_result["meta"]["combined_fallback"] = True
             live_result["meta"]["combined_fallback_reason"] = "No saved afterhours snapshot found"
@@ -500,7 +500,7 @@ class OvernightRunnerScanner(ScannerBase):
             if item.get("symbol")
         }
 
-        live_universe = await build_snapshot_universe(polygon, limit=max_symbols * 4)
+        live_universe = await build_snapshot_universe(market, limit=max_symbols * 4)
         candidate_symbols = list(
             OrderedDict((symbol, None) for symbol in list(saved_map.keys()) + list(live_universe.keys())).keys()
         )
@@ -526,7 +526,7 @@ class OvernightRunnerScanner(ScannerBase):
                     row = await self._build_combined_row(
                         symbol,
                         snapshot,
-                        polygon,
+                        market,
                         saved_map.get(symbol),
                         hours_back=hours_back,
                     )
@@ -687,7 +687,7 @@ class OvernightRunnerScanner(ScannerBase):
         self,
         symbol: str,
         snapshot: Dict[str, Any],
-        polygon: PolygonService,
+        market: MarketDataProvider,
         *,
         hours_back: int,
     ) -> Optional[Dict[str, Any]]:
@@ -697,11 +697,11 @@ class OvernightRunnerScanner(ScannerBase):
         min_bar = snapshot.get("min") or {}
 
         fallback_last = safe_float(last_trade.get("p")) or safe_float(day.get("c")) or safe_float(min_bar.get("c"))
-        last_price = fallback_last or await polygon.get_last_trade(symbol) or 0.0
+        last_price = fallback_last or await market.get_last_trade(symbol) or 0.0
         if last_price <= 0:
             return None
 
-        bars = await get_scanner_recent_1m_bars(polygon, symbol, hours_back=hours_back)
+        bars = await get_scanner_recent_1m_bars(market, symbol, hours_back=hours_back)
         if not bars:
             return None
 
@@ -755,13 +755,13 @@ class OvernightRunnerScanner(ScannerBase):
             },
         }
 
-        return await self._attach_trade_analysis(row, polygon, symbol, snapshot, timeframe="1m", score_boost_pct=0.03)
+        return await self._attach_trade_analysis(row, market, symbol, snapshot, timeframe="1m", score_boost_pct=0.03)
 
     async def _build_premarket_row(
         self,
         symbol: str,
         snapshot: Dict[str, Any],
-        polygon: PolygonService,
+        market: MarketDataProvider,
         *,
         hours_back: int,
     ) -> Optional[Dict[str, Any]]:
@@ -771,11 +771,11 @@ class OvernightRunnerScanner(ScannerBase):
         min_bar = snapshot.get("min") or {}
 
         fallback_last = safe_float(last_trade.get("p")) or safe_float(day.get("c")) or safe_float(min_bar.get("c"))
-        last_price = fallback_last or await polygon.get_last_trade(symbol) or 0.0
+        last_price = fallback_last or await market.get_last_trade(symbol) or 0.0
         if last_price <= 0:
             return None
 
-        bars = await get_scanner_recent_1m_bars(polygon, symbol, hours_back=hours_back)
+        bars = await get_scanner_recent_1m_bars(market, symbol, hours_back=hours_back)
         if not bars:
             return None
 
@@ -792,7 +792,7 @@ class OvernightRunnerScanner(ScannerBase):
         if pm_session is None:
             return None
 
-        details = await get_scanner_ticker_details(polygon, symbol)
+        details = await get_scanner_ticker_details(market, symbol)
         share_stats = extract_share_stats(details)
         float_shares = share_stats.get("float_shares")
         shares_outstanding = share_stats.get("shares_outstanding")
@@ -910,18 +910,18 @@ class OvernightRunnerScanner(ScannerBase):
             },
         }
 
-        return await self._attach_trade_analysis(row, polygon, symbol, snapshot, timeframe="1m", score_boost_pct=0.05)
+        return await self._attach_trade_analysis(row, market, symbol, snapshot, timeframe="1m", score_boost_pct=0.05)
 
     async def _build_combined_row(
         self,
         symbol: str,
         snapshot: Dict[str, Any],
-        polygon: PolygonService,
+        market: MarketDataProvider,
         saved_ah_row: Optional[Dict[str, Any]],
         *,
         hours_back: int,
     ) -> Optional[Dict[str, Any]]:
-        bars = await get_scanner_recent_1m_bars(polygon, symbol, hours_back=hours_back)
+        bars = await get_scanner_recent_1m_bars(market, symbol, hours_back=hours_back)
         if not bars:
             return None
 
@@ -944,11 +944,11 @@ class OvernightRunnerScanner(ScannerBase):
         last_trade = snapshot.get("lastTrade") or {}
         min_bar = snapshot.get("min") or {}
         fallback_last = safe_float(last_trade.get("p")) or safe_float(day.get("c")) or safe_float(min_bar.get("c"))
-        last_price = fallback_last or safe_float(pm_session["pm_last_close"]) or await polygon.get_last_trade(symbol) or 0.0
+        last_price = fallback_last or safe_float(pm_session["pm_last_close"]) or await market.get_last_trade(symbol) or 0.0
         if last_price <= 0:
             return None
 
-        details = await get_scanner_ticker_details(polygon, symbol)
+        details = await get_scanner_ticker_details(market, symbol)
         share_stats = extract_share_stats(details)
         float_shares = share_stats.get("float_shares")
         shares_outstanding = share_stats.get("shares_outstanding")
@@ -1083,7 +1083,7 @@ class OvernightRunnerScanner(ScannerBase):
             },
         }
 
-        return await self._attach_trade_analysis(row, polygon, symbol, snapshot, timeframe="1m", score_boost_pct=0.05)
+        return await self._attach_trade_analysis(row, market, symbol, snapshot, timeframe="1m", score_boost_pct=0.05)
 
 
 def should_use_saved_ah_fallback(rows: List[Dict[str, Any]], debug_counts: Dict[str, int]) -> bool:
@@ -1246,16 +1246,16 @@ def convert_saved_ah_row_to_scanner_row(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def build_snapshot_universe(polygon: PolygonService, limit: int = 160) -> "OrderedDict[str, Dict[str, Any]]":
+async def build_snapshot_universe(market: MarketDataProvider, limit: int = 160) -> "OrderedDict[str, Dict[str, Any]]":
     """Return scanner universe using the shared universe service.
 
     This keeps existing scanner code unchanged while moving symbol sourcing into
-    ScannerUniverseService. The service uses Polygon snapshot gainers/actives/losers
+    ScannerUniverseService. The service uses market-data snapshot gainers/actives/losers
     first, then falls back to cached/reference universes so weekend/holiday scans do
     not receive an empty symbol universe.
     """
     return await get_scanner_universe(
-        polygon,
+        market,
         limit=max(1, int(limit or 160)),
         min_limit=max(1000, int(limit or 160)),
     )
@@ -1292,9 +1292,9 @@ def bar_volume(bar: Dict[str, Any]) -> float:
 
 def normalize_scanner_bars(bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Accepts either Polygon raw bars (t/o/h/l/c/v) or your app-normalized bars
+    Accepts either provider raw bars (t/o/h/l/c/v) or your app-normalized bars
     (time/open/high/low/close/volume). Returns one consistent t/o/h/l/c/v shape.
-    This is the key scanner fix: PolygonService.get_recent_1m_bars returns the
+    This is the key scanner fix: MarketDataProvider.get_recent_1m_bars returns the
     app-normalized shape, while the scanner session parser was reading only t/o/h/l/c/v.
     """
     out: List[Dict[str, Any]] = []
@@ -2004,3 +2004,6 @@ def first_number(*values: Any) -> Optional[float]:
         except Exception:
             continue
     return None
+
+
+__all__ = ["OvernightRunnerScanner"]

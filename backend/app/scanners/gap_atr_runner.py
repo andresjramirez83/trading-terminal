@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from app.analysis.trade_analysis_engine import TradeAnalysisEngine
 from app.scanners.base import ScannerBase
 from app.scanners.scanner_engine import ScannerEngine
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 
 ET = ZoneInfo("America/New_York")
@@ -142,7 +142,7 @@ class GapAtrRunnerScanner(ScannerBase):
 
     async def run(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -164,7 +164,7 @@ class GapAtrRunnerScanner(ScannerBase):
         engine = ScannerEngine(concurrency=concurrency)
 
         universe = await engine.get_universe(
-            polygon=polygon,
+            market=market,
             limit=universe_limit,
             min_limit=universe_limit,
         )
@@ -176,7 +176,7 @@ class GapAtrRunnerScanner(ScannerBase):
             symbol, snapshot = item
 
             return await self._scan_symbol(
-                polygon,
+                market,
                 symbol,
                 snapshot,
                 min_price=min_price,
@@ -257,7 +257,7 @@ class GapAtrRunnerScanner(ScannerBase):
 
     async def _scan_symbol(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         symbol: str,
         snapshot: Dict[str, Any],
         *,
@@ -279,7 +279,7 @@ class GapAtrRunnerScanner(ScannerBase):
 
         try:
             trade_analysis = await self.trade_analysis_engine.analyze_symbol(
-                polygon,
+                market,
                 symbol,
                 snapshot=snapshot,
                 timeframe="15m",
@@ -291,7 +291,7 @@ class GapAtrRunnerScanner(ScannerBase):
         analysis_data = get_analysis_dict(trade_analysis)
 
         try:
-            bars_raw = await polygon.get_bars(symbol, "15m")
+            bars_raw = await market.get_bars(symbol, "15m")
         except Exception as exc:
             print(f"[gap-atr-runner] bars failed {symbol}: {exc}", flush=True)
             return None
@@ -470,3 +470,5 @@ class GapAtrRunnerScanner(ScannerBase):
                     best = candidate
 
         return best
+
+__all__ = ["GapAtrRunnerScanner"]

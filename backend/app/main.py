@@ -40,6 +40,7 @@ from app.scanner import build_scanner
 from app.scanners.registry import ScannerRegistry
 from app.services.alpaca_service import AlpacaService
 from app.services.alpaca_market_service import AlpacaMarketService
+from app.services.market_data_provider import get_market_data_provider
 from app.services.polygon_service import PolygonService
 from app.services.alpaca_ws import alpaca_ws_manager
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
@@ -2704,13 +2705,13 @@ async def maybe_auto_save_afterhours_snapshot() -> None:
         return
 
     scanner = registry.get("overnight_runner")
-    if scanner is None or not POLYGON_API_KEY:
+    if scanner is None:
         return
 
     try:
-        polygon = PolygonService(api_key=POLYGON_API_KEY)
+        market = get_market_data_provider()
         result = await scanner.save_afterhours_snapshot(
-            polygon,
+            market,
             snapshot_store,
             max_symbols=max(SCANNER_MAX_SYMBOLS, 60),
             min_price=SCANNER_MIN_PRICE,
@@ -2748,12 +2749,10 @@ async def run_background_scanner_loop() -> None:
             scanner = registry.get(SCANNER_ID)
             if scanner is None:
                 raise RuntimeError(f"Unknown scanner_id: {SCANNER_ID}")
-            if not POLYGON_API_KEY:
-                raise RuntimeError("Missing POLYGON_API_KEY in backend environment")
 
-            polygon = PolygonService(api_key=POLYGON_API_KEY)
+            market = get_market_data_provider()
             result = await scanner.run(
-                polygon,
+                market,
                 snapshot_store,
                 workflow=SCANNER_WORKFLOW,
                 max_symbols=SCANNER_MAX_SYMBOLS,
@@ -2845,6 +2844,10 @@ def scanner_cache_status() -> Dict[str, Any]:
         "last_error": scanner_last_error,
         "run_count": scanner_run_count,
         "interval_seconds": SCANNER_INTERVAL_SECONDS,
+        "market_data_provider": os.getenv(
+            "MARKET_DATA_PROVIDER",
+            "alpaca",
+        ),
         "filters": {
             "scanner_id": SCANNER_ID,
             "workflow": SCANNER_WORKFLOW,
@@ -3631,12 +3634,10 @@ async def scanner_cache_refresh(
         scanner = registry.get(scanner_id)
         if scanner is None:
             raise HTTPException(status_code=404, detail=f"Unknown scanner_id: {scanner_id}")
-        if not POLYGON_API_KEY:
-            raise HTTPException(status_code=500, detail="Missing POLYGON_API_KEY in backend environment")
 
-        polygon = PolygonService(api_key=POLYGON_API_KEY)
+        market = get_market_data_provider()
         result = await scanner.run(
-            polygon,
+            market,
             snapshot_store,
             workflow=workflow,
             ah_date=ah_date,
@@ -3703,13 +3704,10 @@ async def scanner_v2_save_afterhours(
     if scanner is None:
         raise HTTPException(status_code=404, detail=f"Unknown scanner_id: {scanner_id}")
 
-    if not POLYGON_API_KEY:
-        raise HTTPException(status_code=500, detail="Missing POLYGON_API_KEY in backend environment")
-
     try:
-        polygon = PolygonService(api_key=POLYGON_API_KEY)
+        market = get_market_data_provider()
         result = await scanner.save_afterhours_snapshot(
-            polygon,
+            market,
             snapshot_store,
             max_symbols=max_symbols,
             min_price=min_price,
@@ -3756,15 +3754,12 @@ async def scanner_v2_run(
     if scanner is None:
         raise HTTPException(status_code=404, detail=f"Unknown scanner_id: {scanner_id}")
 
-    if not POLYGON_API_KEY:
-        raise HTTPException(status_code=500, detail="Missing POLYGON_API_KEY in backend environment")
-
     normalized_workflow = normalize_workflow(workflow)
 
     try:
-        polygon = PolygonService(api_key=POLYGON_API_KEY)
+        market = get_market_data_provider()
         return await scanner.run(
-            polygon,
+            market,
             snapshot_store,
             workflow=normalized_workflow,
             ah_date=ah_date,

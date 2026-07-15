@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from app.analysis.trade_analysis_engine import TradeAnalysisEngine
 from app.scanners.base import ScannerBase
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 
 ET = ZoneInfo("America/New_York")
@@ -121,7 +121,7 @@ def get_analysis_dict(analysis: Any) -> Dict[str, Any]:
     return {}
 
 
-async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
+async def build_snapshot_universe(market: MarketDataProvider, limit: int) -> "OrderedDict[str, Dict[str, Any]]":
     merged: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 
     async def add_rows(coro: Any) -> None:
@@ -138,9 +138,9 @@ async def build_snapshot_universe(polygon: PolygonService, limit: int) -> "Order
                 merged[symbol] = row
 
     await asyncio.gather(
-        add_rows(polygon.get_snapshot_gainers(limit=limit)),
-        add_rows(polygon.get_snapshot_actives(limit=limit)),
-        add_rows(polygon.get_snapshot_losers(limit=limit)),
+        add_rows(market.get_snapshot_gainers(limit=limit)),
+        add_rows(market.get_snapshot_actives(limit=limit)),
+        add_rows(market.get_snapshot_losers(limit=limit)),
     )
 
     return merged
@@ -156,7 +156,7 @@ class HourlySweepRunnerScanner(ScannerBase):
 
     async def run(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -180,7 +180,7 @@ class HourlySweepRunnerScanner(ScannerBase):
         extra_symbols = [normalize_symbol(x) for x in kwargs.get("extra_symbols", []) or []]
         extra_symbols = [x for x in extra_symbols if x]
 
-        universe = await build_snapshot_universe(polygon, limit=max(100, max_symbols * 6))
+        universe = await build_snapshot_universe(market, limit=max(100, max_symbols * 6))
         candidate_symbols = list(OrderedDict((s, None) for s in extra_symbols + list(universe.keys())).keys())
 
         rows: List[Dict[str, Any]] = []
@@ -200,7 +200,7 @@ class HourlySweepRunnerScanner(ScannerBase):
             checked += 1
 
             row, reject_reason = await self._scan_symbol(
-                polygon,
+                market,
                 symbol,
                 snapshot=universe.get(symbol, {}),
                 timeframe=timeframe,
@@ -268,7 +268,7 @@ class HourlySweepRunnerScanner(ScannerBase):
 
     async def _scan_symbol(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         symbol: str,
         *,
         snapshot: Dict[str, Any],
@@ -290,7 +290,7 @@ class HourlySweepRunnerScanner(ScannerBase):
 
         try:
             trade_analysis = await self.trade_analysis_engine.analyze_symbol(
-                polygon,
+                market,
                 symbol,
                 snapshot=snapshot,
                 timeframe=timeframe,
@@ -302,7 +302,7 @@ class HourlySweepRunnerScanner(ScannerBase):
         analysis_data = get_analysis_dict(trade_analysis)
 
         try:
-            raw = await polygon.get_bars(symbol, timeframe)
+            raw = await market.get_bars(symbol, timeframe)
         except Exception as exc:
             print(f"[hourly-sweep-runner] bars failed {symbol} {timeframe}: {exc}", flush=True)
             return None, "no_bars"
@@ -667,3 +667,5 @@ class HourlySweepRunnerScanner(ScannerBase):
             score -= 8.0
 
         return round(max(0.0, min(100.0, score)), 2)
+
+__all__ = ["HourlySweepRunnerScanner"]
