@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from .market_cache import count_scanner_picks, init_db, save_scanner_picks
-from .polygon_history_loader import load_polygon_history
+from .alpaca_history_loader import load_alpaca_history
 from .sweep_backtest import run_scanner_sweep_backtest, run_sweep_backtest
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
@@ -67,7 +67,7 @@ def backtest_health():
 @router.post("/cache/load")
 async def load_cache(req: LoadHistoryRequest):
     init_db()
-    return await load_polygon_history(
+    return await load_alpaca_history(
         symbols=req.symbols,
         timeframes=req.timeframes,
         months=req.months,
