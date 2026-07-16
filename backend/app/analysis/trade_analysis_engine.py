@@ -15,7 +15,7 @@ from app.analysis.trade_analysis_models import (
     VolatilityAnalysis,
     VolumeAnalysis,
 )
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_cache_service import get_scanner_recent_1m_bars, get_scanner_ticker_details
 
 ET = ZoneInfo("America/New_York")
@@ -367,14 +367,14 @@ def structure_state(
 
 
 class TradeAnalysisEngine:
-    """Shared per-symbol market analysis used by scanners, alerts, charts, and Decision Center."""
+    """Shared provider-independent market analysis used by scanners, alerts, charts, and Decision Center."""
 
     def __init__(self, *, hours_back: int = 96) -> None:
         self.hours_back = max(24, int(hours_back or 96))
 
     async def analyze_symbol(
         self,
-        polygon: PolygonService,
+        market: MarketDataProvider,
         symbol: str,
         *,
         snapshot: Optional[Dict[str, Any]] = None,
@@ -386,7 +386,7 @@ class TradeAnalysisEngine:
             return None
 
         raw_bars = await get_scanner_recent_1m_bars(
-            polygon,
+            market,
             symbol,
             hours_back=self.hours_back,
         )
@@ -465,7 +465,7 @@ class TradeAnalysisEngine:
 
         ema_alignment = classify_ema_alignment(ema_9, ema_20, ema_50)
 
-        details = await get_scanner_ticker_details(polygon, symbol)
+        details = await get_scanner_ticker_details(market, symbol)
         share_stats = extract_share_stats(details)
 
         signals: List[str] = []
@@ -608,17 +608,23 @@ trade_analysis_engine = TradeAnalysisEngine()
 
 
 async def analyze_trade_symbol(
-    polygon: PolygonService,
+    market: MarketDataProvider,
     symbol: str,
     *,
     snapshot: Optional[Dict[str, Any]] = None,
     timeframe: str = "1m",
 ) -> Optional[Dict[str, Any]]:
     analysis = await trade_analysis_engine.analyze_symbol(
-        polygon,
+        market,
         symbol,
         snapshot=snapshot,
         timeframe=timeframe,
     )
 
     return analysis.to_dict() if analysis else None
+
+__all__ = [
+    "TradeAnalysisEngine",
+    "trade_analysis_engine",
+    "analyze_trade_symbol",
+]

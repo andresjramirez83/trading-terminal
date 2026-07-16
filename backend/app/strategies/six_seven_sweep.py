@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from app.autotrade.models import AutoTradeConfig, TradeSignal
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider
 from app.strategies.base import StrategyBase
 
 ET = ZoneInfo("America/New_York")
@@ -53,9 +53,9 @@ class SixSevenSweepStrategy(StrategyBase):
     id = "six_seven_sweep"
     name = "6–7 Sweep Bullish Retest"
 
-    async def scan(self, *, symbol: str, polygon: PolygonService, config: AutoTradeConfig) -> List[TradeSignal]:
+    async def scan(self, *, symbol: str, market: MarketDataProvider, config: AutoTradeConfig) -> List[TradeSignal]:
         timeframe = ENTRY_TIMEFRAME
-        bars_raw = await polygon.get_bars(symbol, timeframe, session="extended")
+        bars_raw = await market.get_bars(symbol, timeframe, session="extended")
         bars = [
             b for b in bars_raw
             if bar_ms(b) > 0
@@ -193,3 +193,6 @@ class SixSevenSweepStrategy(StrategyBase):
 
 
 Strategy = SixSevenSweepStrategy
+
+
+__all__ = ["SixSevenSweepStrategy", "Strategy"]

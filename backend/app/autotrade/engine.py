@@ -12,7 +12,7 @@ from app.autotrade.risk import RiskManager
 from app.autotrade.state import AutoTradeStore
 from app.autotrade.symbols import resolve_symbols
 from app.services.alpaca_service import AlpacaService
-from app.services.polygon_service import PolygonService
+from app.services.market_data_provider import MarketDataProvider, get_market_data_provider
 from app.strategies.registry import StrategyRegistry
 
 
@@ -212,7 +212,7 @@ class AutoTradeEngine:
             return
 
         alpaca = AlpacaService(mode=cfg.mode)
-        polygon = PolygonService()
+        market = get_market_data_provider()
 
         try:
             positions = alpaca.get_positions()
@@ -273,7 +273,7 @@ class AutoTradeEngine:
 
             last_price = 0.0
             try:
-                last_price = self._safe_float(await polygon.get_last_trade(symbol))
+                last_price = self._safe_float(await market.get_last_trade(symbol))
             except Exception:
                 last_price = 0.0
             if last_price <= 0:
@@ -507,7 +507,7 @@ class AutoTradeEngine:
             return
 
         alpaca = AlpacaService(mode=cfg.mode)
-        polygon = PolygonService()
+        market = get_market_data_provider()
 
         for item in pending:
             order_id = str(item.get("order_id") or "")
@@ -557,7 +557,7 @@ class AutoTradeEngine:
                 if status not in {"new", "accepted", "pending_new", "partially_filled"}:
                     continue
 
-                target_reached, market_snapshot = await self._target_reached(symbol, target, polygon)
+                target_reached, market_snapshot = await self._target_reached(symbol, target, market)
                 if not target_reached:
                     continue
 
@@ -585,18 +585,18 @@ class AutoTradeEngine:
                     str(payload.get("strategy_id") or ""),
                 )
 
-    async def _target_reached(self, symbol: str, target: float, polygon: PolygonService) -> tuple[bool, Dict[str, Any]]:
+    async def _target_reached(self, symbol: str, target: float, market: MarketDataProvider) -> tuple[bool, Dict[str, Any]]:
         target = self._alpaca_price(target)
         last_price = 0.0
         recent_high = 0.0
         try:
-            last = await polygon.get_last_trade(symbol)
+            last = await market.get_last_trade(symbol)
             last_price = self._safe_float(last)
         except Exception:
             last_price = 0.0
 
         try:
-            bars = await polygon.get_bars(symbol, "1m", session="extended")
+            bars = await market.get_bars(symbol, "1m", session="extended")
             recent = (bars or [])[-3:]
             highs = [self._safe_float(b.get("high", b.get("h"))) for b in recent]
             recent_high = max([h for h in highs if h > 0], default=0.0)
@@ -617,7 +617,7 @@ class AutoTradeEngine:
             return default
 
     async def collect_signals(self, cfg: AutoTradeConfig, symbols: List[str]) -> List[TradeSignal]:
-        polygon = PolygonService()
+        market = get_market_data_provider()
         enabled_strategies = [s for s in cfg.strategies if s.enabled]
         out: List[TradeSignal] = []
 
@@ -627,7 +627,7 @@ class AutoTradeEngine:
                 if strategy is None:
                     continue
                 try:
-                    found = await strategy.scan(symbol=symbol, polygon=polygon, config=cfg)
+                    found = await strategy.scan(symbol=symbol, market=market, config=cfg)
                     for signal in found:
                         if signal.score >= item.min_score and signal.profit_range >= cfg.min_profit_range:
                             out.append(signal)
@@ -647,3 +647,6 @@ class AutoTradeEngine:
 
     def execute(self, cfg: AutoTradeConfig, signal: TradeSignal, qty: int) -> Dict[str, Any]:
         return ExecutionEngine(cfg).submit_entry(signal, qty)
+
+
+__all__ = ["AutoTradeEngine"]
