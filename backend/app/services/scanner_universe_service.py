@@ -168,7 +168,6 @@ class ScannerUniverseService:
         self,
         market: Optional[MarketDataProvider] = None,
         *,
-        market: MarketDataProvider,
         limit: int = 1000,
         min_limit: Optional[int] = None,
         allow_stale_cache: bool = True,
@@ -226,7 +225,6 @@ async def get_scanner_universe(
 ) -> "OrderedDict[str, Dict[str, Any]]":
     return await scanner_universe_service.get_universe(
         market=market,
-        polygon=polygon,
         limit=limit,
         min_limit=min_limit,
     )
