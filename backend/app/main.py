@@ -8,7 +8,6 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
-import httpx
 from app.history.history_routes import router as history_router
 from app.history.history_singleton import history_engine
 from dotenv import load_dotenv
@@ -36,12 +35,10 @@ try:
 except Exception:
     ET = timezone(timedelta(hours=-4))
 
-from app.scanner import build_scanner
 from app.scanners.registry import ScannerRegistry
 from app.services.alpaca_service import AlpacaService
 from app.services.alpaca_market_service import AlpacaMarketService
 from app.services.market_data_provider import get_market_data_provider
-from app.services.polygon_service import PolygonService
 from app.services.alpaca_ws import alpaca_ws_manager
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 from app.services.signal_engine import (
@@ -53,20 +50,17 @@ from app.services.signal_engine import (
 from app.routes.auto_trade import router as professional_auto_trade_router
 from app.backtests.routes import router as backtest_router
 
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
-
 DEBUG_BARS = os.getenv("DEBUG_BARS", "false").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_BACKGROUND = os.getenv("DEBUG_BACKGROUND", "false").strip().lower() in {"1", "true", "yes", "on"}
 USE_HISTORY_ENGINE = os.getenv("USE_HISTORY_ENGINE", "false").strip().lower() in {"1", "true", "yes", "on"}
 registry = ScannerRegistry()
 snapshot_store = ScannerSnapshotStore()
 
-# Small in-memory cache so multiple chart panels do not hammer Polygon on every mount.
+# Small in-memory cache so multiple chart panels do not hammer Alpaca on every mount.
 BARS_CACHE: Dict[str, Dict[str, Any]] = {}
 BARS_CACHE_TTL_SECONDS = 45
 MAX_BARS_DEFAULT = 650
 IN_FLIGHT_BARS_REQUESTS: Dict[str, asyncio.Task] = {}
-POLYGON_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 ALPACA_MARKET_SERVICE: Optional[AlpacaMarketService] = None
 
 
@@ -456,7 +450,7 @@ backend_alert_signal_state: Dict[str, Dict[str, Any]] = {}
 backend_alert_last_alert: Optional[Dict[str, Any]] = None
 
 # === BACKGROUND SCANNER CACHE STATE ===
-# Runs scanner in the backend so pages can read cached results without hammering Polygon.
+# Runs scanner in the backend so pages can read cached results without hammering Alpaca.
 scanner_task: Optional[asyncio.Task] = None
 scanner_cache: Optional[Dict[str, Any]] = None
 scanner_last_run: Optional[datetime] = None
@@ -1410,25 +1404,6 @@ def parse_requested_date(date_str: Optional[str]) -> date:
     return previous_trading_day(d)
 
 
-def polygon_multiplier_and_timespan(timeframe: str) -> tuple[int, str]:
-    tf = timeframe.lower().strip()
-
-    mapping = {
-        "1m": (1, "minute"),
-        "5m": (5, "minute"),
-        "15m": (15, "minute"),
-        "30m": (30, "minute"),
-        "1h": (1, "hour"),
-	"4h": (4, "hour"),
-        "day": (1, "day"),
-        "1d": (1, "day"),
-    }
-
-    if tf not in mapping:
-        raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
-
-    return mapping[tf]
-
 
 def normalize_workflow(workflow: str) -> str:
     value = (workflow or "").strip().lower()
@@ -1513,7 +1488,7 @@ def aggregate_intraday_to_daily_bars(
 ) -> List[Candle]:
     """Build live 1D candles from intraday bars.
 
-    Polygon daily aggregates can lag until the day is complete. This function
+    Build the current in-progress daily candle from intraday bars. This function
     creates the current in-progress daily candle from 1m bars so the 1D chart
     updates during the active session.
     """
@@ -1579,12 +1554,12 @@ def extended_session_window_ms(
     lookback: Optional[str] = None,
     end_day: Optional[date] = None,
 ) -> tuple[int, int, date]:
-    """Return an exact Polygon aggregate window.
+    """Return the requested Alpaca chart window.
 
     Intraday charts are anchored to the full extended-hours equity session in ET:
     04:00 through 20:00. This prevents charts from being cut at the regular
     close / partial date boundary and lets prior days show AH candles through 20:00
-    when Polygon has trades for those bars. Daily charts keep the old full-day
+    when Alpaca has trades for those bars. Daily charts keep the old full-day
     behavior.
     """
     now_et = datetime.now(ET)
@@ -1655,7 +1630,7 @@ def fill_intraday_tail_to_extended_close(
 ) -> List[Candle]:
     """Add zero-volume flat bars from the last real trade to the visible AH end.
 
-    Polygon only returns aggregate bars when trades occur. If the last after-hours
+    Alpaca may omit aggregate bars when no trades occur. If the last after-hours
     trade is at 16:45, Lightweight Charts thinks the time scale ends at 16:45.
     TOS keeps the extended-hours axis open until 20:00. These synthetic tail bars
     only extend the visual timeline; they preserve price by using the last close
@@ -1710,20 +1685,48 @@ def fill_intraday_tail_to_extended_close(
     return bars + tail
 
 
-def get_polygon_http_client() -> httpx.AsyncClient:
-    global POLYGON_HTTP_CLIENT
-    if POLYGON_HTTP_CLIENT is None or POLYGON_HTTP_CLIENT.is_closed:
-        POLYGON_HTTP_CLIENT = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=25.0, write=25.0, pool=25.0),
-            follow_redirects=True,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "trading-terminal-sprint1/1.0",
-            },
-            http2=False,
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
-        )
-    return POLYGON_HTTP_CLIENT
+
+def _rows_to_candles(rows: List[Dict[str, Any]]) -> List[Candle]:
+    candles: List[Candle] = []
+    for row in rows or []:
+        try:
+            candles.append(
+                Candle(
+                    time=int(row.get("time", row.get("t", 0)) or 0),
+                    open=float(row.get("open", row.get("o", 0)) or 0),
+                    high=float(row.get("high", row.get("h", 0)) or 0),
+                    low=float(row.get("low", row.get("l", 0)) or 0),
+                    close=float(row.get("close", row.get("c", 0)) or 0),
+                    volume=float(row.get("volume", row.get("v", 0)) or 0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return [bar for bar in candles if bar.time > 0 and bar.high > 0 and bar.low > 0]
+
+
+def _filter_candles_for_window(
+    bars: List[Candle],
+    *,
+    timeframe: str,
+    lookback: Optional[str],
+    end_day: Optional[date],
+) -> tuple[List[Candle], date]:
+    now_et = datetime.now(ET)
+    final_day = previous_trading_day(end_day or now_et.date())
+    lookback_days = resolve_lookback_days(lookback, timeframe)
+    start_day = final_day - timedelta(days=lookback_days)
+
+    filtered: List[Candle] = []
+    for bar in bars:
+        try:
+            bar_day = datetime.fromtimestamp(int(bar.time) / 1000, ET).date()
+        except Exception:
+            continue
+        if start_day <= bar_day <= final_day:
+            filtered.append(bar)
+
+    return filtered, final_day
 
 
 async def fetch_bars_range_async(
@@ -1732,87 +1735,27 @@ async def fetch_bars_range_async(
     lookback: Optional[str] = None,
     end_day: Optional[date] = None,
     limit_bars: Optional[int] = MAX_BARS_DEFAULT,
+    session: str = "extended",
 ) -> tuple[List[Candle], date]:
-    if not POLYGON_API_KEY:
-        raise HTTPException(status_code=500, detail="Missing POLYGON_API_KEY in backend environment")
+    """Fetch normalized chart bars from Alpaca and apply the requested window."""
 
-    multiplier, timespan = polygon_multiplier_and_timespan(timeframe)
-    start_ms, end_ms, final_day = extended_session_window_ms(
+    try:
+        rows = await get_alpaca_market_service().get_bars(
+            symbol.upper().strip(),
+            timeframe,
+            session=session,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Alpaca market-data request failed: {exc}",
+        ) from exc
+
+    bars, final_day = _filter_candles_for_window(
+        _rows_to_candles(rows),
         timeframe=timeframe,
         lookback=lookback,
         end_day=end_day,
-    )
-
-    url = (
-        f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/"
-        f"{multiplier}/{timespan}/{start_ms}/{end_ms}"
-    )
-
-    params = {
-        "adjusted": "true",
-        "sort": "asc",
-        "limit": 50000,
-        "apiKey": POLYGON_API_KEY,
-    }
-
-    data: Dict[str, Any] = {}
-    last_error: Optional[Exception] = None
-    client = get_polygon_http_client()
-
-    for attempt in range(1, 4):
-        try:
-            r = await client.get(url, params=params)
-            if r.status_code >= 400:
-                body = r.text[:500]
-                raise httpx.HTTPStatusError(
-                    f"Polygon HTTP {r.status_code}: {body}",
-                    request=r.request,
-                    response=r,
-                )
-
-            data = r.json()
-            break
-
-        except (httpx.HTTPError, ValueError) as exc:
-            last_error = exc
-            print(
-                f"[bars] Polygon async request failed attempt {attempt}/3 "
-                f"symbol={symbol.upper()} timeframe={timeframe}: {exc}",
-                flush=True,
-            )
-
-            if attempt < 3:
-                await asyncio.sleep(0.6 * attempt)
-                continue
-
-            raise HTTPException(status_code=502, detail=f"Polygon request failed after retries: {exc}")
-
-    if not data and last_error is not None:
-        raise HTTPException(status_code=502, detail=f"Polygon request failed: {last_error}")
-
-    results = data.get("results", []) or []
-
-    bars: List[Candle] = []
-    for row in results:
-        try:
-            bars.append(
-                Candle(
-                    time=row["t"],
-                    open=row["o"],
-                    high=row["h"],
-                    low=row["l"],
-                    close=row["c"],
-                    volume=row["v"],
-                )
-            )
-        except KeyError:
-            continue
-
-    bars = fill_intraday_tail_to_extended_close(
-        bars,
-        timeframe=timeframe,
-        final_day=final_day,
-        end_ms=end_ms,
     )
 
     if limit_bars is not None and limit_bars > 0 and len(bars) > limit_bars:
@@ -1829,14 +1772,38 @@ async def fetch_bars_for_day_async(
     session: str = "regular",
 ) -> List[Candle]:
     if is_daily_timeframe(timeframe):
-        intraday_bars, _ = await fetch_bars_range_async(symbol, "1m", "1d", trading_day, limit_bars=None)
-        daily = aggregate_intraday_to_daily_bars(intraday_bars, session=session, limit_bars=limit_bars)
-        return [bar for bar in daily if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
+        intraday_bars, _ = await fetch_bars_range_async(
+            symbol,
+            "1m",
+            "1d",
+            trading_day,
+            limit_bars=None,
+            session=session,
+        )
+        daily = aggregate_intraday_to_daily_bars(
+            intraday_bars,
+            session=session,
+            limit_bars=limit_bars,
+        )
+        return [
+            bar
+            for bar in daily
+            if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day
+        ]
 
-    bars, _ = await fetch_bars_range_async(symbol, timeframe, "1d", trading_day, limit_bars=limit_bars)
-    if bars:
-        return [bar for bar in bars if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
-    return []
+    bars, _ = await fetch_bars_range_async(
+        symbol,
+        timeframe,
+        "1d",
+        trading_day,
+        limit_bars=limit_bars,
+        session=session,
+    )
+    return [
+        bar
+        for bar in bars
+        if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day
+    ]
 
 
 def fetch_bars_range(
@@ -1845,105 +1812,21 @@ def fetch_bars_range(
     lookback: Optional[str] = None,
     end_day: Optional[date] = None,
     limit_bars: Optional[int] = MAX_BARS_DEFAULT,
+    session: str = "extended",
 ) -> tuple[List[Candle], date]:
-    if not POLYGON_API_KEY:
-        raise HTTPException(status_code=500, detail="Missing POLYGON_API_KEY in backend environment")
+    """Synchronous Alpaca wrapper for legacy worker-thread alert paths."""
 
-    multiplier, timespan = polygon_multiplier_and_timespan(timeframe)
-    start_ms, end_ms, final_day = extended_session_window_ms(
-        timeframe=timeframe,
-        lookback=lookback,
-        end_day=end_day,
+    return asyncio.run(
+        fetch_bars_range_async(
+            symbol,
+            timeframe,
+            lookback=lookback,
+            end_day=end_day,
+            limit_bars=limit_bars,
+            session=session,
+        )
     )
 
-    url = (
-        f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/"
-        f"{multiplier}/{timespan}/{start_ms}/{end_ms}"
-    )
-
-    params = {
-        "adjusted": "true",
-        "sort": "asc",
-        "limit": 50000,
-        "apiKey": POLYGON_API_KEY,
-    }
-
-    data: Dict[str, Any] = {}
-    last_error: Optional[Exception] = None
-
-    for attempt in range(1, 4):
-        try:
-            r = requests.get(
-                url,
-                params=params,
-                timeout=25,
-                headers={
-                    "Accept": "application/json",
-                    "Connection": "close",
-                    "User-Agent": "trading-terminal-sprint1/1.0",
-                },
-            )
-            if r.status_code >= 400:
-                body = r.text[:500]
-                raise requests.HTTPError(
-                    f"Polygon HTTP {r.status_code}: {body}",
-                    response=r,
-                )
-
-            data = r.json()
-            break
-
-        except requests.RequestException as exc:
-            last_error = exc
-            print(
-                f"[bars] Polygon request failed attempt {attempt}/3 "
-                f"symbol={symbol.upper()} timeframe={timeframe}: {exc}",
-                flush=True,
-            )
-
-            if attempt < 3:
-                import time
-                time.sleep(0.6 * attempt)
-                continue
-
-            raise HTTPException(status_code=502, detail=f"Polygon request failed after retries: {exc}")
-
-        except ValueError as exc:
-            last_error = exc
-            raise HTTPException(status_code=502, detail=f"Polygon returned invalid JSON: {exc}")
-
-    if not data and last_error is not None:
-        raise HTTPException(status_code=502, detail=f"Polygon request failed: {last_error}")
-
-    results = data.get("results", []) or []
-
-    bars: List[Candle] = []
-    for row in results:
-        try:
-            bars.append(
-                Candle(
-                    time=row["t"],
-                    open=row["o"],
-                    high=row["h"],
-                    low=row["l"],
-                    close=row["c"],
-                    volume=row["v"],
-                )
-            )
-        except KeyError:
-            continue
-
-    bars = fill_intraday_tail_to_extended_close(
-        bars,
-        timeframe=timeframe,
-        final_day=final_day,
-        end_ms=end_ms,
-    )
-
-    if limit_bars is not None and limit_bars > 0 and len(bars) > limit_bars:
-        bars = bars[-limit_bars:]
-
-    return bars, final_day
 
 def fetch_bars_for_day(
     symbol: str,
@@ -1952,15 +1835,15 @@ def fetch_bars_for_day(
     limit_bars: Optional[int] = MAX_BARS_DEFAULT,
     session: str = "regular",
 ) -> List[Candle]:
-    if is_daily_timeframe(timeframe):
-        intraday_bars, _ = fetch_bars_range(symbol, "1m", "1d", trading_day, limit_bars=None)
-        daily = aggregate_intraday_to_daily_bars(intraday_bars, session=session, limit_bars=limit_bars)
-        return [bar for bar in daily if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
-
-    bars, _ = fetch_bars_range(symbol, timeframe, "1d", trading_day, limit_bars=limit_bars)
-    if bars:
-        return [bar for bar in bars if datetime.fromtimestamp(bar.time / 1000, ET).date() == trading_day]
-    return []
+    return asyncio.run(
+        fetch_bars_for_day_async(
+            symbol,
+            timeframe,
+            trading_day,
+            limit_bars=limit_bars,
+            session=session,
+        )
+    )
 
 
 def get_alpaca_service(mode: str) -> AlpacaService:
@@ -2042,7 +1925,7 @@ def signal_state_key(symbol: str, timeframe: str) -> str:
 def fetch_signal_bars(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     """Fetch alert bars through the same bounded in-memory cache used by charts.
 
-    The old alert loop could refetch Polygon bars for every symbol/timeframe on
+    The old alert loop could refetch market-data bars for every symbol/timeframe on
     every cycle. This keeps alerts responsive while preventing the alert engine
     from competing with the chart UI for network and CPU.
     """
@@ -2871,8 +2754,6 @@ async def on_startup() -> None:
     global BACKGROUND_EVENT_LOOP
 
     BACKGROUND_EVENT_LOOP = asyncio.get_running_loop()
-    get_polygon_http_client()
-
     if acquire_background_worker_lock():
         start_backend_alert_task_if_needed()
         start_scanner_task_if_needed()
@@ -2882,7 +2763,6 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global POLYGON_HTTP_CLIENT
     if BACKGROUND_LOCK_HELD:
         await stop_backend_alert_task()
         await stop_scanner_task()
@@ -2898,8 +2778,6 @@ async def on_shutdown() -> None:
     except Exception as exc:
         print(f"[alpaca_market] shutdown error: {exc}", flush=True)
 
-    if POLYGON_HTTP_CLIENT is not None and not POLYGON_HTTP_CLIENT.is_closed:
-        await POLYGON_HTTP_CLIENT.aclose()
 
 
 @app.get("/app-state/alpaca")
@@ -2951,7 +2829,6 @@ def health():
             os.getenv("APCA_API_KEY_ID_LIVE", "").strip()
             and os.getenv("APCA_API_SECRET_KEY_LIVE", "").strip()
         ),
-        "polygon_key_loaded": bool(POLYGON_API_KEY),
         "scanner_ids": [item["id"] for item in registry.list()],
         "pushover_configured": bool(
             os.getenv("PUSHOVER_USER_KEY", "").strip()
@@ -3328,7 +3205,7 @@ async def fetch_chart_bars_async(
     """Fetch chart bars with a safe previous-session fallback.
 
     The normal live window can be empty before 04:00 ET, on market holidays,
-    or right after a weekend. Polygon is working in those cases, but the
+    or right after a weekend. The provider may be healthy in those cases, but the
     current-day window has no candles yet. If the first request returns no
     bars, walk backward through prior trading days until bars are found.
     """
@@ -3365,13 +3242,14 @@ async def fetch_chart_bars_async(
 
     if is_daily_timeframe(timeframe):
         # Pull 1m data and aggregate it into live 1D candles. This makes the
-        # current day form in real time instead of waiting for Polygon's
+        # current day form in real time instead of waiting for a completed
         # completed daily aggregate.
         intraday_bars, used_day = await fetch_bars_range_async(
             symbol,
             "1m",
             lookback=lookback or DEFAULT_LOOKBACK_BY_TIMEFRAME.get("1d", "6m"),
             limit_bars=None,
+            session=session,
         )
 
         # Holiday / premarket-before-04:00 fallback for daily aggregation too.
@@ -3397,6 +3275,7 @@ async def fetch_chart_bars_async(
         timeframe,
         lookback=lookback,
         limit_bars=limit_bars,
+        session=session,
     )
 
     # If the current live window has no candles, fall back to the most recent
@@ -3412,6 +3291,7 @@ async def fetch_chart_bars_async(
                 lookback=lookback,
                 end_day=probe,
                 limit_bars=limit_bars,
+                session=session,
             )
             if bars:
                 break
@@ -3587,13 +3467,27 @@ async def scanner_endpoint(
     min_volume: int = Query(100000, ge=0),
     min_change_pct: float = Query(3.0),
 ):
+    """Backward-compatible scanner endpoint powered by the provider registry."""
     try:
-        return await build_scanner(
+        scanner = registry.get(SCANNER_ID) or registry.get("overnight_runner")
+        if scanner is None:
+            raise RuntimeError("No scanner implementation is registered")
+
+        market = get_market_data_provider()
+        return await scanner.run(
+            market,
+            snapshot_store,
+            workflow=SCANNER_WORKFLOW,
             max_symbols=max_symbols,
             min_price=min_price,
             max_price=max_price,
             min_volume=min_volume,
-            min_change_pct=min_change_pct,
+            min_gap_pct=min_change_pct,
+            min_pm_range_pct=SCANNER_MIN_PM_RANGE_PCT,
+            min_pm_dollar_volume=SCANNER_MIN_PM_DOLLAR_VOLUME,
+            min_compression_score=SCANNER_MIN_COMPRESSION_SCORE,
+            min_breakout_score=SCANNER_MIN_BREAKOUT_SCORE,
+            hours_back=SCANNER_HOURS_BACK,
         )
     except Exception as exc:
         print("[scanner] error:", exc, flush=True)
