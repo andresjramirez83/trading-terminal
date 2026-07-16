@@ -14,7 +14,7 @@ class HistoryBar:
     volume: float
 
     @classmethod
-    def from_polygon(cls, bar: Dict[str, Any]) -> "HistoryBar":
+    def from_raw_bar(cls, bar: Dict[str, Any]) -> "HistoryBar":
         return cls(
             time=int(bar["t"]),
             open=float(bar["o"]),

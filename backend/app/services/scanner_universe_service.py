@@ -168,12 +168,12 @@ class ScannerUniverseService:
         self,
         market: Optional[MarketDataProvider] = None,
         *,
-        polygon: Optional[MarketDataProvider] = None,
+        market: MarketDataProvider,
         limit: int = 1000,
         min_limit: Optional[int] = None,
         allow_stale_cache: bool = True,
     ) -> "OrderedDict[str, Dict[str, Any]]":
-        provider = market or polygon
+        provider = market
         if provider is None:
             raise RuntimeError(
                 "ScannerUniverseService.get_universe requires a market-data provider"
@@ -221,7 +221,6 @@ scanner_universe_service = ScannerUniverseService()
 async def get_scanner_universe(
     market: Optional[MarketDataProvider] = None,
     *,
-    polygon: Optional[MarketDataProvider] = None,
     limit: int = 1000,
     min_limit: Optional[int] = None,
 ) -> "OrderedDict[str, Dict[str, Any]]":

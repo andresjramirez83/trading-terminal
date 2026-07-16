@@ -27,14 +27,12 @@ class ScannerEngine:
         self.executor = ParallelScannerExecutor(concurrency=self.concurrency)
 
     async def get_universe(
-        self,
-        *,
-        market: Optional[MarketDataProvider] = None,
-        polygon: Optional[MarketDataProvider] = None,
+    *,
+    market: MarketDataProvider,
         limit: int = 1000,
         min_limit: Optional[int] = None,
     ) -> "OrderedDict[str, Dict[str, Any]]":
-        provider = market or polygon
+        provider = market
 
         if provider is None:
             raise RuntimeError(

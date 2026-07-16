@@ -19,8 +19,9 @@ async def bars(
 
     MARKET_DATA_PROVIDER=alpaca
 
-    (Polygon remains available temporarily as a rollback provider during
-    migration.)
+    Uses the configured MarketDataProvider.
+
+Current provider: Alpaca.
     """
     try:
         provider = get_market_data_provider()
