@@ -1741,9 +1741,12 @@ async def fetch_bars_range_async(
 
     try:
         rows = await get_alpaca_market_service().get_bars(
-            symbol.upper().strip(),
-            timeframe,
+            symbol=symbol.upper().strip(),
+            timeframe=timeframe,
             session=session,
+            date=end_day.isoformat() if end_day is not None else None,
+            lookback=lookback,
+            limit=limit_bars if limit_bars is not None else 5000,
         )
     except Exception as exc:
         raise HTTPException(
