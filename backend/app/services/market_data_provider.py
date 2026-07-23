@@ -13,6 +13,9 @@ class MarketDataProvider(Protocol):
         symbol: str,
         timeframe: str = "1m",
         session: str = "regular",
+        date: Optional[str] = None,
+        lookback: Optional[str] = None,
+        limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         ...
 
@@ -32,13 +35,22 @@ class MarketDataProvider(Protocol):
     async def get_ticker_snapshot(self, symbol: str) -> Dict[str, Any]:
         ...
 
-    async def get_snapshot_gainers(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_snapshot_gainers(
+        self,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
         ...
 
-    async def get_snapshot_losers(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_snapshot_losers(
+        self,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
         ...
 
-    async def get_snapshot_actives(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_snapshot_actives(
+        self,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
         ...
 
     async def get_ticker_details(self, symbol: str) -> Dict[str, Any]:

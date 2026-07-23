@@ -325,6 +325,127 @@ class AlpacaMarketService:
 
         return configs[tf]
 
+    @staticmethod
+    def _parse_lookback(value: Optional[str], fallback: timedelta) -> timedelta:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return fallback
+
+        units = {
+            "m": "minutes",
+            "min": "minutes",
+            "mins": "minutes",
+            "minute": "minutes",
+            "minutes": "minutes",
+            "h": "hours",
+            "hr": "hours",
+            "hrs": "hours",
+            "hour": "hours",
+            "hours": "hours",
+            "d": "days",
+            "day": "days",
+            "days": "days",
+            "w": "weeks",
+            "wk": "weeks",
+            "wks": "weeks",
+            "week": "weeks",
+            "weeks": "weeks",
+            "mo": "days",
+            "mon": "days",
+            "month": "days",
+            "months": "days",
+            "y": "days",
+            "yr": "days",
+            "year": "days",
+            "years": "days",
+        }
+
+        number_text = ""
+        unit_text = ""
+        for char in raw:
+            if char.isdigit() or (char == "." and "." not in number_text):
+                number_text += char
+            elif not char.isspace():
+                unit_text += char
+
+        try:
+            amount = float(number_text)
+        except Exception:
+            return fallback
+
+        if amount <= 0:
+            return fallback
+
+        unit = units.get(unit_text)
+        if unit is None:
+            return fallback
+
+        if unit == "days" and unit_text in {"mo", "mon", "month", "months"}:
+            amount *= 30
+        elif unit == "days" and unit_text in {"y", "yr", "year", "years"}:
+            amount *= 365
+
+        return timedelta(**{unit: amount})
+
+    def _resolve_history_window(
+        self,
+        *,
+        requested_date: Optional[str],
+        requested_lookback: Optional[str],
+        default_lookback: timedelta,
+        session: str,
+    ) -> Tuple[datetime, datetime, Optional[str]]:
+        clean_date = str(requested_date or "").strip()
+        if clean_date:
+            try:
+                trading_day = date.fromisoformat(clean_date)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "date must use YYYY-MM-DD format"
+                ) from exc
+
+            if session == "regular":
+                start_et = datetime(
+                    trading_day.year, trading_day.month, trading_day.day,
+                    9, 30, tzinfo=ET,
+                )
+                end_et = datetime(
+                    trading_day.year, trading_day.month, trading_day.day,
+                    16, 0, tzinfo=ET,
+                )
+            elif self.include_overnight:
+                previous_day = trading_day - timedelta(days=1)
+                start_et = datetime(
+                    previous_day.year, previous_day.month, previous_day.day,
+                    20, 0, tzinfo=ET,
+                )
+                end_et = datetime(
+                    trading_day.year, trading_day.month, trading_day.day,
+                    20, 0, tzinfo=ET,
+                )
+            else:
+                start_et = datetime(
+                    trading_day.year, trading_day.month, trading_day.day,
+                    4, 0, tzinfo=ET,
+                )
+                end_et = datetime(
+                    trading_day.year, trading_day.month, trading_day.day,
+                    20, 0, tzinfo=ET,
+                )
+
+            return (
+                start_et.astimezone(timezone.utc),
+                end_et.astimezone(timezone.utc),
+                clean_date,
+            )
+
+        end = datetime.now(timezone.utc)
+        lookback = self._parse_lookback(
+            requested_lookback,
+            default_lookback,
+        )
+        return end - lookback, end, None
+
     def _cache_ttl(self, normalized_tf: str) -> float:
         return {
             "1m": 6.0,
@@ -691,35 +812,51 @@ class AlpacaMarketService:
         symbol: str,
         timeframe: str = "1m",
         session: str = "extended",
+        date: Optional[str] = None,
+        lookback: Optional[str] = None,
+        limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         symbol = symbol.upper().strip()
         if not symbol:
             raise RuntimeError("symbol is required")
 
-        alpaca_timeframe, lookback, normalized_tf, aggregate_minutes = (
+        alpaca_timeframe, default_lookback, normalized_tf, aggregate_minutes = (
             self._timeframe_config(timeframe)
         )
         normalized_session = self._session_name(session)
-        ttl = self._cache_ttl(normalized_tf)
-        cache_bucket = int(time.time() // ttl)
+        normalized_limit = max(1, min(int(limit or 1000), 5000))
+
+        start, end, selected_date = self._resolve_history_window(
+            requested_date=date,
+            requested_lookback=lookback,
+            default_lookback=default_lookback,
+            session=normalized_session,
+        )
+
+        live_request = selected_date is None
+        ttl = self._cache_ttl(normalized_tf) if live_request else 3600.0
+        range_key = (
+            f"date={selected_date}"
+            if selected_date
+            else f"start={int(start.timestamp())}|end={int(end.timestamp())}"
+        )
+        cache_bucket = int(time.time() // ttl) if live_request else 0
         cache_key = (
             f"{symbol}|{normalized_tf}|{normalized_session}|"
             f"{self.feed}|{self.overnight_feed}|"
-            f"{int(self.include_overnight)}|{cache_bucket}"
+            f"{int(self.include_overnight)}|{range_key}|"
+            f"limit={normalized_limit}|bucket={cache_bucket}"
         )
 
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
-        now = datetime.now(timezone.utc)
-        start = now - lookback
-
         sip_rows = await self._historical_bars(
             symbol=symbol,
             timeframe=alpaca_timeframe,
             start=start,
-            end=now,
+            end=end,
             feed=self.feed,
         )
 
@@ -737,15 +874,11 @@ class AlpacaMarketService:
                     symbol=symbol,
                     timeframe=alpaca_timeframe,
                     start=start,
-                    end=now,
+                    end=end,
                     feed=self.overnight_feed,
                 )
             except Exception as exc:
-                # Do not blank the normal chart if the account or symbol does
-                # not support BOATS. SIP data remains fully usable.
-                _debug(
-                    f"BOATS history unavailable for {symbol}: {exc}"
-                )
+                _debug(f"BOATS history unavailable for {symbol}: {exc}")
 
         rows = self._merge_rows(overnight_rows, sip_rows)
         rows = self._filter_session(rows, normalized_session)
@@ -755,10 +888,15 @@ class AlpacaMarketService:
         elif aggregate_minutes and aggregate_minutes > 1:
             rows = self._aggregate_minutes(rows, aggregate_minutes)
 
+        if len(rows) > normalized_limit:
+            rows = rows[-normalized_limit:]
+
         _debug(
-            f"get_bars {symbol} {normalized_tf} {normalized_session}: "
+            f"get_bars {symbol} {normalized_tf} {normalized_session} "
+            f"date={selected_date or '-'} "
+            f"start={_iso_utc(start)} end={_iso_utc(end)} "
             f"sip={len(sip_rows)} overnight={len(overnight_rows)} "
-            f"result={len(rows)}"
+            f"result={len(rows)} limit={normalized_limit}"
         )
 
         self._set_cached(cache_key, ttl, rows)
