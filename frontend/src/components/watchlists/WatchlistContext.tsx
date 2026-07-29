@@ -10,9 +10,12 @@ import React, {
 } from "react";
 
 import {
+  API_BASE,
   fetchSharedAlpacaState,
   saveSharedAlpacaState,
 } from "../../services/api";
+
+import { dailyPracticeUniverseEngine } from "../../trading/practice/DailyPracticeUniverseEngine";
 
 export type WatchlistType = "manual" | "scanner" | "custom" | "favorites";
 
@@ -72,6 +75,71 @@ const WatchlistContext = createContext<WatchlistContextValue | null>(null);
 
 const WATCHLIST_STORAGE_KEY = "trading.workstation.watchlists.v1";
 const ACTIVE_WATCHLIST_STORAGE_KEY = "trading.workstation.activeWatchlist.v1";
+
+type ManualWatchlistApiResponse = {
+  symbol?: string;
+  enabled?: boolean;
+  symbols: string[];
+  count: number;
+  updatedAt: number | null;
+};
+
+async function parseManualWatchlistResponse(
+  response: Response
+): Promise<ManualWatchlistApiResponse> {
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Manual watchlist request failed: ${response.status} ${text}`
+    );
+  }
+
+  const payload = JSON.parse(text) as Partial<ManualWatchlistApiResponse>;
+  const symbols = uniqueSymbolStrings(payload.symbols ?? []);
+
+  return {
+    symbol: payload.symbol ? normalizeSymbol(payload.symbol) : undefined,
+    enabled: payload.enabled,
+    symbols,
+    count: symbols.length,
+    updatedAt:
+      typeof payload.updatedAt === "number" ? payload.updatedAt : null,
+  };
+}
+
+async function fetchManualWatchlist(): Promise<ManualWatchlistApiResponse> {
+  const response = await fetch(`${API_BASE}/app-state/alpaca/manual-watchlist`);
+  return parseManualWatchlistResponse(response);
+}
+
+async function saveManualWatchlist(
+  symbols: string[]
+): Promise<ManualWatchlistApiResponse> {
+  const response = await fetch(`${API_BASE}/app-state/alpaca/manual-watchlist`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ symbols: uniqueSymbolStrings(symbols) }),
+  });
+
+  return parseManualWatchlistResponse(response);
+}
+
+async function setManualWatchlistSymbol(
+  symbol: string,
+  enabled: boolean
+): Promise<ManualWatchlistApiResponse> {
+  const response = await fetch(
+    `${API_BASE}/app-state/alpaca/manual-watchlist/toggle`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol: normalizeSymbol(symbol), enabled }),
+    }
+  );
+
+  return parseManualWatchlistResponse(response);
+}
 
 const LEGACY_MANUAL_KEYS = [
   "watchlist",
@@ -328,6 +396,27 @@ function getManualSymbols(watchlists: Watchlist[]): string[] {
     .filter(Boolean);
 }
 
+function recordScannerWatchlistSymbols(
+  watchlistId: string,
+  watchlistName: string,
+  symbols: WatchlistSymbol[]
+): void {
+  for (const item of symbols) {
+    dailyPracticeUniverseEngine.recordScannerHit({
+      symbol: item.symbol,
+      scannerId: watchlistId,
+      scannerName: watchlistName,
+      price: item.lastPrice ?? null,
+      score: item.score ?? null,
+      percentChange: item.percentChange ?? null,
+      volume: item.volume ?? null,
+      setup: item.setup ?? null,
+      source: item.source ?? item.scanner ?? watchlistId,
+      notes: item.note ? [item.note] : [],
+    });
+  }
+}
+
 function setManualSymbols(watchlists: Watchlist[], symbols: string[]): Watchlist[] {
   const cleaned = uniqueSymbolStrings(symbols);
   const manualSymbols = cleaned
@@ -378,7 +467,29 @@ function loadActiveWatchlistId(): string {
 export function WatchlistProvider({ children }: { children: ReactNode }) {
   const [watchlists, setWatchlists] = useState<Watchlist[]>(loadWatchlists);
   const [activeWatchlistId, setActiveWatchlistId] = useState(loadActiveWatchlistId);
+  const [backendSyncReady, setBackendSyncReady] = useState(false);
   const didBootstrapBackendRef = useRef(false);
+  const initialManualSymbolsRef = useRef<string[]>(getManualSymbols(watchlists));
+  const manualMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const previousManualSymbolsRef = useRef<Set<string>>(new Set());
+  const didCaptureInitialManualRef = useRef(false);
+
+  const queueManualMutation = useCallback(
+    (operation: () => Promise<ManualWatchlistApiResponse>) => {
+      manualMutationQueueRef.current = manualMutationQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const snapshot = await operation();
+          setWatchlists((current) =>
+            setManualSymbols(current, snapshot.symbols)
+          );
+        })
+        .catch((error) => {
+          console.warn("[WatchlistContext] manual watchlist sync failed", error);
+        });
+    },
+    []
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -394,6 +505,35 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   }, [watchlists]);
 
   useEffect(() => {
+    const currentManualSymbols = new Set(getManualSymbols(watchlists));
+
+    if (!didCaptureInitialManualRef.current) {
+      didCaptureInitialManualRef.current = true;
+
+      dailyPracticeUniverseEngine.recordManualWatchlistSnapshot(
+        Array.from(currentManualSymbols)
+      );
+
+      previousManualSymbolsRef.current = currentManualSymbols;
+      return;
+    }
+
+    for (const symbol of currentManualSymbols) {
+      if (!previousManualSymbolsRef.current.has(symbol)) {
+        dailyPracticeUniverseEngine.recordManualWatchlistSymbol({ symbol });
+      }
+    }
+
+    for (const symbol of previousManualSymbolsRef.current) {
+      if (!currentManualSymbols.has(symbol)) {
+        dailyPracticeUniverseEngine.removeManualWatchlistSymbol({ symbol });
+      }
+    }
+
+    previousManualSymbolsRef.current = currentManualSymbols;
+  }, [watchlists]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
 
     window.localStorage.setItem(ACTIVE_WATCHLIST_STORAGE_KEY, activeWatchlistId);
@@ -403,20 +543,42 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     if (didBootstrapBackendRef.current) return;
     didBootstrapBackendRef.current = true;
 
+    let cancelled = false;
+
     async function bootstrapBackendOnce() {
+      let shared: Record<string, unknown> | null = null;
+
       try {
-        const shared = (await fetchSharedAlpacaState()) as Record<string, unknown> | null;
-        if (!shared) return;
+        shared = (await fetchSharedAlpacaState()) as Record<string, unknown> | null;
+      } catch (error) {
+        console.warn("[WatchlistContext] shared state load failed", error);
+      }
+
+      try {
+        const backendManual = await fetchManualWatchlist();
+        let authoritativeManual = backendManual.symbols;
+
+        // A null timestamp means the dedicated endpoint has not established an
+        // authoritative list yet. Migrate the existing backend list first, or
+        // use this browser's local list only when the backend has no list.
+        if (backendManual.updatedAt === null) {
+          if (
+            authoritativeManual.length === 0 &&
+            initialManualSymbolsRef.current.length > 0
+          ) {
+            authoritativeManual = initialManualSymbolsRef.current;
+          }
+
+          const initialized = await saveManualWatchlist(authoritativeManual);
+          authoritativeManual = initialized.symbols;
+        }
+
+        if (cancelled) return;
 
         const scannerSymbols = extractSymbolsFromUnknown(
-          shared.watchlist ?? shared.scannerWatchlist ?? shared.scanner_symbols
-        );
-
-        const backendManualSymbols = extractSymbolsFromUnknown(
-          shared.manualWatchlist ??
-            shared.manual_watchlist ??
-            shared.manualSymbols ??
-            shared.manual_symbols
+          shared?.watchlist ??
+            shared?.scannerWatchlist ??
+            shared?.scanner_symbols
         );
 
         setWatchlists((current) => {
@@ -430,50 +592,90 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
             });
           }
 
-          const currentManual = getManualSymbols(next);
-
-          // Backend is only used to bootstrap if the local/manual list is empty.
-          // This prevents deleted symbols from being re-added by backend sync.
-          if (currentManual.length === 0 && backendManualSymbols.length > 0) {
-            next = setManualSymbols(next, backendManualSymbols);
-          }
-
-          return next;
+          return setManualSymbols(next, authoritativeManual);
         });
+
+        setBackendSyncReady(true);
       } catch (error) {
         console.warn("[WatchlistContext] backend bootstrap failed", error);
       }
     }
 
     void bootstrapBackendOnce();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!backendSyncReady || typeof window === "undefined") return;
 
-    const manualSymbols = getManualSymbols(watchlists);
+    let cancelled = false;
+
+    const refreshManualWatchlist = async () => {
+      try {
+        await manualMutationQueueRef.current.catch(() => undefined);
+        const snapshot = await fetchManualWatchlist();
+
+        if (!cancelled) {
+          setWatchlists((current) =>
+            setManualSymbols(current, snapshot.symbols)
+          );
+        }
+      } catch (error) {
+        console.warn("[WatchlistContext] manual watchlist refresh failed", error);
+      }
+    };
+
+    const handleFocus = () => {
+      void refreshManualWatchlist();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshManualWatchlist();
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [backendSyncReady]);
+
+  useEffect(() => {
+    if (!backendSyncReady || typeof window === "undefined") return;
+
     const scanner = watchlists.find((item) => item.id === "scanner");
     const scannerSymbols = (scanner?.symbols ?? []).map((item) => item.symbol);
 
     const timeoutId = window.setTimeout(async () => {
       try {
         const existing = (await fetchSharedAlpacaState()) as Record<string, unknown> | null;
+        const sharedWithoutManual: Record<string, unknown> = {
+          ...(existing ?? {}),
+        };
+        delete sharedWithoutManual.manualWatchlist;
 
         await saveSharedAlpacaState({
-          ...(existing ?? {}),
+          ...sharedWithoutManual,
           watchlist: scannerSymbols,
-          manualWatchlist: manualSymbols,
           updatedAt: Date.now(),
         } as any);
       } catch (error) {
-        console.warn("[WatchlistContext] backend save failed", error);
+        console.warn("[WatchlistContext] scanner watchlist save failed", error);
       }
     }, 350);
 
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [watchlists]);
+  }, [backendSyncReady, watchlists]);
 
   const activeWatchlist = useMemo(
     () =>
@@ -551,6 +753,12 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
       if (!normalizedId || !normalized) return;
 
+      if (normalizedId === "manual") {
+        dailyPracticeUniverseEngine.recordManualWatchlistSymbol({
+          symbol: normalized.symbol,
+        });
+      }
+
       setWatchlists((current) => {
         const exists = current.some((watchlist) => watchlist.id === normalizedId);
         const base = exists
@@ -574,14 +782,28 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
             normalized,
           ]);
 
+          if (watchlist.type === "scanner" || normalizedId === "scanner") {
+            recordScannerWatchlistSymbols(
+              normalizedId,
+              watchlist.name,
+              [normalized]
+            );
+          }
+
           return {
             ...watchlist,
             symbols: nextSymbols,
           };
         });
       });
+
+      if (normalizedId === "manual") {
+        queueManualMutation(() =>
+          setManualWatchlistSymbol(normalized.symbol, true)
+        );
+      }
     },
-    []
+    [queueManualMutation]
   );
 
   const removeSymbol = useCallback((watchlistId: string, symbol: string) => {
@@ -589,6 +811,12 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     const normalizedSymbol = normalizeSymbol(symbol);
 
     if (!normalizedId || !normalizedSymbol) return;
+
+    if (normalizedId === "manual") {
+      dailyPracticeUniverseEngine.removeManualWatchlistSymbol({
+        symbol: normalizedSymbol,
+      });
+    }
 
     setWatchlists((current) =>
       current.map((watchlist) =>
@@ -602,7 +830,13 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
           : watchlist
       )
     );
-  }, []);
+
+    if (normalizedId === "manual") {
+      queueManualMutation(() =>
+        setManualWatchlistSymbol(normalizedSymbol, false)
+      );
+    }
+  }, [queueManualMutation]);
 
   const replaceSymbols = useCallback(
     (
@@ -610,17 +844,64 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       symbols: Array<string | WatchlistSymbol>,
       options: ReplaceSymbolsOptions = {}
     ) => {
+      const normalizedId = normalizeWatchlistId(watchlistId);
+      const normalizedSymbols = symbols
+        .map((item) => normalizeWatchlistSymbol(item))
+        .filter((item): item is WatchlistSymbol => item !== null);
+
+      const existingWatchlist = watchlists.find(
+        (watchlist) => watchlist.id === normalizedId
+      );
+
+      const resolvedType =
+        options.type ?? existingWatchlist?.type ?? "scanner";
+      const resolvedName =
+        options.name?.trim() ||
+        existingWatchlist?.name ||
+        titleCaseFromId(normalizedId);
+
+      if (resolvedType === "scanner" && normalizedId) {
+        recordScannerWatchlistSymbols(
+          normalizedId,
+          resolvedName,
+          normalizedSymbols
+        );
+      }
+
+      if (normalizedId === "manual") {
+        const nextManualSymbols = new Set(
+          normalizedSymbols.map((item) => item.symbol)
+        );
+        const currentManualSymbols = new Set(getManualSymbols(watchlists));
+
+        for (const symbol of nextManualSymbols) {
+          if (!currentManualSymbols.has(symbol)) {
+            dailyPracticeUniverseEngine.recordManualWatchlistSymbol({ symbol });
+          }
+        }
+
+        for (const symbol of currentManualSymbols) {
+          if (!nextManualSymbols.has(symbol)) {
+            dailyPracticeUniverseEngine.removeManualWatchlistSymbol({ symbol });
+          }
+        }
+      }
+
       setWatchlists((current) =>
         replaceSymbolsInternal(current, watchlistId, symbols, options)
       );
 
-      const normalizedId = normalizeWatchlistId(watchlistId);
+      if (normalizedId === "manual") {
+        queueManualMutation(() =>
+          saveManualWatchlist(normalizedSymbols.map((item) => item.symbol))
+        );
+      }
 
       if (options.activate && normalizedId) {
         setActiveWatchlistId(normalizedId);
       }
     },
-    []
+    [queueManualMutation, watchlists]
   );
 
   const value = useMemo<WatchlistContextValue>(
