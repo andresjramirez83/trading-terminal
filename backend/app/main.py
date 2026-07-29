@@ -1,8 +1,10 @@
 import asyncio
 import json
 import os
+import threading
 import traceback
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -150,9 +152,15 @@ class SharedAlpacaStatePayload(BaseModel):
     updatedAt: Optional[float] = None
 
 
+class ManualWatchlistPayload(BaseModel):
+    symbols: List[str] = []
+
+
 APP_STATE_DIR = Path(__file__).resolve().parent / "data" / "app_state"
 APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
 ALPACA_APP_STATE_FILE = APP_STATE_DIR / "alpaca_state.json"
+ALPACA_APP_STATE_LOCK_FILE = APP_STATE_DIR / "alpaca_state.lock"
+LOCAL_APP_STATE_LOCK = threading.RLock()
 
 # Gunicorn can run multiple workers. Without a process lock, each worker starts
 # its own scanner + backend-alert loop. This lock lets only one worker run
@@ -221,6 +229,73 @@ def _normalize_symbol_list(items: List[str]) -> List[str]:
         seen.add(symbol)
         out.append(symbol)
     return out
+
+
+@contextmanager
+def _locked_alpaca_state():
+    """Serialize app-state access across threads and Gunicorn workers."""
+    with LOCAL_APP_STATE_LOCK:
+        lock_handle = ALPACA_APP_STATE_LOCK_FILE.open("a+")
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            lock_handle.close()
+
+
+def _empty_alpaca_state() -> Dict[str, Any]:
+    return {
+        "selectedSymbol": None,
+        "timeframe": None,
+        "activeChart": None,
+        "watchlist": [],
+        "manualWatchlist": [],
+        "manualWatchlistUpdatedAt": None,
+        "studyVisibility": {},
+        "chartRanges": {},
+        "updatedAt": None,
+    }
+
+
+def _read_alpaca_state_unlocked() -> Dict[str, Any]:
+    if not ALPACA_APP_STATE_FILE.exists():
+        return _empty_alpaca_state()
+
+    try:
+        data = json.loads(ALPACA_APP_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print("[app-state/alpaca] read error:", exc, flush=True)
+        return _empty_alpaca_state()
+
+    if not isinstance(data, dict):
+        return _empty_alpaca_state()
+
+    return {
+        "selectedSymbol": data.get("selectedSymbol"),
+        "timeframe": data.get("timeframe"),
+        "activeChart": data.get("activeChart"),
+        "watchlist": data.get("watchlist") if isinstance(data.get("watchlist"), list) else [],
+        "manualWatchlist": data.get("manualWatchlist") if isinstance(data.get("manualWatchlist"), list) else [],
+        "manualWatchlistUpdatedAt": data.get("manualWatchlistUpdatedAt"),
+        "studyVisibility": data.get("studyVisibility") if isinstance(data.get("studyVisibility"), dict) else {},
+        "chartRanges": data.get("chartRanges") if isinstance(data.get("chartRanges"), dict) else {},
+        "updatedAt": data.get("updatedAt"),
+    }
+
+
+def _write_alpaca_state_unlocked(state: Dict[str, Any]) -> None:
+    # Unique temp name prevents concurrent workers from replacing each other's temp file.
+    tmp_file = ALPACA_APP_STATE_FILE.with_name(
+        f"{ALPACA_APP_STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    tmp_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp_file.replace(ALPACA_APP_STATE_FILE)
 
 
 def _clean_alpaca_state(payload: SharedAlpacaStatePayload) -> Dict[str, Any]:
@@ -2785,42 +2860,98 @@ async def on_shutdown() -> None:
 
 @app.get("/app-state/alpaca")
 def get_shared_alpaca_state():
-    empty_state = {
-        "selectedSymbol": None,
-        "timeframe": None,
-        "activeChart": None,
-        "watchlist": [],
-        "manualWatchlist": [],
-        "studyVisibility": {},
-        "chartRanges": {},
-        "updatedAt": None,
-    }
-    if not ALPACA_APP_STATE_FILE.exists():
-        return empty_state
-    try:
-        data = json.loads(ALPACA_APP_STATE_FILE.read_text(encoding="utf-8"))
-        return {
-            "selectedSymbol": data.get("selectedSymbol"),
-            "timeframe": data.get("timeframe"),
-            "activeChart": data.get("activeChart"),
-            "watchlist": data.get("watchlist") if isinstance(data.get("watchlist"), list) else [],
-            "manualWatchlist": data.get("manualWatchlist") if isinstance(data.get("manualWatchlist"), list) else [],
-            "studyVisibility": data.get("studyVisibility") if isinstance(data.get("studyVisibility"), dict) else {},
-            "chartRanges": data.get("chartRanges") if isinstance(data.get("chartRanges"), dict) else {},
-            "updatedAt": data.get("updatedAt"),
-        }
-    except Exception as exc:
-        print("[app-state/alpaca] read error:", exc, flush=True)
-        return empty_state
+    with _locked_alpaca_state():
+        return _read_alpaca_state_unlocked()
 
 
 @app.put("/app-state/alpaca")
 def put_shared_alpaca_state(payload: SharedAlpacaStatePayload):
     clean = _clean_alpaca_state(payload)
-    tmp_file = ALPACA_APP_STATE_FILE.with_suffix(".tmp")
-    tmp_file.write_text(json.dumps(clean, indent=2), encoding="utf-8")
-    tmp_file.replace(ALPACA_APP_STATE_FILE)
-    return clean
+
+    with _locked_alpaca_state():
+        existing = _read_alpaca_state_unlocked()
+
+        # Once the dedicated manual-watchlist API has been used, the manual list
+        # is authoritative and cannot be overwritten by stale full-state saves
+        # from another browser/computer.
+        if existing.get("manualWatchlistUpdatedAt") is not None:
+            clean["manualWatchlist"] = _normalize_symbol_list(
+                existing.get("manualWatchlist") or []
+            )
+            clean["manualWatchlistUpdatedAt"] = existing.get(
+                "manualWatchlistUpdatedAt"
+            )
+        else:
+            clean["manualWatchlistUpdatedAt"] = None
+
+        _write_alpaca_state_unlocked(clean)
+        return clean
+
+
+@app.get("/app-state/alpaca/manual-watchlist")
+def get_manual_watchlist():
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        symbols = _normalize_symbol_list(state.get("manualWatchlist") or [])
+        return {
+            "symbols": symbols,
+            "count": len(symbols),
+            "updatedAt": state.get("manualWatchlistUpdatedAt"),
+        }
+
+
+@app.put("/app-state/alpaca/manual-watchlist")
+def put_manual_watchlist(payload: ManualWatchlistPayload):
+    symbols = _normalize_symbol_list(payload.symbols)
+    updated_at = datetime.now(timezone.utc).timestamp() * 1000
+
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        state["manualWatchlist"] = symbols
+        state["manualWatchlistUpdatedAt"] = updated_at
+        state["updatedAt"] = updated_at
+        _write_alpaca_state_unlocked(state)
+
+    return {
+        "symbols": symbols,
+        "count": len(symbols),
+        "updatedAt": updated_at,
+    }
+
+
+@app.post("/app-state/alpaca/manual-watchlist/toggle")
+def toggle_manual_watchlist_symbol(payload: dict = Body(default={})):
+    symbol = _normalize_symbol_list([str(payload.get("symbol") or "")])
+    if not symbol:
+        raise HTTPException(status_code=400, detail="A valid symbol is required")
+
+    normalized_symbol = symbol[0]
+    requested_enabled = payload.get("enabled")
+    updated_at = datetime.now(timezone.utc).timestamp() * 1000
+
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        current = _normalize_symbol_list(state.get("manualWatchlist") or [])
+        is_present = normalized_symbol in current
+        enabled = (not is_present) if requested_enabled is None else bool(requested_enabled)
+
+        if enabled and not is_present:
+            current.append(normalized_symbol)
+        elif not enabled and is_present:
+            current = [item for item in current if item != normalized_symbol]
+
+        state["manualWatchlist"] = current
+        state["manualWatchlistUpdatedAt"] = updated_at
+        state["updatedAt"] = updated_at
+        _write_alpaca_state_unlocked(state)
+
+    return {
+        "symbol": normalized_symbol,
+        "enabled": enabled,
+        "symbols": current,
+        "count": len(current),
+        "updatedAt": updated_at,
+    }
 
 
 @app.get("/health")
