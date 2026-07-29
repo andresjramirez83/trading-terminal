@@ -13,6 +13,8 @@ import type {
   PriceRangeDrawing,
   LongPositionDrawing,
   TrendlineDrawing,
+  MarketStructureDrawing,
+  MarketStructureNode,
 } from "./DrawingTypes";
 import { DEFAULT_DRAWING_STYLE } from "./DrawingTypes";
 import { DrawingStore } from "./DrawingStore";
@@ -89,6 +91,18 @@ function cloneDrawing(drawing: ChartDrawing): ChartDrawing {
     };
   }
 
+  if (drawing.type === "marketStructure") {
+    return {
+      ...drawing,
+      nodes: drawing.nodes.map((node) => ({
+        ...clonePoint(node),
+        classification: node.classification,
+      })),
+      style: cloneStyle(drawing.style),
+      selectedNodeIndex: drawing.selectedNodeIndex ?? null,
+    };
+  }
+
   return {
     ...drawing,
     p1: clonePoint(drawing.p1),
@@ -127,6 +141,13 @@ function distanceToSegment(
   return pointDistance(px, py, closestX, closestY);
 }
 
+function marketNodeIndexFromMode(mode: DragMode): number | null {
+  if (!mode.startsWith("market-node-")) return null;
+
+  const index = Number(mode.slice("market-node-".length));
+  return Number.isInteger(index) && index >= 0 ? index : null;
+}
+
 export class DrawingEngine {
   private chart: IChartApi;
   private priceSeries: ISeriesApi<"Candlestick">;
@@ -134,6 +155,7 @@ export class DrawingEngine {
   private defaultStyle: DrawingStyle = cloneStyle(DEFAULT_DRAWING_STYLE);
   private store: DrawingStore;
   private renderer: DrawingRenderer;
+  private unsubscribeStore: (() => void) | null = null;
   private pendingTrendPoint: DrawingPoint | null = null;
   private selectedDrawingId: string | null = null;
   private drawingChangeListeners = new Set<DrawingChangeListener>();
@@ -158,6 +180,17 @@ export class DrawingEngine {
       workspace?.timeframe ?? "5m",
     );
     this.renderer = new DrawingRenderer(chart, priceSeries, container);
+    this.unsubscribeStore = this.store.subscribe(() => {
+      if (
+        this.selectedDrawingId != null &&
+        this.store.get(this.selectedDrawingId) == null
+      ) {
+        this.selectedDrawingId = null;
+      }
+
+      this.renderAll();
+      this.emitDrawingChange("workspace");
+    });
 
     this.chart
       .timeScale()
@@ -206,6 +239,9 @@ export class DrawingEngine {
       this.redrawTimer = null;
     }
 
+    this.unsubscribeStore?.();
+    this.unsubscribeStore = null;
+    this.store.destroy();
     this.renderer.clear();
     this.pendingTrendPoint = null;
     this.selectedDrawingId = null;
@@ -421,6 +457,130 @@ export class DrawingEngine {
     return cloneDrawing(updated) as LongPositionDrawing;
   }
 
+  createMarketStructureFromNodes(
+    nodes: MarketStructureNode[],
+    style: DrawingStyle = this.defaultStyle,
+  ): MarketStructureDrawing | null {
+    const normalizedNodes = nodes
+      .filter(
+        (node) =>
+          Number.isFinite(Number(node.time)) &&
+          Number.isFinite(Number(node.price)),
+      )
+      .map((node) => ({
+        ...clonePoint(node),
+        classification: node.classification,
+      }));
+
+    if (normalizedNodes.length < 2) return null;
+
+    const drawing: MarketStructureDrawing = {
+      id: makeId("marketStructure"),
+      type: "marketStructure",
+      nodes: normalizedNodes,
+      style: {
+        ...cloneStyle(style),
+        extendRight: false,
+      },
+      selected: true,
+      selectedNodeIndex: null,
+    };
+
+    this.pendingTrendPoint = null;
+    this.store.add(drawing);
+    this.selectedDrawingId = drawing.id;
+    this.renderAll();
+    this.scheduleRenderAll();
+    this.emitDrawingChange("create");
+    return cloneDrawing(drawing) as MarketStructureDrawing;
+  }
+
+  updateMarketStructureNodes(
+    drawingId: string,
+    nodes: MarketStructureNode[],
+    selectedNodeIndex: number | null = null,
+  ): MarketStructureDrawing | null {
+    const drawing = this.findDrawing(drawingId);
+    if (!drawing || drawing.type !== "marketStructure") return null;
+
+    const normalizedNodes = nodes
+      .filter(
+        (node) =>
+          Number.isFinite(Number(node.time)) &&
+          Number.isFinite(Number(node.price)),
+      )
+      .map((node) => ({
+        ...clonePoint(node),
+        classification: node.classification,
+      }));
+
+    if (normalizedNodes.length < 2) return null;
+
+    const updated: MarketStructureDrawing = {
+      ...drawing,
+      nodes: normalizedNodes,
+      selected: true,
+      selectedNodeIndex:
+        selectedNodeIndex != null &&
+        selectedNodeIndex >= 0 &&
+        selectedNodeIndex < normalizedNodes.length
+          ? selectedNodeIndex
+          : null,
+      style: cloneStyle(drawing.style),
+    };
+
+    this.store.update(updated);
+    this.selectedDrawingId = updated.id;
+    this.renderAll();
+    this.emitDrawingChange("update");
+    return cloneDrawing(updated) as MarketStructureDrawing;
+  }
+
+  insertMarketStructureNode(
+    drawingId: string,
+    index: number,
+    node: MarketStructureNode,
+  ): MarketStructureDrawing | null {
+    const drawing = this.findDrawing(drawingId);
+    if (!drawing || drawing.type !== "marketStructure") return null;
+
+    const nodes = drawing.nodes.map((item) => ({
+      ...clonePoint(item),
+      classification: item.classification,
+    }));
+
+    const safeIndex = Math.max(0, Math.min(index, nodes.length));
+    nodes.splice(safeIndex, 0, {
+      ...clonePoint(node),
+      classification: node.classification,
+    });
+
+    return this.updateMarketStructureNodes(drawingId, nodes, safeIndex);
+  }
+
+  removeMarketStructureNode(
+    drawingId: string,
+    nodeIndex: number,
+  ): MarketStructureDrawing | null {
+    const drawing = this.findDrawing(drawingId);
+    if (!drawing || drawing.type !== "marketStructure") return null;
+    if (nodeIndex < 0 || nodeIndex >= drawing.nodes.length) return null;
+
+    if (drawing.nodes.length <= 2) {
+      this.removeDrawing(drawingId);
+      return null;
+    }
+
+    const nodes = drawing.nodes
+      .filter((_node, index) => index !== nodeIndex)
+      .map((node) => ({
+        ...clonePoint(node),
+        classification: node.classification,
+      }));
+
+    return this.updateMarketStructureNodes(drawingId, nodes, null);
+  }
+
   createTrendlineFromPoints(
     p1: DrawingPoint,
     p2: DrawingPoint,
@@ -490,8 +650,10 @@ export class DrawingEngine {
     }
 
     if (!hit) {
+      this.clearSelectedMarketStructureNode();
       this.selectedDrawingId = null;
       this.renderAll();
+      this.emitDrawingChange("select");
       return false;
     }
 
@@ -499,10 +661,30 @@ export class DrawingEngine {
     if (!drawing) return false;
 
     this.selectedDrawingId = hit.drawingId;
-    this.dragManager.beginDrag(drawing, hit.mode, point);
+
+    if (drawing.type === "marketStructure") {
+      const selectedNodeIndex = marketNodeIndexFromMode(hit.mode);
+      const selectedDrawing: MarketStructureDrawing = {
+        ...drawing,
+        nodes: drawing.nodes.map((node) => ({
+          ...clonePoint(node),
+          classification: node.classification,
+        })),
+        style: cloneStyle(drawing.style),
+        selected: true,
+        selectedNodeIndex,
+      };
+
+      this.store.update(selectedDrawing);
+      this.dragManager.beginDrag(selectedDrawing, hit.mode, point);
+    } else {
+      this.clearSelectedMarketStructureNode();
+      this.dragManager.beginDrag(drawing, hit.mode, point);
+    }
 
     this.setChartNavigationEnabled(false);
     this.renderAll();
+    this.emitDrawingChange("select");
     return true;
   }
 
@@ -555,6 +737,10 @@ export class DrawingEngine {
   }
 
   selectDrawing(id: string | null): void {
+    if (id !== this.selectedDrawingId) {
+      this.clearSelectedMarketStructureNode();
+    }
+
     this.selectedDrawingId = id;
     this.renderAll();
     this.emitDrawingChange("select");
@@ -567,8 +753,69 @@ export class DrawingEngine {
   removeSelectedDrawing(): boolean {
     if (!this.selectedDrawingId) return false;
 
+    const selected = this.findDrawing(this.selectedDrawingId);
+    if (!selected) return false;
+
+    if (
+      selected.type === "marketStructure" &&
+      selected.selectedNodeIndex != null
+    ) {
+      const drawingId = selected.id;
+      const nodeIndex = selected.selectedNodeIndex;
+      const updated = this.removeMarketStructureNode(drawingId, nodeIndex);
+
+      if (updated) {
+        this.selectedDrawingId = updated.id;
+      }
+
+      return true;
+    }
+
     this.removeDrawing(this.selectedDrawingId);
     return true;
+  }
+
+  /**
+   * Inserts a node into the Market Structure segment nearest the supplied
+   * chart point. This is intended to be called from the chart double-click
+   * interaction while the cursor tool is active.
+   */
+  handleDoubleClick(point: DrawingPointerEvent): boolean {
+    if (this.activeTool !== "cursor") return false;
+
+    const segment = this.findMarketStructureSegmentAt(point);
+    if (!segment) return false;
+
+    const node: MarketStructureNode = {
+      ...clonePoint(point),
+      classification: undefined,
+    };
+
+    const updated = this.insertMarketStructureNode(
+      segment.drawingId,
+      segment.segmentIndex + 1,
+      node,
+    );
+
+    return updated != null;
+  }
+
+  /** Returns the cursor that should be shown for an editable drawing hit. */
+  getCursorAt(point: DrawingPointerEvent): string | null {
+    if (this.activeTool === "eraser") {
+      return this.hitTestAt(point) ? "pointer" : "crosshair";
+    }
+
+    if (this.activeTool !== "cursor") return null;
+
+    const hit = this.hitTestAt(point);
+    if (!hit) return null;
+
+    if (marketNodeIndexFromMode(hit.mode) != null) return "grab";
+    if (hit.mode === "market-structure") return "move";
+    if (hit.mode === "line" || hit.mode === "horizontal") return "move";
+
+    return "grab";
   }
 
   duplicateSelectedDrawing(): ChartDrawing | null {
@@ -587,11 +834,14 @@ export class DrawingEngine {
             ? "priceRange"
             : source.type === "longPosition"
               ? "longPosition"
-              : "trend",
+              : source.type === "marketStructure"
+                ? "marketStructure"
+                : "trend",
     );
 
     if (
       cloned.type === "trendline" ||
+      cloned.type === "marketStructure" ||
       cloned.type === "rectangle" ||
       cloned.type === "priceRange" ||
       cloned.type === "longPosition"
@@ -604,6 +854,29 @@ export class DrawingEngine {
     this.renderAll();
     this.emitDrawingChange("duplicate");
     return cloneDrawing(cloned);
+  }
+
+  private clearSelectedMarketStructureNode(): void {
+    if (!this.selectedDrawingId) return;
+
+    const selected = this.findDrawing(this.selectedDrawingId);
+    if (
+      !selected ||
+      selected.type !== "marketStructure" ||
+      selected.selectedNodeIndex == null
+    ) {
+      return;
+    }
+
+    this.store.update({
+      ...selected,
+      nodes: selected.nodes.map((node) => ({
+        ...clonePoint(node),
+        classification: node.classification,
+      })),
+      style: cloneStyle(selected.style),
+      selectedNodeIndex: null,
+    });
   }
 
   private setChartNavigationEnabled(enabled: boolean): void {
@@ -735,6 +1008,11 @@ export class DrawingEngine {
         if (hit) return hit;
       }
 
+      if (drawing.type === "marketStructure") {
+        const hit = this.hitTestMarketStructure(drawing, x, y);
+        if (hit) return hit;
+      }
+
       if (drawing.type === "horizontal") {
         const hit = this.hitTestHorizontal(drawing, x, y);
         if (hit) return hit;
@@ -748,6 +1026,97 @@ export class DrawingEngine {
       if (drawing.type === "longPosition") {
         const hit = this.hitTestLongPosition(drawing, x, y);
         if (hit) return hit;
+      }
+    }
+
+    return null;
+  }
+
+  private hitTestMarketStructure(
+    drawing: MarketStructureDrawing,
+    x: number,
+    y: number,
+  ): HitResult {
+    const coordinates = drawing.nodes.map((node) => ({
+      x: this.chart
+        .timeScale()
+        .timeToCoordinate(Number(node.time) as Time),
+      y: this.priceSeries.priceToCoordinate(Number(node.price)),
+    }));
+
+    // Nodes have priority over segments so closely spaced pivots remain easy
+    // to grab and edit.
+    for (let index = coordinates.length - 1; index >= 0; index -= 1) {
+      const coordinate = coordinates[index];
+      if (coordinate.x == null || coordinate.y == null) continue;
+
+      if (pointDistance(x, y, coordinate.x, coordinate.y) <= 12) {
+        return {
+          drawingId: drawing.id,
+          mode: `market-node-${index}` as DragMode,
+        };
+      }
+    }
+
+    for (let index = coordinates.length - 2; index >= 0; index -= 1) {
+      const start = coordinates[index];
+      const end = coordinates[index + 1];
+
+      if (
+        start.x == null ||
+        start.y == null ||
+        end.x == null ||
+        end.y == null
+      ) {
+        continue;
+      }
+
+      if (distanceToSegment(x, y, start.x, start.y, end.x, end.y) <= 8) {
+        return { drawingId: drawing.id, mode: "market-structure" };
+      }
+    }
+
+    return null;
+  }
+
+  private findMarketStructureSegmentAt(point: DrawingPointerEvent): {
+    drawingId: string;
+    segmentIndex: number;
+  } | null {
+    const x = Number(point.x);
+    const y = Number(point.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
+    const drawings = this.store.getAll();
+
+    for (let drawingIndex = drawings.length - 1; drawingIndex >= 0; drawingIndex -= 1) {
+      const drawing = drawings[drawingIndex];
+      if (drawing.type !== "marketStructure") continue;
+
+      for (let index = drawing.nodes.length - 2; index >= 0; index -= 1) {
+        const start = drawing.nodes[index];
+        const end = drawing.nodes[index + 1];
+        const startX = this.chart
+          .timeScale()
+          .timeToCoordinate(Number(start.time) as Time);
+        const endX = this.chart
+          .timeScale()
+          .timeToCoordinate(Number(end.time) as Time);
+        const startY = this.priceSeries.priceToCoordinate(Number(start.price));
+        const endY = this.priceSeries.priceToCoordinate(Number(end.price));
+
+        if (
+          startX == null ||
+          endX == null ||
+          startY == null ||
+          endY == null
+        ) {
+          continue;
+        }
+
+        if (distanceToSegment(x, y, startX, startY, endX, endY) <= 8) {
+          return { drawingId: drawing.id, segmentIndex: index };
+        }
       }
     }
 
