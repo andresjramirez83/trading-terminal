@@ -1,12 +1,12 @@
 // src/components/chart/DrawingStore.ts
 
-import { API_BASE_URL } from "../../config";
+import { API_BASE } from "../../services/api";
 import type { ChartDrawing } from "./DrawingTypes";
 
 const STORAGE_PREFIX = "chart.drawings.v1";
 const MARKET_STRUCTURE_STORAGE_PREFIX = "chart.market-structure.v1";
 const SHARED_SCOPE = "shared";
-const REMOTE_POLL_MS = 15_000;
+const REMOTE_POLL_MS = 3_000;
 const REMOTE_SAVE_DELAY_MS = 180;
 
 type DrawingScope = "timeframe" | "shared";
@@ -476,7 +476,7 @@ export class DrawingStore {
     symbol: string,
     scopeName: string,
   ): string {
-    return `${API_BASE_URL}/chart/drawings/${encodeURIComponent(symbol)}/${encodeURIComponent(scopeName)}`;
+    return `${API_BASE}/chart/drawings/${encodeURIComponent(symbol)}/${encodeURIComponent(scopeName)}`;
   }
 
   private async fetchRemoteScope(
