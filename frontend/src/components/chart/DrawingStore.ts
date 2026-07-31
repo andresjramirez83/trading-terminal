@@ -7,7 +7,7 @@ const STORAGE_PREFIX = "chart.drawings.v1";
 const MARKET_STRUCTURE_STORAGE_PREFIX = "chart.market-structure.v1";
 const SHARED_SCOPE = "shared";
 const REMOTE_POLL_MS = 3_000;
-const REMOTE_SAVE_DELAY_MS = 180;
+const REMOTE_SAVE_DELAY_MS = 120;
 
 type DrawingScope = "timeframe" | "shared";
 
@@ -18,11 +18,16 @@ type RemoteDrawingDocument = {
   updatedAt: number | string | null;
 };
 
-type PendingMutation =
+type DrawingMutation =
   | { kind: "upsert"; drawing: ChartDrawing }
   | { kind: "remove"; id: string; scope: DrawingScope }
   | { kind: "clear"; scope: DrawingScope | "all" }
   | { kind: "replace"; drawings: ChartDrawing[] };
+
+type ScopedRemoteMutation =
+  | { kind: "upsert"; scope: DrawingScope; drawing: ChartDrawing }
+  | { kind: "remove"; scope: DrawingScope; id: string }
+  | { kind: "clear"; scope: DrawingScope };
 
 type DrawingStoreListener = (drawings: ChartDrawing[]) => void;
 
@@ -77,14 +82,11 @@ function parseStoredDrawings(
 
   try {
     const parsed = JSON.parse(saved) as unknown;
-
     if (!Array.isArray(parsed)) return [];
 
-    return cloneDrawings(
-      parsed.filter(isValidDrawing).filter(allowed),
-    );
+    return cloneDrawings(parsed.filter(isValidDrawing).filter(allowed));
   } catch (error) {
-    console.warn("[DrawingStore] failed to load drawings", {
+    console.warn("[DrawingStore] failed to load local drawings", {
       storageKey,
       error,
     });
@@ -103,6 +105,19 @@ function drawingsForScope(
   return drawings.filter((drawing) => scopeForDrawing(drawing) === scope);
 }
 
+function mergeScopes(
+  timeframeDrawings: ChartDrawing[],
+  sharedDrawings: ChartDrawing[],
+): ChartDrawing[] {
+  const byId = new Map<string, ChartDrawing>();
+
+  for (const drawing of [...timeframeDrawings, ...sharedDrawings]) {
+    byId.set(drawing.id, cloneDrawing(drawing));
+  }
+
+  return Array.from(byId.values());
+}
+
 function drawingsEqual(a: ChartDrawing[], b: ChartDrawing[]): boolean {
   if (a.length !== b.length) return false;
 
@@ -113,25 +128,9 @@ function drawingsEqual(a: ChartDrawing[], b: ChartDrawing[]): boolean {
   }
 }
 
-function mergeScopes(
-  timeframeDrawings: ChartDrawing[],
-  sharedDrawings: ChartDrawing[],
-): ChartDrawing[] {
-  const seenIds = new Set<string>();
-  const merged: ChartDrawing[] = [];
-
-  for (const drawing of [...timeframeDrawings, ...sharedDrawings]) {
-    if (seenIds.has(drawing.id)) continue;
-    seenIds.add(drawing.id);
-    merged.push(cloneDrawing(drawing));
-  }
-
-  return merged;
-}
-
 function applyMutation(
   drawings: ChartDrawing[],
-  mutation: PendingMutation,
+  mutation: DrawingMutation,
 ): ChartDrawing[] {
   if (mutation.kind === "replace") {
     return cloneDrawings(mutation.drawings);
@@ -155,7 +154,9 @@ function applyMutation(
   }
 
   const next = cloneDrawings(drawings);
-  const index = next.findIndex((drawing) => drawing.id === mutation.drawing.id);
+  const index = next.findIndex(
+    (drawing) => drawing.id === mutation.drawing.id,
+  );
 
   if (index >= 0) {
     next[index] = cloneDrawing(mutation.drawing);
@@ -166,22 +167,43 @@ function applyMutation(
   return next;
 }
 
-function mutationScopes(mutation: PendingMutation): DrawingScope[] {
-  if (mutation.kind === "replace") {
-    return ["timeframe", "shared"];
+function expandRemoteMutations(
+  mutation: DrawingMutation,
+): ScopedRemoteMutation[] {
+  if (mutation.kind === "upsert") {
+    return [
+      {
+        kind: "upsert",
+        scope: scopeForDrawing(mutation.drawing),
+        drawing: cloneDrawing(mutation.drawing),
+      },
+    ];
+  }
+
+  if (mutation.kind === "remove") {
+    return [{ kind: "remove", scope: mutation.scope, id: mutation.id }];
   }
 
   if (mutation.kind === "clear") {
     return mutation.scope === "all"
-      ? ["timeframe", "shared"]
-      : [mutation.scope];
+      ? [
+          { kind: "clear", scope: "timeframe" },
+          { kind: "clear", scope: "shared" },
+        ]
+      : [{ kind: "clear", scope: mutation.scope }];
   }
 
-  if (mutation.kind === "upsert") {
-    return [scopeForDrawing(mutation.drawing)];
-  }
-
-  return [mutation.scope];
+  return [
+    { kind: "clear", scope: "timeframe" },
+    { kind: "clear", scope: "shared" },
+    ...mutation.drawings.map(
+      (drawing): ScopedRemoteMutation => ({
+        kind: "upsert",
+        scope: scopeForDrawing(drawing),
+        drawing: cloneDrawing(drawing),
+      }),
+    ),
+  ];
 }
 
 export class DrawingStore {
@@ -199,12 +221,12 @@ export class DrawingStore {
     timeframe: 0,
     shared: 0,
   };
-  private pendingMutations: PendingMutation[] = [];
-  private dirtyScopes = new Set<DrawingScope>();
+  private pendingBeforeInitialLoad: DrawingMutation[] = [];
+  private remoteQueue: ScopedRemoteMutation[] = [];
   private saveTimer: number | null = null;
   private pollTimer: number | null = null;
   private refreshInFlight = false;
-  private refreshRequestedInitial = false;
+  private refreshRequested = false;
   private saveInFlight = false;
   private destroyed = false;
 
@@ -225,6 +247,7 @@ export class DrawingStore {
         "visibilitychange",
         this.handleVisibilityChange,
       );
+
       this.pollTimer = window.setInterval(() => {
         void this.refreshFromBackend(false);
       }, REMOTE_POLL_MS);
@@ -259,16 +282,13 @@ export class DrawingStore {
 
   subscribe(listener: DrawingStoreListener): () => void {
     this.listeners.add(listener);
-
-    return () => {
-      this.listeners.delete(listener);
-    };
+    return () => this.listeners.delete(listener);
   }
 
   setWorkspace(symbol: string, timeframe: string): void {
     if (
       this.remoteInitialized &&
-      this.dirtyScopes.size > 0 &&
+      this.remoteQueue.length > 0 &&
       !this.saveInFlight
     ) {
       void this.persistRemote();
@@ -283,8 +303,8 @@ export class DrawingStore {
     this.workspaceGeneration += 1;
     this.remoteInitialized = false;
     this.remoteRevision = { timeframe: 0, shared: 0 };
-    this.pendingMutations = [];
-    this.dirtyScopes.clear();
+    this.pendingBeforeInitialLoad = [];
+    this.remoteQueue = [];
 
     if (this.saveTimer != null && typeof window !== "undefined") {
       window.clearTimeout(this.saveTimer);
@@ -325,77 +345,59 @@ export class DrawingStore {
     if (existingIndex >= 0) {
       const previousScope = scopeForDrawing(this.drawings[existingIndex]);
       const nextScope = scopeForDrawing(drawing);
-      this.drawings[existingIndex] = cloneDrawing(drawing);
 
       if (previousScope !== nextScope) {
-        this.recordMutation({
+        this.commitMutation({
           kind: "remove",
           id: drawing.id,
           scope: previousScope,
         });
       }
-    } else {
-      this.drawings.push(cloneDrawing(drawing));
     }
 
-    this.recordMutation({ kind: "upsert", drawing: cloneDrawing(drawing) });
-    this.saveLocal();
-    this.scheduleRemoteSave();
+    this.commitMutation({ kind: "upsert", drawing: cloneDrawing(drawing) });
   }
 
   update(updated: ChartDrawing): void {
-    const index = this.drawings.findIndex(
+    const existing = this.drawings.find(
       (drawing) => drawing.id === updated.id,
     );
+    if (!existing) return;
 
-    if (index < 0) return;
-
-    const previousScope = scopeForDrawing(this.drawings[index]);
+    const previousScope = scopeForDrawing(existing);
     const nextScope = scopeForDrawing(updated);
-    this.drawings[index] = cloneDrawing(updated);
 
     if (previousScope !== nextScope) {
-      this.recordMutation({
+      this.commitMutation({
         kind: "remove",
         id: updated.id,
         scope: previousScope,
       });
     }
 
-    this.recordMutation({ kind: "upsert", drawing: cloneDrawing(updated) });
-    this.saveLocal();
-    this.scheduleRemoteSave();
+    this.commitMutation({ kind: "upsert", drawing: cloneDrawing(updated) });
   }
 
   remove(id: string): void {
     const drawing = this.drawings.find((item) => item.id === id);
     if (!drawing) return;
 
-    this.drawings = this.drawings.filter((item) => item.id !== id);
-    this.recordMutation({
+    this.commitMutation({
       kind: "remove",
       id,
       scope: scopeForDrawing(drawing),
     });
-    this.saveLocal();
-    this.scheduleRemoteSave();
   }
 
   clear(): void {
-    this.drawings = [];
-    this.recordMutation({ kind: "clear", scope: "all" });
-    this.saveLocal();
-    this.scheduleRemoteSave();
+    this.commitMutation({ kind: "clear", scope: "all" });
   }
 
   setAll(drawings: ChartDrawing[]): void {
-    this.drawings = cloneDrawings(drawings);
-    this.recordMutation({
+    this.commitMutation({
       kind: "replace",
       drawings: cloneDrawings(drawings),
     });
-    this.saveLocal();
-    this.scheduleRemoteSave();
   }
 
   reload(): void {
@@ -404,63 +406,46 @@ export class DrawingStore {
     void this.refreshFromBackend(true);
   }
 
-  private recordMutation(mutation: PendingMutation): void {
-    if (!this.remoteInitialized) {
-      this.pendingMutations.push(mutation);
-      return;
-    }
+  private commitMutation(mutation: DrawingMutation): void {
+    this.drawings = applyMutation(this.drawings, mutation);
+    this.saveLocal();
 
-    for (const scope of mutationScopes(mutation)) {
-      this.dirtyScopes.add(scope);
+    if (this.remoteInitialized) {
+      this.remoteQueue.push(...expandRemoteMutations(mutation));
+      this.compactRemoteQueue();
+      this.scheduleRemoteSave();
+    } else {
+      this.pendingBeforeInitialLoad.push(mutation);
     }
   }
 
   private loadLocal(): void {
-    if (!canUseLocalStorage()) {
-      this.drawings = [];
-      return;
-    }
-
     const timeframeDrawings = parseStoredDrawings(
       this.storageKey,
       (drawing) => drawing.type !== "marketStructure",
     );
-
-    const symbolMarketStructures = parseStoredDrawings(
+    const sharedDrawings = parseStoredDrawings(
       this.marketStructureStorageKey,
       (drawing) => drawing.type === "marketStructure",
     );
 
-    this.drawings = mergeScopes(
-      timeframeDrawings,
-      symbolMarketStructures,
-    );
+    this.drawings = mergeScopes(timeframeDrawings, sharedDrawings);
   }
 
   private saveLocal(): void {
     if (!canUseLocalStorage()) return;
 
-    const timeframeDrawings = drawingsForScope(
-      this.drawings,
-      "timeframe",
-    );
-    const symbolMarketStructures = drawingsForScope(
-      this.drawings,
-      "shared",
-    );
-
     try {
       window.localStorage.setItem(
         this.storageKey,
-        JSON.stringify(timeframeDrawings),
+        JSON.stringify(drawingsForScope(this.drawings, "timeframe")),
       );
-
       window.localStorage.setItem(
         this.marketStructureStorageKey,
-        JSON.stringify(symbolMarketStructures),
+        JSON.stringify(drawingsForScope(this.drawings, "shared")),
       );
     } catch (error) {
-      console.warn("[DrawingStore] failed to save drawings", {
+      console.warn("[DrawingStore] failed to save local drawings", {
         storageKey: this.storageKey,
         marketStructureStorageKey: this.marketStructureStorageKey,
         error,
@@ -472,10 +457,7 @@ export class DrawingStore {
     return scope === "shared" ? SHARED_SCOPE : this.timeframe;
   }
 
-  private remoteUrl(
-    symbol: string,
-    scopeName: string,
-  ): string {
+  private remoteUrl(symbol: string, scopeName: string): string {
     return `${API_BASE}/chart/drawings/${encodeURIComponent(symbol)}/${encodeURIComponent(scopeName)}`;
   }
 
@@ -496,93 +478,108 @@ export class DrawingStore {
       );
     }
 
-    const payload = await response.json() as Record<string, unknown>;
-    const raw = Array.isArray(payload.drawings)
-      ? payload.drawings
-      : Array.isArray(payload.items)
-        ? payload.items
+    return this.parseRemoteDocument(await response.json(), scope);
+  }
+
+  private parseRemoteDocument(
+    payload: unknown,
+    scope: DrawingScope,
+  ): RemoteDrawingDocument {
+    const record =
+      payload != null && typeof payload === "object"
+        ? (payload as Record<string, unknown>)
+        : {};
+    const raw = Array.isArray(record.drawings)
+      ? record.drawings
+      : Array.isArray(record.items)
+        ? record.items
         : [];
-
-    const drawings = cloneDrawings(
-      raw
-        .filter(isValidDrawing)
-        .filter((drawing) => scopeForDrawing(drawing) === scope),
-    );
-
-    const revisionValue = Number(payload.revision ?? 0);
+    const revision = Number(record.revision ?? 0);
 
     return {
-      drawings,
-      exists: payload.exists === true,
-      revision: Number.isFinite(revisionValue)
-        ? Math.max(0, revisionValue)
-        : 0,
+      drawings: cloneDrawings(
+        raw
+          .filter(isValidDrawing)
+          .filter((drawing) => scopeForDrawing(drawing) === scope),
+      ),
+      exists: record.exists !== false,
+      revision: Number.isFinite(revision) ? Math.max(0, revision) : 0,
       updatedAt:
-        typeof payload.updatedAt === "number" ||
-        typeof payload.updatedAt === "string"
-          ? payload.updatedAt
+        typeof record.updatedAt === "number" ||
+        typeof record.updatedAt === "string"
+          ? record.updatedAt
           : null,
     };
   }
 
-  private async putRemoteScope(
+  private async sendAtomicMutation(
     symbol: string,
-    scopeName: string,
-    drawings: ChartDrawing[],
+    timeframe: string,
+    mutation: ScopedRemoteMutation,
   ): Promise<number> {
-    const response = await fetch(this.remoteUrl(symbol, scopeName), {
-      method: "PUT",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ drawings: cloneDrawings(drawings) }),
-    });
+    const scopeName =
+      mutation.scope === "shared" ? SHARED_SCOPE : timeframe;
+    const baseUrl = this.remoteUrl(symbol, scopeName);
+
+    let response: Response;
+
+    if (mutation.kind === "upsert") {
+      response = await fetch(`${baseUrl}/upsert`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ drawing: cloneDrawing(mutation.drawing) }),
+      });
+    } else if (mutation.kind === "remove") {
+      response = await fetch(`${baseUrl}/remove`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ id: mutation.id }),
+      });
+    } else {
+      response = await fetch(`${baseUrl}/clear`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+    }
 
     if (!response.ok) {
+      const detail = await response.text();
       throw new Error(
-        `Drawing save failed (${response.status}) for ${symbol}/${scopeName}`,
+        `Drawing ${mutation.kind} failed (${response.status}) for ${symbol}/${scopeName}: ${detail}`,
       );
     }
 
-    const payload = await response.json() as Record<string, unknown>;
-    const revisionValue = Number(payload.revision ?? 0);
-    return Number.isFinite(revisionValue)
-      ? Math.max(0, revisionValue)
-      : 0;
+    const payload = (await response.json()) as Record<string, unknown>;
+    const revision = Number(payload.revision ?? 0);
+    return Number.isFinite(revision) ? Math.max(0, revision) : 0;
   }
 
   private async refreshFromBackend(initial: boolean): Promise<void> {
     if (this.destroyed) return;
 
     if (this.refreshInFlight) {
-      if (initial) this.refreshRequestedInitial = true;
+      this.refreshRequested = true;
       return;
     }
 
-    if (
-      !initial &&
-      (!this.remoteInitialized ||
-        this.saveInFlight ||
-        this.dirtyScopes.size > 0)
-    ) {
-      return;
-    }
+    if (!initial && (!this.remoteInitialized || this.saveInFlight)) return;
 
     const generation = this.workspaceGeneration;
     const symbol = this.symbol;
-    const timeframeScope = this.timeframe;
+    const timeframe = this.timeframe;
     const localSnapshot = cloneDrawings(this.drawings);
 
     this.refreshInFlight = true;
 
     try {
       const [timeframeRemote, sharedRemote] = await Promise.all([
-        this.fetchRemoteScope(
-          symbol,
-          timeframeScope,
-          "timeframe",
-        ),
+        this.fetchRemoteScope(symbol, timeframe, "timeframe"),
         this.fetchRemoteScope(symbol, SHARED_SCOPE, "shared"),
       ]);
 
@@ -590,116 +587,147 @@ export class DrawingStore {
         this.destroyed ||
         generation !== this.workspaceGeneration ||
         symbol !== this.symbol ||
-        timeframeScope !== this.timeframe
+        timeframe !== this.timeframe
       ) {
         return;
       }
 
       if (initial || !this.remoteInitialized) {
-        const localTimeframe = drawingsForScope(
-          localSnapshot,
-          "timeframe",
-        );
+        const localTimeframe = drawingsForScope(localSnapshot, "timeframe");
         const localShared = drawingsForScope(localSnapshot, "shared");
 
         let next = mergeScopes(
           timeframeRemote.exists
             ? timeframeRemote.drawings
             : localTimeframe,
-          sharedRemote.exists
-            ? sharedRemote.drawings
-            : localShared,
+          sharedRemote.exists ? sharedRemote.drawings : localShared,
         );
 
-        for (const mutation of this.pendingMutations) {
+        for (const mutation of this.pendingBeforeInitialLoad) {
           next = applyMutation(next, mutation);
-          for (const scope of mutationScopes(mutation)) {
-            this.dirtyScopes.add(scope);
+          this.remoteQueue.push(...expandRemoteMutations(mutation));
+        }
+
+        if (!timeframeRemote.exists) {
+          for (const drawing of localTimeframe) {
+            this.remoteQueue.push({
+              kind: "upsert",
+              scope: "timeframe",
+              drawing: cloneDrawing(drawing),
+            });
           }
         }
 
-        if (!timeframeRemote.exists && localTimeframe.length > 0) {
-          this.dirtyScopes.add("timeframe");
-        }
-
-        if (!sharedRemote.exists && localShared.length > 0) {
-          this.dirtyScopes.add("shared");
+        if (!sharedRemote.exists) {
+          for (const drawing of localShared) {
+            this.remoteQueue.push({
+              kind: "upsert",
+              scope: "shared",
+              drawing: cloneDrawing(drawing),
+            });
+          }
         }
 
         const changed = !drawingsEqual(this.drawings, next);
         this.drawings = cloneDrawings(next);
-        this.pendingMutations = [];
+        this.pendingBeforeInitialLoad = [];
         this.remoteInitialized = true;
         this.remoteRevision = {
           timeframe: timeframeRemote.revision,
           shared: sharedRemote.revision,
         };
+        this.compactRemoteQueue();
         this.saveLocal();
 
-        if (changed) {
-          this.notifyListeners();
-        }
-
+        if (changed) this.notifyListeners();
         this.scheduleRemoteSave();
         return;
       }
 
-      let nextTimeframe = drawingsForScope(
+      if (this.remoteQueue.length > 0) return;
+
+      const currentTimeframe = drawingsForScope(
         this.drawings,
         "timeframe",
       );
-      let nextShared = drawingsForScope(this.drawings, "shared");
-      let changed = false;
+      const currentShared = drawingsForScope(this.drawings, "shared");
+      let nextTimeframe = currentTimeframe;
+      let nextShared = currentShared;
+      let revisionChanged = false;
 
-      if (
-        timeframeRemote.exists &&
-        timeframeRemote.revision !== this.remoteRevision.timeframe
-      ) {
+      if (timeframeRemote.revision !== this.remoteRevision.timeframe) {
         nextTimeframe = timeframeRemote.drawings;
         this.remoteRevision.timeframe = timeframeRemote.revision;
-        changed = true;
+        revisionChanged = true;
       }
 
-      if (
-        sharedRemote.exists &&
-        sharedRemote.revision !== this.remoteRevision.shared
-      ) {
+      if (sharedRemote.revision !== this.remoteRevision.shared) {
         nextShared = sharedRemote.drawings;
         this.remoteRevision.shared = sharedRemote.revision;
-        changed = true;
+        revisionChanged = true;
       }
 
-      if (changed) {
+      if (revisionChanged) {
         const next = mergeScopes(nextTimeframe, nextShared);
-        const actuallyChanged = !drawingsEqual(this.drawings, next);
+        const changed = !drawingsEqual(this.drawings, next);
         this.drawings = next;
         this.saveLocal();
-
-        if (actuallyChanged) {
-          this.notifyListeners();
-        }
+        if (changed) this.notifyListeners();
       }
     } catch (error) {
       console.warn("[DrawingStore] backend drawing sync failed", {
         symbol,
-        timeframe: timeframeScope,
+        timeframe,
         error,
       });
     } finally {
       this.refreshInFlight = false;
 
-      if (this.refreshRequestedInitial && !this.destroyed) {
-        this.refreshRequestedInitial = false;
-        void this.refreshFromBackend(true);
+      if (this.refreshRequested && !this.destroyed) {
+        this.refreshRequested = false;
+        void this.refreshFromBackend(false);
       }
     }
+  }
+
+  private compactRemoteQueue(): void {
+    const compacted: ScopedRemoteMutation[] = [];
+
+    for (const mutation of this.remoteQueue) {
+      if (mutation.kind === "clear") {
+        for (let index = compacted.length - 1; index >= 0; index -= 1) {
+          if (compacted[index].scope === mutation.scope) {
+            compacted.splice(index, 1);
+          }
+        }
+        compacted.push(mutation);
+        continue;
+      }
+
+      const id = mutation.kind === "upsert" ? mutation.drawing.id : mutation.id;
+      for (let index = compacted.length - 1; index >= 0; index -= 1) {
+        const existing = compacted[index];
+        if (existing.scope !== mutation.scope || existing.kind === "clear") {
+          continue;
+        }
+        const existingId =
+          existing.kind === "upsert" ? existing.drawing.id : existing.id;
+        if (existingId === id) {
+          compacted.splice(index, 1);
+          break;
+        }
+      }
+      compacted.push(mutation);
+    }
+
+    this.remoteQueue = compacted;
   }
 
   private scheduleRemoteSave(): void {
     if (
       this.destroyed ||
       !this.remoteInitialized ||
-      this.dirtyScopes.size === 0 ||
+      this.remoteQueue.length === 0 ||
       typeof window === "undefined"
     ) {
       return;
@@ -720,7 +748,7 @@ export class DrawingStore {
       this.destroyed ||
       !this.remoteInitialized ||
       this.saveInFlight ||
-      this.dirtyScopes.size === 0
+      this.remoteQueue.length === 0
     ) {
       return;
     }
@@ -728,35 +756,23 @@ export class DrawingStore {
     const generation = this.workspaceGeneration;
     const symbol = this.symbol;
     const timeframe = this.timeframe;
-    const scopes = Array.from(this.dirtyScopes);
-    const snapshot = cloneDrawings(this.drawings);
-
-    for (const scope of scopes) {
-      this.dirtyScopes.delete(scope);
-    }
-
+    const batch = this.remoteQueue.splice(0, this.remoteQueue.length);
     this.saveInFlight = true;
 
     try {
-      const results = await Promise.all(
-        scopes.map(async (scope) => {
-          const scopeName = scope === "shared" ? SHARED_SCOPE : timeframe;
-          const revision = await this.putRemoteScope(
-            symbol,
-            scopeName,
-            drawingsForScope(snapshot, scope),
-          );
-          return { scope, revision };
-        }),
-      );
+      for (const mutation of batch) {
+        const revision = await this.sendAtomicMutation(
+          symbol,
+          timeframe,
+          mutation,
+        );
 
-      if (
-        generation === this.workspaceGeneration &&
-        symbol === this.symbol &&
-        timeframe === this.timeframe
-      ) {
-        for (const result of results) {
-          this.remoteRevision[result.scope] = result.revision;
+        if (
+          generation === this.workspaceGeneration &&
+          symbol === this.symbol &&
+          timeframe === this.timeframe
+        ) {
+          this.remoteRevision[mutation.scope] = revision;
         }
       }
     } catch (error) {
@@ -765,15 +781,13 @@ export class DrawingStore {
         symbol === this.symbol &&
         timeframe === this.timeframe
       ) {
-        for (const scope of scopes) {
-          this.dirtyScopes.add(scope);
-        }
+        this.remoteQueue.unshift(...batch);
+        this.compactRemoteQueue();
       }
 
       console.warn("[DrawingStore] backend drawing save failed", {
         symbol,
         timeframe,
-        scopes,
         error,
       });
     } finally {
@@ -781,18 +795,17 @@ export class DrawingStore {
 
       if (
         generation === this.workspaceGeneration &&
-        this.dirtyScopes.size > 0
+        this.remoteQueue.length > 0
       ) {
         this.scheduleRemoteSave();
+      } else if (generation === this.workspaceGeneration) {
+        void this.refreshFromBackend(false);
       }
     }
   }
 
   private notifyListeners(): void {
     const snapshot = cloneDrawings(this.drawings);
-
-    for (const listener of this.listeners) {
-      listener(snapshot);
-    }
+    for (const listener of this.listeners) listener(snapshot);
   }
 }
