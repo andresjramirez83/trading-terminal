@@ -276,6 +276,7 @@ export class ChartEngine {
   private positionOverlayEngine: PositionOverlayEngine;
   private positionOverlayRenderer: PositionOverlayRenderer;
   private unsubscribePositionOverlay: (() => void) | null = null;
+  private unsubscribeAnalysisStore: (() => void) | null = null;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -396,6 +397,9 @@ export class ChartEngine {
 
     this.analysisRenderer = new AnalysisRenderer(this.chart);
     this.studyRenderer = new StudyRenderer(this.chart, this.container, this.series.candles);
+    this.unsubscribeAnalysisStore = this.analysisStore.subscribe(() => {
+      this.renderFxAnalysis();
+    });
     this.positionOverlayEngine = new PositionOverlayEngine();
     this.positionOverlayRenderer = new PositionOverlayRenderer(
       this.series.candles,
@@ -1255,6 +1259,9 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     this.interactionManager.destroy();
     this.crosshairListeners.clear();
     this.analysisRenderer.clear();
+    this.unsubscribeAnalysisStore?.();
+    this.unsubscribeAnalysisStore = null;
+    this.analysisStore.destroy();
     this.unsubscribePositionOverlay?.();
     this.unsubscribePositionOverlay = null;
     this.positionOverlayRenderer.destroy();

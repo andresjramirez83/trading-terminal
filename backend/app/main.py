@@ -156,6 +156,10 @@ class ManualWatchlistPayload(BaseModel):
     symbols: List[str] = []
 
 
+class ChartPreferencesPayload(BaseModel):
+    preferences: Dict[str, Any] = {}
+
+
 APP_STATE_DIR = Path(__file__).resolve().parent / "data" / "app_state"
 APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
 ALPACA_APP_STATE_FILE = APP_STATE_DIR / "alpaca_state.json"
@@ -258,6 +262,9 @@ def _empty_alpaca_state() -> Dict[str, Any]:
         "manualWatchlist": [],
         "manualWatchlistUpdatedAt": None,
         "studyVisibility": {},
+        "chartPreferences": {},
+        "chartPreferencesRevision": 0,
+        "chartPreferencesUpdatedAt": None,
         "chartRanges": {},
         "updatedAt": None,
     }
@@ -284,6 +291,9 @@ def _read_alpaca_state_unlocked() -> Dict[str, Any]:
         "manualWatchlist": data.get("manualWatchlist") if isinstance(data.get("manualWatchlist"), list) else [],
         "manualWatchlistUpdatedAt": data.get("manualWatchlistUpdatedAt"),
         "studyVisibility": data.get("studyVisibility") if isinstance(data.get("studyVisibility"), dict) else {},
+        "chartPreferences": data.get("chartPreferences") if isinstance(data.get("chartPreferences"), dict) else {},
+        "chartPreferencesRevision": max(0, int(data.get("chartPreferencesRevision") or 0)),
+        "chartPreferencesUpdatedAt": data.get("chartPreferencesUpdatedAt"),
         "chartRanges": data.get("chartRanges") if isinstance(data.get("chartRanges"), dict) else {},
         "updatedAt": data.get("updatedAt"),
     }
@@ -2884,8 +2894,62 @@ def put_shared_alpaca_state(payload: SharedAlpacaStatePayload):
         else:
             clean["manualWatchlistUpdatedAt"] = None
 
+        # Chart preferences have their own atomic endpoint. Preserve them when
+        # an older browser saves the legacy full Alpaca state document.
+        clean["chartPreferences"] = existing.get("chartPreferences") or {}
+        clean["chartPreferencesRevision"] = max(
+            0, int(existing.get("chartPreferencesRevision") or 0)
+        )
+        clean["chartPreferencesUpdatedAt"] = existing.get(
+            "chartPreferencesUpdatedAt"
+        )
+
         _write_alpaca_state_unlocked(clean)
         return clean
+
+
+@app.get("/app-state/alpaca/chart-preferences")
+def get_chart_preferences():
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        preferences = state.get("chartPreferences")
+        if not isinstance(preferences, dict):
+            preferences = {}
+
+        return {
+            "preferences": preferences,
+            "exists": bool(preferences),
+            "revision": max(
+                0, int(state.get("chartPreferencesRevision") or 0)
+            ),
+            "updatedAt": state.get("chartPreferencesUpdatedAt"),
+        }
+
+
+@app.put("/app-state/alpaca/chart-preferences")
+def put_chart_preferences(payload: ChartPreferencesPayload):
+    preferences = (
+        payload.preferences if isinstance(payload.preferences, dict) else {}
+    )
+    updated_at = datetime.now(timezone.utc).timestamp() * 1000
+
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        revision = max(
+            0, int(state.get("chartPreferencesRevision") or 0)
+        ) + 1
+        state["chartPreferences"] = preferences
+        state["chartPreferencesRevision"] = revision
+        state["chartPreferencesUpdatedAt"] = updated_at
+        state["updatedAt"] = updated_at
+        _write_alpaca_state_unlocked(state)
+
+    return {
+        "preferences": preferences,
+        "exists": True,
+        "revision": revision,
+        "updatedAt": updated_at,
+    }
 
 
 @app.get("/app-state/alpaca/manual-watchlist")
@@ -3819,6 +3883,7 @@ async def scanner_v2_run(
 # hitting the same cloud backend.
 CHART_STORAGE_DIR = Path(__file__).resolve().parent / "data" / "chart_storage"
 CHART_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+CHART_STORAGE_LOCAL_LOCK = threading.RLock()
 
 
 def _clean_chart_part(value: str) -> str:
@@ -3844,43 +3909,220 @@ def _extract_chart_items(data: Any, kind: str) -> List[Dict[str, Any]]:
             return [item for item in data["trendlines"] if isinstance(item, dict)]
         if kind == "projections" and isinstance(data.get("projections"), list):
             return [item for item in data["projections"] if isinstance(item, dict)]
+        if kind == "drawings" and isinstance(data.get("drawings"), list):
+            return [item for item in data["drawings"] if isinstance(item, dict)]
     return []
 
 
-def _read_chart_items(symbol: str, scope: str, kind: str) -> List[Dict[str, Any]]:
+@contextmanager
+def _locked_chart_storage(path: Path):
+    """Serialize chart document updates across threads and Gunicorn workers."""
+    with CHART_STORAGE_LOCAL_LOCK:
+        lock_path = path.with_name(f"{path.name}.lock")
+        lock_handle = lock_path.open("a+")
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            lock_handle.close()
+
+
+def _read_chart_document_unlocked(
+    symbol: str,
+    scope: str,
+    kind: str,
+) -> Dict[str, Any]:
     path = _chart_storage_file(symbol, scope, kind)
     if not path.exists():
-        return []
+        return {
+            "items": [],
+            "exists": False,
+            "revision": 0,
+            "updatedAt": None,
+        }
+
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return _extract_chart_items(data, kind)
+        revision = int(data.get("revision") or 0) if isinstance(data, dict) else 0
+        updated_at = data.get("updatedAt") if isinstance(data, dict) else None
+        return {
+            "items": _extract_chart_items(data, kind),
+            "exists": True,
+            "revision": max(0, revision),
+            "updatedAt": updated_at,
+        }
     except Exception as exc:
         print(f"[chart-storage] read error {path}: {exc}", flush=True)
-        return []
+        return {
+            "items": [],
+            "exists": True,
+            "revision": 0,
+            "updatedAt": None,
+        }
+
+
+def _read_chart_document(
+    symbol: str,
+    scope: str,
+    kind: str,
+) -> Dict[str, Any]:
+    path = _chart_storage_file(symbol, scope, kind)
+    with _locked_chart_storage(path):
+        return _read_chart_document_unlocked(symbol, scope, kind)
+
+
+def _read_chart_items(symbol: str, scope: str, kind: str) -> List[Dict[str, Any]]:
+    return _read_chart_document(symbol, scope, kind)["items"]
+
+
+def _chart_document_payload(
+    symbol: str,
+    scope: str,
+    kind: str,
+    items: List[Dict[str, Any]],
+    revision: int,
+    updated_at: str,
+) -> Dict[str, Any]:
+    key = {
+        "trendlines": "trendlines",
+        "projections": "projections",
+        "drawings": "drawings",
+    }.get(kind, "items")
+
+    return {
+        key: items,
+        "items": items,
+        "exists": True,
+        "revision": revision,
+        "updatedAt": updated_at,
+        "symbol": _clean_chart_part(symbol),
+        "scope": _clean_chart_part(scope),
+        "kind": kind,
+        "count": len(items),
+    }
+
+
+def _write_chart_document_unlocked(
+    symbol: str,
+    scope: str,
+    kind: str,
+    items: List[Dict[str, Any]],
+    revision: int,
+) -> Dict[str, Any]:
+    path = _chart_storage_file(symbol, scope, kind)
+    updated_at = datetime.now(timezone.utc).isoformat()
+    payload = _chart_document_payload(
+        symbol,
+        scope,
+        kind,
+        items,
+        revision,
+        updated_at,
+    )
+    tmp_file = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    tmp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_file.replace(path)
+    return payload
 
 
 def _write_chart_items(symbol: str, scope: str, kind: str, items: Any) -> Dict[str, Any]:
     path = _chart_storage_file(symbol, scope, kind)
     payload = _extract_chart_items(items, kind)
-    tmp_file = path.with_suffix(".tmp")
-    # Store as an object so both backend alerts and frontend readers have a stable shape.
-    key = "trendlines" if kind == "trendlines" else "projections"
-    tmp_file.write_text(json.dumps({key: payload}, indent=2), encoding="utf-8")
-    tmp_file.replace(path)
-    return {
-        "ok": True,
-        "symbol": _clean_chart_part(symbol),
-        "scope": _clean_chart_part(scope),
-        "kind": kind,
-        "count": len(payload),
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-    }
+
+    with _locked_chart_storage(path):
+        current = _read_chart_document_unlocked(symbol, scope, kind)
+        revision = max(0, int(current.get("revision") or 0)) + 1
+        result = _write_chart_document_unlocked(
+            symbol,
+            scope,
+            kind,
+            payload,
+            revision,
+        )
+
+    return {"ok": True, **result}
+
+
+def _mutate_chart_item(
+    symbol: str,
+    scope: str,
+    kind: str,
+    operation: str,
+    payload: Any = None,
+) -> Dict[str, Any]:
+    path = _chart_storage_file(symbol, scope, kind)
+
+    with _locked_chart_storage(path):
+        current = _read_chart_document_unlocked(symbol, scope, kind)
+        items = list(current.get("items") or [])
+
+        if operation == "upsert":
+            record = payload if isinstance(payload, dict) else {}
+            item = record.get("item")
+            if not isinstance(item, dict):
+                item = record.get("drawing")
+            if not isinstance(item, dict) or not str(item.get("id") or "").strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="A chart item with an id is required",
+                )
+
+            item_id = str(item["id"])
+            index = next(
+                (
+                    idx
+                    for idx, existing in enumerate(items)
+                    if str(existing.get("id") or "") == item_id
+                ),
+                -1,
+            )
+            if index >= 0:
+                items[index] = item
+            else:
+                items.append(item)
+        elif operation == "remove":
+            record = payload if isinstance(payload, dict) else {}
+            item_id = str(record.get("id") or "").strip()
+            if not item_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="A chart item id is required",
+                )
+            items = [
+                item
+                for item in items
+                if str(item.get("id") or "") != item_id
+            ]
+        elif operation == "clear":
+            items = []
+        else:
+            raise HTTPException(status_code=400, detail="Invalid chart mutation")
+
+        revision = max(0, int(current.get("revision") or 0)) + 1
+        result = _write_chart_document_unlocked(
+            symbol,
+            scope,
+            kind,
+            items,
+            revision,
+        )
+
+    return {"ok": True, **result}
 
 
 @app.get("/chart/trendlines/{symbol}/{scope}")
 def get_chart_trendlines(symbol: str, scope: str):
-    rows = _read_chart_items(symbol, scope, "trendlines")
-    return {"trendlines": rows, "items": rows}
+    document = _read_chart_document(symbol, scope, "trendlines")
+    rows = document["items"]
+    return {"trendlines": rows, **document}
 
 
 @app.put("/chart/trendlines/{symbol}/{scope}")
@@ -3890,13 +4132,56 @@ def put_chart_trendlines(symbol: str, scope: str, items: Any = Body(default=[]))
 
 @app.get("/chart/projections/{symbol}/{scope}")
 def get_chart_projections(symbol: str, scope: str):
-    rows = _read_chart_items(symbol, scope, "projections")
-    return {"projections": rows, "items": rows}
+    document = _read_chart_document(symbol, scope, "projections")
+    rows = document["items"]
+    return {"projections": rows, **document}
 
 
 @app.put("/chart/projections/{symbol}/{scope}")
 def put_chart_projections(symbol: str, scope: str, items: Any = Body(default=[])):
     return _write_chart_items(symbol, scope, "projections", items)
+
+
+@app.post("/chart/projections/{symbol}/{scope}/upsert")
+def upsert_chart_projection(symbol: str, scope: str, payload: dict = Body(default={})):
+    return _mutate_chart_item(symbol, scope, "projections", "upsert", payload)
+
+
+@app.post("/chart/projections/{symbol}/{scope}/remove")
+def remove_chart_projection(symbol: str, scope: str, payload: dict = Body(default={})):
+    return _mutate_chart_item(symbol, scope, "projections", "remove", payload)
+
+
+@app.post("/chart/projections/{symbol}/{scope}/clear")
+def clear_chart_projections(symbol: str, scope: str):
+    return _mutate_chart_item(symbol, scope, "projections", "clear")
+
+
+@app.get("/chart/drawings/{symbol}/{scope}")
+def get_chart_drawings(symbol: str, scope: str):
+    document = _read_chart_document(symbol, scope, "drawings")
+    rows = document["items"]
+    return {"drawings": rows, **document}
+
+
+@app.put("/chart/drawings/{symbol}/{scope}")
+def put_chart_drawings(symbol: str, scope: str, items: Any = Body(default=[])):
+    return _write_chart_items(symbol, scope, "drawings", items)
+
+
+@app.post("/chart/drawings/{symbol}/{scope}/upsert")
+def upsert_chart_drawing(symbol: str, scope: str, payload: dict = Body(default={})):
+    return _mutate_chart_item(symbol, scope, "drawings", "upsert", payload)
+
+
+@app.post("/chart/drawings/{symbol}/{scope}/remove")
+def remove_chart_drawing(symbol: str, scope: str, payload: dict = Body(default={})):
+    return _mutate_chart_item(symbol, scope, "drawings", "remove", payload)
+
+
+@app.post("/chart/drawings/{symbol}/{scope}/clear")
+def clear_chart_drawings(symbol: str, scope: str):
+    return _mutate_chart_item(symbol, scope, "drawings", "clear")
 
 
 

@@ -60,6 +60,7 @@ import {
   normalizeChartSettings,
   type ChartSettings,
 } from "./ChartSettingsTypes";
+import { API_BASE } from "../../services/api";
 
 const TIMEFRAME_STORAGE_KEY = "chartv2.timeframe";
 const STUDY_STORAGE_KEY = "chartv2.studyVisibility";
@@ -69,30 +70,83 @@ const FX_ANALYSIS_TOOL_STORAGE_KEY = "chartv2.fxAnalysisTool";
 const FX_ANALYSIS_SETTINGS_STORAGE_KEY = "chartv2.fxAnalysisSettings";
 const CHART_SETTINGS_STORAGE_KEY = "chartv2.chartSettings";
 const MARKET_DATA_MODE_STORAGE_KEY = "chartv2.marketDataMode";
+const CHART_PREFERENCES_POLL_MS = 3_000;
+const CHART_PREFERENCES_SAVE_DELAY_MS = 180;
+
+const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
+  vwap: true,
+  ema9: true,
+  ema20: true,
+  volume: true,
+  marketStructure: true,
+};
+
+type ChartPreferences = {
+  studyVisibility: StudyVisibility;
+  fxAnalysisSettings: FxAnalysisSettings;
+  chartSettings: ChartSettings;
+  drawingStyle: DrawingStyle;
+};
+
+function normalizeStudyVisibility(value: unknown): StudyVisibility {
+  const saved = value != null && typeof value === "object"
+    ? (value as Partial<StudyVisibility>)
+    : {};
+
+  return {
+    ...DEFAULT_STUDY_VISIBILITY,
+    ...saved,
+  };
+}
+
+function normalizeFxAnalysisSettings(value: unknown): FxAnalysisSettings {
+  const saved = value != null && typeof value === "object"
+    ? (value as Partial<FxAnalysisSettings>)
+    : {};
+
+  return {
+    supportPrediction: {
+      ...DEFAULT_FX_ANALYSIS_SETTINGS.supportPrediction,
+      ...(saved.supportPrediction ?? {}),
+    },
+    resistancePrediction: {
+      ...DEFAULT_FX_ANALYSIS_SETTINGS.resistancePrediction,
+      ...(saved.resistancePrediction ?? {}),
+    },
+    demandZone: {
+      ...DEFAULT_FX_ANALYSIS_SETTINGS.demandZone,
+      ...(saved.demandZone ?? {}),
+    },
+  };
+}
+
+function normalizeDrawingStyle(value: unknown): DrawingStyle {
+  const saved = value != null && typeof value === "object"
+    ? (value as Partial<DrawingStyle>)
+    : {};
+
+  return {
+    ...DEFAULT_DRAWING_STYLE,
+    ...saved,
+  };
+}
+
+function serializeChartPreferences(preferences: ChartPreferences): string {
+  return JSON.stringify(preferences);
+}
 
 interface Props {
   timeframe?: string;
 }
 
 function loadStudyVisibility(): StudyVisibility {
-  const fallback: StudyVisibility = {
-    vwap: true,
-    ema9: true,
-    ema20: true,
-    volume: true,
-    marketStructure: true,
-  };
-
   const saved = localStorage.getItem(STUDY_STORAGE_KEY);
-  if (!saved) return fallback;
+  if (!saved) return DEFAULT_STUDY_VISIBILITY;
 
   try {
-    return {
-      ...fallback,
-      ...JSON.parse(saved),
-    };
+    return normalizeStudyVisibility(JSON.parse(saved));
   } catch {
-    return fallback;
+    return DEFAULT_STUDY_VISIBILITY;
   }
 }
 
@@ -101,10 +155,7 @@ function loadDrawingStyle(): DrawingStyle {
   if (!saved) return DEFAULT_DRAWING_STYLE;
 
   try {
-    return {
-      ...DEFAULT_DRAWING_STYLE,
-      ...JSON.parse(saved),
-    };
+    return normalizeDrawingStyle(JSON.parse(saved));
   } catch {
     return DEFAULT_DRAWING_STYLE;
   }
@@ -115,22 +166,7 @@ function loadFxAnalysisSettings(): FxAnalysisSettings {
   if (!saved) return DEFAULT_FX_ANALYSIS_SETTINGS;
 
   try {
-    const parsed = JSON.parse(saved) as Partial<FxAnalysisSettings>;
-
-    return {
-      supportPrediction: {
-        ...DEFAULT_FX_ANALYSIS_SETTINGS.supportPrediction,
-        ...(parsed.supportPrediction ?? {}),
-      },
-      resistancePrediction: {
-        ...DEFAULT_FX_ANALYSIS_SETTINGS.resistancePrediction,
-        ...(parsed.resistancePrediction ?? {}),
-      },
-      demandZone: {
-        ...DEFAULT_FX_ANALYSIS_SETTINGS.demandZone,
-        ...(parsed.demandZone ?? {}),
-      },
-    };
+    return normalizeFxAnalysisSettings(JSON.parse(saved));
   } catch {
     return DEFAULT_FX_ANALYSIS_SETTINGS;
   }
@@ -239,6 +275,19 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     useState<FxAnalysisSettings>(loadFxAnalysisSettings);
   const [chartSettings, setChartSettings] =
     useState<ChartSettings>(loadChartSettings);
+  const chartPreferencesReadyRef = useRef(false);
+  const chartPreferencesRevisionRef = useRef(0);
+  const chartPreferencesRemoteSnapshotRef = useRef("");
+  const chartPreferencesCurrentSnapshotRef = useRef(
+    serializeChartPreferences({
+      studyVisibility,
+      fxAnalysisSettings,
+      chartSettings,
+      drawingStyle,
+    }),
+  );
+  const chartPreferencesSaveTimerRef = useRef<number | null>(null);
+  const chartPreferencesSaveInFlightRef = useRef(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(() => {
     return localStorage.getItem(RIGHT_PANEL_COLLAPSED_KEY) === "true";
   });
@@ -296,6 +345,168 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       setMarketDataMode("replay");
     }
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    let refreshInFlight = false;
+
+    const initialPreferences: ChartPreferences = {
+      studyVisibility,
+      fxAnalysisSettings,
+      chartSettings,
+      drawingStyle,
+    };
+
+    async function saveInitialPreferences(): Promise<void> {
+      chartPreferencesSaveInFlightRef.current = true;
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/app-state/alpaca/chart-preferences`,
+          {
+            method: "PUT",
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ preferences: initialPreferences }),
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(
+            `Chart preference save failed (${response.status})`,
+          );
+        }
+
+        const payload = (await response.json()) as Record<string, unknown>;
+        if (cancelled) return;
+
+        const revision = Number(payload.revision ?? 0);
+        const snapshot = serializeChartPreferences(initialPreferences);
+        chartPreferencesRevisionRef.current = Number.isFinite(revision)
+          ? Math.max(0, revision)
+          : 0;
+        chartPreferencesRemoteSnapshotRef.current = snapshot;
+        chartPreferencesCurrentSnapshotRef.current = snapshot;
+      } finally {
+        chartPreferencesSaveInFlightRef.current = false;
+      }
+    }
+
+    async function refreshPreferences(): Promise<void> {
+      if (
+        cancelled ||
+        refreshInFlight ||
+        chartPreferencesSaveInFlightRef.current
+      ) {
+        return;
+      }
+
+      if (
+        chartPreferencesReadyRef.current &&
+        chartPreferencesCurrentSnapshotRef.current !==
+          chartPreferencesRemoteSnapshotRef.current
+      ) {
+        return;
+      }
+
+      refreshInFlight = true;
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/app-state/alpaca/chart-preferences`,
+          {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            cache: "no-store",
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(
+            `Chart preference load failed (${response.status})`,
+          );
+        }
+
+        const payload = (await response.json()) as Record<string, unknown>;
+        if (cancelled) return;
+
+        const exists = payload.exists === true;
+        const revisionValue = Number(payload.revision ?? 0);
+        const revision = Number.isFinite(revisionValue)
+          ? Math.max(0, revisionValue)
+          : 0;
+
+        if (!exists && !chartPreferencesReadyRef.current) {
+          chartPreferencesReadyRef.current = true;
+          await saveInitialPreferences();
+          return;
+        }
+
+        if (
+          exists &&
+          (!chartPreferencesReadyRef.current ||
+            revision !== chartPreferencesRevisionRef.current)
+        ) {
+          const raw = payload.preferences;
+          const preferences = raw != null && typeof raw === "object"
+            ? (raw as Partial<ChartPreferences>)
+            : {};
+          const next: ChartPreferences = {
+            studyVisibility: normalizeStudyVisibility(
+              preferences.studyVisibility,
+            ),
+            fxAnalysisSettings: normalizeFxAnalysisSettings(
+              preferences.fxAnalysisSettings,
+            ),
+            chartSettings: normalizeChartSettings(
+              preferences.chartSettings,
+            ),
+            drawingStyle: normalizeDrawingStyle(
+              preferences.drawingStyle,
+            ),
+          };
+          const snapshot = serializeChartPreferences(next);
+
+          chartPreferencesRevisionRef.current = revision;
+          chartPreferencesRemoteSnapshotRef.current = snapshot;
+          chartPreferencesCurrentSnapshotRef.current = snapshot;
+          chartPreferencesReadyRef.current = true;
+
+          setStudyVisibility(next.studyVisibility);
+          setFxAnalysisSettings(next.fxAnalysisSettings);
+          setChartSettings(next.chartSettings);
+          setDrawingStyle(next.drawingStyle);
+        } else {
+          chartPreferencesReadyRef.current = true;
+        }
+      } catch (error) {
+        console.warn("[ChartPanel] chart preference sync failed", error);
+      } finally {
+        refreshInFlight = false;
+      }
+    }
+
+    void refreshPreferences();
+    const pollTimer = window.setInterval(
+      () => void refreshPreferences(),
+      CHART_PREFERENCES_POLL_MS,
+    );
+    const handleFocus = () => void refreshPreferences();
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollTimer);
+      window.removeEventListener("focus", handleFocus);
+
+      if (chartPreferencesSaveTimerRef.current != null) {
+        window.clearTimeout(chartPreferencesSaveTimerRef.current);
+        chartPreferencesSaveTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {}, [activeSymbol]);
 
@@ -731,6 +942,93 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   useEffect(() => {
     localStorage.setItem(STUDY_STORAGE_KEY, JSON.stringify(studyVisibility));
   }, [studyVisibility]);
+
+  useEffect(() => {
+    const preferences: ChartPreferences = {
+      studyVisibility,
+      fxAnalysisSettings,
+      chartSettings,
+      drawingStyle,
+    };
+    const snapshot = serializeChartPreferences(preferences);
+    chartPreferencesCurrentSnapshotRef.current = snapshot;
+
+    if (
+      !chartPreferencesReadyRef.current ||
+      snapshot === chartPreferencesRemoteSnapshotRef.current
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const save = async (): Promise<void> => {
+      chartPreferencesSaveTimerRef.current = null;
+      chartPreferencesSaveInFlightRef.current = true;
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/app-state/alpaca/chart-preferences`,
+          {
+            method: "PUT",
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ preferences }),
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(
+            `Chart preference save failed (${response.status})`,
+          );
+        }
+
+        const payload = (await response.json()) as Record<string, unknown>;
+        if (cancelled) return;
+
+        const revision = Number(payload.revision ?? 0);
+        chartPreferencesRevisionRef.current = Number.isFinite(revision)
+          ? Math.max(0, revision)
+          : chartPreferencesRevisionRef.current;
+        chartPreferencesRemoteSnapshotRef.current = snapshot;
+      } catch (error) {
+        if (cancelled) return;
+
+        console.warn("[ChartPanel] chart preference save failed", error);
+        chartPreferencesSaveTimerRef.current = window.setTimeout(
+          () => void save(),
+          CHART_PREFERENCES_POLL_MS,
+        );
+      } finally {
+        chartPreferencesSaveInFlightRef.current = false;
+      }
+    };
+
+    if (chartPreferencesSaveTimerRef.current != null) {
+      window.clearTimeout(chartPreferencesSaveTimerRef.current);
+    }
+
+    chartPreferencesSaveTimerRef.current = window.setTimeout(
+      () => void save(),
+      CHART_PREFERENCES_SAVE_DELAY_MS,
+    );
+
+    return () => {
+      cancelled = true;
+
+      if (chartPreferencesSaveTimerRef.current != null) {
+        window.clearTimeout(chartPreferencesSaveTimerRef.current);
+        chartPreferencesSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    studyVisibility,
+    fxAnalysisSettings,
+    chartSettings,
+    drawingStyle,
+  ]);
 
   useEffect(() => {
     localStorage.setItem(
