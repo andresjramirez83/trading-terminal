@@ -594,6 +594,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
     const executionService = getSharedExecutionGateway();
     const positionOverlay = new PositionOverlayManager(engine.series.candles, {
+      container,
       onCommit: async (change: PositionOverlayCommit) => {
         if (!change.isLive || !change.orderId) {
           console.warn(
@@ -641,7 +642,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             ]),
           );
 
-          if (change.level === "stop") {
+          if (change.level === "entry") {
+            tradeEngine.updateTrade(liveTrade.id, { entry: change.price });
+          } else if (change.level === "stop") {
             tradeEngine.updateStop(liveTrade.id, change.price);
           } else {
             tradeEngine.updateTarget(liveTrade.id, change.price);
@@ -814,7 +817,29 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         snapshot.openOrders,
       );
 
-      positionOverlayRef.current?.update(protection);
+      if (protection) {
+        positionOverlayRef.current?.update(protection);
+        return;
+      }
+
+      const safeSymbol = symbol.trim().toUpperCase();
+      const workingOrder = snapshot.openOrders.find(
+        (order) =>
+          order.symbol.trim().toUpperCase() === safeSymbol &&
+          Number(order.limitPrice) > 0,
+      );
+
+      positionOverlayRef.current?.updateWorkingOrder(
+        workingOrder
+          ? {
+              id: workingOrder.id,
+              symbol: workingOrder.symbol,
+              entry: Number(workingOrder.limitPrice),
+              stop: Number(workingOrder.stopPrice ?? 0),
+              target: Number(workingOrder.targetPrice ?? 0),
+            }
+          : null,
+      );
     };
 
     const unsubscribe = executionService.subscribe(applySnapshot);
