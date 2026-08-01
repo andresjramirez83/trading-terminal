@@ -1089,7 +1089,7 @@ export class ChartEngine {
     const timeScale = this.chart.timeScale();
     const barSpacing = Math.max(1, timeScale.options().barSpacing);
     timeScale.scrollToPosition(
-      timeScale.scrollPosition() + deltaX / barSpacing,
+      timeScale.scrollPosition() - deltaX / barSpacing,
       false,
     );
     this.scheduleSessionBandsRender();
