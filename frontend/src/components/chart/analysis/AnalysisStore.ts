@@ -520,7 +520,14 @@ export class AnalysisStore {
       return;
     }
 
-    if (!initial && (!this.remoteInitialized || this.saveInFlight)) return;
+    // A workspace change can arrive while the constructor's initial request is
+    // still in flight. When that stale request finishes it queues a normal
+    // refresh for the new symbol. Treat that refresh as the new workspace's
+    // initial load; otherwise remoteInitialized remains false forever and all
+    // later demand-zone creates/deletes stay local-only.
+    const shouldInitialize = initial || !this.remoteInitialized;
+
+    if (!shouldInitialize && this.saveInFlight) return;
 
     const generation = this.workspaceGeneration;
     const symbol = this.symbol;
@@ -538,7 +545,7 @@ export class AnalysisStore {
         return;
       }
 
-      if (initial || !this.remoteInitialized) {
+      if (shouldInitialize) {
         let next = remote.exists ? remote.items : localSnapshot;
 
         for (const mutation of this.pendingBeforeInitialLoad) {
