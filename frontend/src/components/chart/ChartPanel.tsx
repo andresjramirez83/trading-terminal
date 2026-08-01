@@ -729,7 +729,11 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       return event.clientY - rect.top;
     };
 
+    const isChartPointerEvent = (event: PointerEvent): boolean =>
+      event.target instanceof Node && container.contains(event.target);
+
     const handleOverlayPointerDown = (event: PointerEvent) => {
+      if (!isChartPointerEvent(event)) return;
       if (event.button !== 0) return;
       if (
         event.target instanceof Element &&
@@ -749,6 +753,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
     const handleOverlayPointerMove = (event: PointerEvent) => {
       if (!positionOverlay.isDragging()) {
+        if (!isChartPointerEvent(event)) return;
         const hit = positionOverlay.hitTest(getLocalY(event));
         container.style.cursor = hit ? "ns-resize" : "";
         return;
@@ -780,10 +785,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       event.stopImmediatePropagation();
     };
 
-    container.addEventListener("pointerdown", handleOverlayPointerDown, true);
-    container.addEventListener("pointermove", handleOverlayPointerMove, true);
-    container.addEventListener("pointerup", handleOverlayPointerUp, true);
-    container.addEventListener("pointercancel", handleOverlayPointerCancel, true);
+    // Listen above the chart container so an order-line drag is claimed before
+    // Lightweight Charts and ChartInteractionManager can begin a competing
+    // pan/scale gesture. Pointer capture keeps move/up delivery reliable even
+    // when the cursor leaves the plot while dragging.
+    window.addEventListener("pointerdown", handleOverlayPointerDown, true);
+    window.addEventListener("pointermove", handleOverlayPointerMove, true);
+    window.addEventListener("pointerup", handleOverlayPointerUp, true);
+    window.addEventListener("pointercancel", handleOverlayPointerCancel, true);
 
     const resize = () => engine.resize();
     window.addEventListener("resize", resize);
@@ -801,10 +810,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       unsubscribePointerDown();
       unsubscribePointerMove();
       unsubscribePointerUp();
-      container.removeEventListener("pointerdown", handleOverlayPointerDown, true);
-      container.removeEventListener("pointermove", handleOverlayPointerMove, true);
-      container.removeEventListener("pointerup", handleOverlayPointerUp, true);
-      container.removeEventListener("pointercancel", handleOverlayPointerCancel, true);
+      window.removeEventListener("pointerdown", handleOverlayPointerDown, true);
+      window.removeEventListener("pointermove", handleOverlayPointerMove, true);
+      window.removeEventListener("pointerup", handleOverlayPointerUp, true);
+      window.removeEventListener("pointercancel", handleOverlayPointerCancel, true);
       container.style.cursor = "";
       tradeController.detach();
       tradeControllerRef.current = null;
