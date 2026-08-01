@@ -11,17 +11,15 @@ async def bars(
     symbol: str = Query(..., min_length=1, max_length=10),
     timeframe: str = Query("1m"),
     session: str = Query("extended"),
+    date: str | None = Query(default=None),
+    lookback: str | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
 ):
     """
-    Historical chart bars.
+    Historical chart and replay bars.
 
-    Uses the configured MarketDataProvider.
-
-    MARKET_DATA_PROVIDER=alpaca
-
-    Uses the configured MarketDataProvider.
-
-Current provider: Alpaca.
+    Replay requests supply an exact trading date. Live chart requests
+    generally supply a rolling lookback window.
     """
     try:
         provider = get_market_data_provider()
@@ -30,6 +28,9 @@ Current provider: Alpaca.
             symbol=symbol,
             timeframe=timeframe,
             session=session,
+            date=date,
+            lookback=lookback,
+            limit=limit,
         )
 
         return BarsResponse(
