@@ -12,7 +12,7 @@ import { roundToTick } from "../../trading/pricing/TickSizeManager";
 type CandleSeriesApi = ISeriesApi<"Candlestick">;
 
 export type PositionOverlayLevel = "entry" | "stop" | "target";
-export type DraggablePositionOverlayLevel = "stop" | "target";
+export type DraggablePositionOverlayLevel = "entry" | "stop" | "target";
 
 export type PositionOverlaySnapshot = {
   symbol: string;
@@ -24,6 +24,8 @@ export type PositionOverlaySnapshot = {
   targetIsLive: boolean;
   stopOrderId: string | null;
   targetOrderId: string | null;
+  entryIsLive?: boolean;
+  entryOrderId?: string | null;
 };
 
 export type PositionOverlayCommit = {
@@ -35,6 +37,7 @@ export type PositionOverlayCommit = {
 };
 
 export type PositionOverlayManagerOptions = {
+  container?: HTMLDivElement;
   hitTolerancePx?: number;
   onCommit?: (
     change: PositionOverlayCommit,
@@ -124,6 +127,9 @@ export class PositionOverlayManager {
   private entryLine: IPriceLine | null = null;
   private stopLine: IPriceLine | null = null;
   private targetLine: IPriceLine | null = null;
+  private rewardShade: HTMLDivElement | null = null;
+  private riskShade: HTMLDivElement | null = null;
+  private animationFrame: number | null = null;
   private activeDrag: ActiveDrag | null = null;
   private committing = false;
 
@@ -137,6 +143,8 @@ export class PositionOverlayManager {
     targetIsLive: false,
     stopOrderId: null,
     targetOrderId: null,
+    entryIsLive: false,
+    entryOrderId: null,
   };
 
   constructor(
@@ -147,6 +155,12 @@ export class PositionOverlayManager {
     this.hitTolerancePx = Math.max(4, options.hitTolerancePx ?? 8);
     this.onCommit = options.onCommit;
     this.onDragStateChange = options.onDragStateChange;
+
+    if (options.container) {
+      this.rewardShade = this.createShade(options.container, "rgba(34,197,94,.14)");
+      this.riskShade = this.createShade(options.container, "rgba(239,68,68,.14)");
+      this.startShadeLoop();
+    }
   }
 
   getSnapshot(): PositionOverlaySnapshot {
@@ -184,16 +198,52 @@ export class PositionOverlayManager {
     this.render();
   }
 
+  updateWorkingOrder(order: {
+    id: string;
+    symbol: string;
+    entry: number;
+    stop: number;
+    target: number;
+  } | null): void {
+    if (!order || safePrice(order.entry) <= 0) {
+      this.update(null);
+      return;
+    }
+
+    const next: PositionOverlaySnapshot = {
+      symbol: cleanSymbol(order.symbol),
+      hasPosition: true,
+      entry: safePrice(order.entry),
+      stop: safePrice(order.stop),
+      target: safePrice(order.target),
+      stopIsLive: false,
+      targetIsLive: false,
+      stopOrderId: null,
+      targetOrderId: null,
+      entryIsLive: true,
+      entryOrderId: order.id,
+    };
+
+    if (this.activeDrag) {
+      next[this.activeDrag.level] = this.activeDrag.previewPrice;
+    }
+
+    this.snapshot = next;
+    this.render();
+  }
+
   hitTest(y: number): DraggablePositionOverlayLevel | null {
     if (!this.snapshot.hasPosition || this.committing) return null;
 
     const candidates: Array<{
       level: DraggablePositionOverlayLevel;
       price: number;
-    }> = [
-      { level: "stop", price: this.snapshot.stop },
-      { level: "target", price: this.snapshot.target },
-    ];
+    }> = this.snapshot.entryIsLive
+      ? [{ level: "entry", price: this.snapshot.entry }]
+      : [
+          { level: "stop", price: this.snapshot.stop },
+          { level: "target", price: this.snapshot.target },
+        ];
 
     let best:
       | {
@@ -228,8 +278,7 @@ export class PositionOverlayManager {
     const level = this.hitTest(y);
     if (!level) return false;
 
-    const originalPrice =
-      level === "stop" ? this.snapshot.stop : this.snapshot.target;
+    const originalPrice = this.snapshot[level];
 
     if (originalPrice <= 0) return false;
 
@@ -254,17 +303,7 @@ export class PositionOverlayManager {
 
     this.activeDrag.previewPrice = roundedPrice;
 
-    if (this.activeDrag.level === "stop") {
-      this.snapshot = {
-        ...this.snapshot,
-        stop: roundedPrice,
-      };
-    } else {
-      this.snapshot = {
-        ...this.snapshot,
-        target: roundedPrice,
-      };
-    }
+    this.snapshot = { ...this.snapshot, [this.activeDrag.level]: roundedPrice };
 
     this.render();
     return true;
@@ -282,11 +321,15 @@ export class PositionOverlayManager {
       level,
       price,
       orderId:
-        level === "stop"
+        level === "entry"
+          ? this.snapshot.entryOrderId ?? null
+          : level === "stop"
           ? this.snapshot.stopOrderId
           : this.snapshot.targetOrderId,
       isLive:
-        level === "stop"
+        level === "entry"
+          ? Boolean(this.snapshot.entryIsLive)
+          : level === "stop"
           ? this.snapshot.stopIsLive
           : this.snapshot.targetIsLive,
     };
@@ -325,11 +368,18 @@ export class PositionOverlayManager {
     this.entryLine = this.removeLine(this.entryLine);
     this.stopLine = this.removeLine(this.stopLine);
     this.targetLine = this.removeLine(this.targetLine);
+    this.hideShades();
   }
 
   destroy(): void {
     this.cancelDrag();
     this.clear();
+    if (this.animationFrame != null) cancelAnimationFrame(this.animationFrame);
+    this.animationFrame = null;
+    this.rewardShade?.remove();
+    this.riskShade?.remove();
+    this.rewardShade = null;
+    this.riskShade = null;
 
     this.snapshot = {
       symbol: "",
@@ -341,6 +391,8 @@ export class PositionOverlayManager {
       targetIsLive: false,
       stopOrderId: null,
       targetOrderId: null,
+      entryIsLive: false,
+      entryOrderId: null,
     };
   }
 
@@ -348,17 +400,7 @@ export class PositionOverlayManager {
     level: DraggablePositionOverlayLevel,
     price: number,
   ): void {
-    if (level === "stop") {
-      this.snapshot = {
-        ...this.snapshot,
-        stop: price,
-      };
-    } else {
-      this.snapshot = {
-        ...this.snapshot,
-        target: price,
-      };
-    }
+    this.snapshot = { ...this.snapshot, [level]: price };
   }
 
   private render(): void {
@@ -376,6 +418,8 @@ export class PositionOverlayManager {
       this.targetLine,
       this.buildTargetDefinition(this.snapshot),
     );
+
+    this.renderShades();
   }
 
   private buildEntryDefinition(
@@ -386,10 +430,10 @@ export class PositionOverlayManager {
     return {
       level: "entry",
       price: snapshot.entry,
-      title: `ENTRY ${formatPrice(snapshot.entry)}`,
-      color: ENTRY_COLOR,
-      lineStyle: LineStyle.Solid,
-      lineWidth: 2,
+      title: `${this.activeDrag?.level === "entry" ? "MOVE ORDER" : snapshot.entryIsLive ? "ORDER" : "ENTRY"} ${formatPrice(snapshot.entry)}`,
+      color: this.activeDrag?.level === "entry" ? DRAG_COLOR : snapshot.entryIsLive ? "#facc15" : ENTRY_COLOR,
+      lineStyle: this.activeDrag?.level === "entry" ? LineStyle.Dotted : LineStyle.Solid,
+      lineWidth: this.activeDrag?.level === "entry" ? 3 : 2,
     };
   }
 
@@ -403,20 +447,24 @@ export class PositionOverlayManager {
     return {
       level: "stop",
       price: snapshot.stop,
-      title: `${dragging ? "MOVE STOP" : snapshot.stopIsLive ? "LIVE STOP" : "LOCAL STOP"} ${formatPrice(
+      title: `${dragging ? "MOVE STOP" : snapshot.entryIsLive ? "STOP" : snapshot.stopIsLive ? "LIVE STOP" : "LOCAL STOP"} ${formatPrice(
         snapshot.stop,
       )}`,
       color: dragging
         ? DRAG_COLOR
+        : snapshot.entryIsLive
+          ? LIVE_STOP_COLOR
         : snapshot.stopIsLive
           ? LIVE_STOP_COLOR
           : LOCAL_STOP_COLOR,
       lineStyle: dragging
         ? LineStyle.Dotted
+        : snapshot.entryIsLive
+          ? LineStyle.Dashed
         : snapshot.stopIsLive
           ? LineStyle.Solid
           : LineStyle.Dashed,
-      lineWidth: dragging ? 3 : snapshot.stopIsLive ? 2 : 1,
+      lineWidth: dragging ? 3 : snapshot.entryIsLive || snapshot.stopIsLive ? 2 : 1,
     };
   }
 
@@ -430,20 +478,24 @@ export class PositionOverlayManager {
     return {
       level: "target",
       price: snapshot.target,
-      title: `${dragging ? "MOVE TARGET" : snapshot.targetIsLive ? "LIVE TARGET" : "LOCAL TARGET"} ${formatPrice(
+      title: `${dragging ? "MOVE TARGET" : snapshot.entryIsLive ? "TARGET" : snapshot.targetIsLive ? "LIVE TARGET" : "LOCAL TARGET"} ${formatPrice(
         snapshot.target,
       )}`,
       color: dragging
         ? DRAG_COLOR
+        : snapshot.entryIsLive
+          ? LIVE_TARGET_COLOR
         : snapshot.targetIsLive
           ? LIVE_TARGET_COLOR
           : LOCAL_TARGET_COLOR,
       lineStyle: dragging
         ? LineStyle.Dotted
+        : snapshot.entryIsLive
+          ? LineStyle.Dashed
         : snapshot.targetIsLive
           ? LineStyle.Solid
           : LineStyle.Dashed,
-      lineWidth: dragging ? 3 : snapshot.targetIsLive ? 2 : 1,
+      lineWidth: dragging ? 3 : snapshot.entryIsLive || snapshot.targetIsLive ? 2 : 1,
     };
   }
 
@@ -482,5 +534,59 @@ export class PositionOverlayManager {
     }
 
     return null;
+  }
+
+  private createShade(container: HTMLDivElement, color: string): HTMLDivElement {
+    const shade = document.createElement("div");
+    shade.style.position = "absolute";
+    shade.style.left = "0";
+    shade.style.right = "64px";
+    shade.style.background = color;
+    shade.style.pointerEvents = "none";
+    shade.style.zIndex = "2";
+    shade.style.display = "none";
+    container.appendChild(shade);
+    return shade;
+  }
+
+  private startShadeLoop(): void {
+    const frame = () => {
+      this.renderShades();
+      this.animationFrame = requestAnimationFrame(frame);
+    };
+    this.animationFrame = requestAnimationFrame(frame);
+  }
+
+  private renderShades(): void {
+    if (!this.snapshot.hasPosition || this.snapshot.entry <= 0) {
+      this.hideShades();
+      return;
+    }
+
+    this.placeShade(this.rewardShade, this.snapshot.entry, this.snapshot.target);
+    this.placeShade(this.riskShade, this.snapshot.entry, this.snapshot.stop);
+  }
+
+  private placeShade(shade: HTMLDivElement | null, first: number, second: number): void {
+    if (!shade || first <= 0 || second <= 0) {
+      if (shade) shade.style.display = "none";
+      return;
+    }
+
+    const firstY = this.priceSeries.priceToCoordinate(first);
+    const secondY = this.priceSeries.priceToCoordinate(second);
+    if (firstY == null || secondY == null) {
+      shade.style.display = "none";
+      return;
+    }
+
+    shade.style.top = `${Math.min(firstY, secondY)}px`;
+    shade.style.height = `${Math.max(1, Math.abs(secondY - firstY))}px`;
+    shade.style.display = "block";
+  }
+
+  private hideShades(): void {
+    if (this.rewardShade) this.rewardShade.style.display = "none";
+    if (this.riskShade) this.riskShade.style.display = "none";
   }
 }
