@@ -24,6 +24,7 @@ type ChartInteractionManagerOptions = ChartPointBuilder & {
   focusSelection?: (selection: FocusSelection) => void;
   resetFocus?: () => void;
   panPriceScale?: (deltaY: number) => void;
+  panTimeScale?: (deltaX: number) => void;
   setChartNavigationEnabled?: (enabled: boolean) => void;
 };
 
@@ -36,6 +37,7 @@ export class ChartInteractionManager {
   private readonly buildPointFromPointerEvent: ChartPointBuilder["buildPointFromPointerEvent"];
   private readonly buildFallbackPointFromMouseEvent: ChartPointBuilder["buildFallbackPointFromMouseEvent"];
   private readonly panPriceScale?: (deltaY: number) => void;
+  private readonly panTimeScale?: (deltaX: number) => void;
 
   private readonly clickListeners = new Set<(point: ChartPointerPoint) => void>();
   private readonly pointerDownListeners = new Set<(point: ChartPointerPoint) => void>();
@@ -55,6 +57,7 @@ export class ChartInteractionManager {
   private overlayRenderFrame: number | null = null;
   private focusGestureActive = false;
   private chartPanGestureActive = false;
+  private lastChartPanClientX: number | null = null;
   private lastChartPanClientY: number | null = null;
   private navigationSuppressed = false;
 
@@ -76,6 +79,7 @@ export class ChartInteractionManager {
     this.buildFallbackPointFromMouseEvent =
       options.buildFallbackPointFromMouseEvent;
     this.panPriceScale = options.panPriceScale;
+    this.panTimeScale = options.panTimeScale;
 
     this.overlayCanvas = document.createElement("canvas");
     this.overlayCanvas.style.position = "absolute";
@@ -216,10 +220,11 @@ export class ChartInteractionManager {
 
       if (!handled && nativeEvent.button === 1) {
         this.chartPanGestureActive = true;
+        this.lastChartPanClientX = nativeEvent.clientX;
         this.lastChartPanClientY = nativeEvent.clientY;
         this.setNavigationSuppressed(true);
         this.container.setPointerCapture?.(nativeEvent.pointerId);
-        this.container.style.cursor = "ns-resize";
+        this.container.style.cursor = "move";
         handled = true;
       }
     }
@@ -254,11 +259,15 @@ export class ChartInteractionManager {
       if (
         !handled &&
         this.chartPanGestureActive &&
+        this.lastChartPanClientX != null &&
         this.lastChartPanClientY != null &&
         (nativeEvent.buttons & 4) === 4
       ) {
+        const deltaX = nativeEvent.clientX - this.lastChartPanClientX;
         const deltaY = nativeEvent.clientY - this.lastChartPanClientY;
+        this.lastChartPanClientX = nativeEvent.clientX;
         this.lastChartPanClientY = nativeEvent.clientY;
+        this.panTimeScale?.(deltaX);
         this.panPriceScale?.(deltaY);
         handled = true;
       }
@@ -276,6 +285,7 @@ export class ChartInteractionManager {
   private onPointerUp(nativeEvent: PointerEvent): void {
     const wasChartPanGesture = this.chartPanGestureActive;
     this.chartPanGestureActive = false;
+    this.lastChartPanClientX = null;
     this.lastChartPanClientY = null;
 
     if (wasChartPanGesture) {

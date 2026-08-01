@@ -489,6 +489,7 @@ export class ChartEngine {
       focusSelection: (selection) => this.focusSelection(selection),
       resetFocus: () => this.resetFocus(),
       panPriceScale: (deltaY) => this.panPriceScale(deltaY),
+      panTimeScale: (deltaX) => this.panTimeScale(deltaX),
       setChartNavigationEnabled: (enabled) =>
         this.setChartNavigationEnabled(enabled),
     });
@@ -1079,6 +1080,19 @@ export class ChartEngine {
 
     this.chart.priceScale("right").applyOptions({ autoScale: true });
     this.series.candles.setData(this.buildCandleSeriesData());
+    this.studyRenderer.scheduleOverlayRender();
+  }
+
+  private panTimeScale(deltaX: number): void {
+    if (!Number.isFinite(deltaX) || deltaX === 0) return;
+
+    const timeScale = this.chart.timeScale();
+    const barSpacing = Math.max(1, timeScale.options().barSpacing);
+    timeScale.scrollToPosition(
+      timeScale.scrollPosition() + deltaX / barSpacing,
+      false,
+    );
+    this.scheduleSessionBandsRender();
     this.studyRenderer.scheduleOverlayRender();
   }
 
