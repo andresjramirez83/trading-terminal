@@ -6,7 +6,7 @@ import type {
 } from "lightweight-charts";
 
 import { chartStore } from "./ChartStore";
-import type { Candle } from "../types/market";
+import type { Candle } from "../../types/market";
 
 export interface MouseEngineOptions {
     bars: () => Candle[];

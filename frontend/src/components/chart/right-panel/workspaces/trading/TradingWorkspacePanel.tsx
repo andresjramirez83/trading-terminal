@@ -8,6 +8,7 @@ import FilledOrdersWidget from "./FilledOrdersWidget";
 import AutoTradeWidget from "./AutoTradeWidget";
 import TradeJournalWidget from "./TradeJournalWidget";
 import PerformanceWidget from "./PerformanceWidget";
+import DailyPracticeUniverseWidget from "./DailyPracticeUniverseWidget";
 import { useTradeEngineStore } from "../../../../../trading/hooks/useTradeEngineStore";
 import { useTradeHistoryStore } from "../../../../../trading/hooks/useTradeHistoryStore";
 
@@ -283,6 +284,8 @@ export default function TradingWorkspacePanel({
       />
 
       <FilledOrdersWidget orders={historyStore.filledOrders} />
+
+      <DailyPracticeUniverseWidget />
 
       <PerformanceWidget
         symbol={safeSymbol}

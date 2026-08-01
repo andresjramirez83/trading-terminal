@@ -25,13 +25,11 @@ export function buildRisk(
   trendStrength: DecisionCenterTrendStrength,
   entryQuality: DecisionCenterEntryQuality
 ): DecisionCenterRisk {
-  const close = snapshot.price?.close ?? 0;
-  const high = snapshot.price?.high ?? close;
-  const low = snapshot.price?.low ?? close;
-  const atr = snapshot.atr?.value ?? Math.max(high - low, 0.01);
+  const close = snapshot.price ?? 0;
+  const atr = snapshot.atr?.value ?? Math.max(close * 0.005, 0.01);
 
-  const stopDistanceValue = Math.max(atr * 0.65, close - low);
-  const targetDistanceValue = Math.max(atr * 1.4, high - close + atr);
+  const stopDistanceValue = atr * 0.65;
+  const targetDistanceValue = atr * 1.4;
 
   const expectedRRValue =
     stopDistanceValue > 0 ? targetDistanceValue / stopDistanceValue : 0;

@@ -1,7 +1,7 @@
 // src/components/ChartPanelV2/ChartViewport.tsx
 
 import { forwardRef } from "react";
-import type { LiveStatus } from "../../chart/ChartTypes";
+import type { LiveStatus } from "./ChartTypes";
 
 type Props = {
   liveStatus: LiveStatus;

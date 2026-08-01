@@ -1,6 +1,6 @@
 // src/components/ChartPanelV2/CrosshairInfoBox.tsx
 
-import type { CrosshairInfo } from "../../chart/ChartTypes";
+import type { CrosshairInfo } from "./ChartTypes";
 
 type Props = {
   info: CrosshairInfo | null;

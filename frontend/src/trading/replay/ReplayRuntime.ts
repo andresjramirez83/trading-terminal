@@ -3,6 +3,10 @@
 import type { CleanBar } from "../../components/chart/ChartTypes";
 import { getReplayExecutionProvider } from "../execution/router/ExecutionProviderRuntime";
 import { ReplayMarketDataProvider } from "./ReplayMarketDataProvider";
+import {
+  getSharedReplaySessionManager,
+  type ReplaySession,
+} from "./ReplaySessionManager";
 import type {
   ReplayListener,
   ReplaySessionConfig,
@@ -31,15 +35,37 @@ function emptySnapshot(): ReplaySnapshot {
 
     progress: 0,
     error: null,
+    session: null,
   };
+}
+
+function normalizeTradingDate(
+  value: string | undefined,
+): string | null {
+  const normalized = String(value ?? "").trim();
+
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalized)
+    ? normalized
+    : null;
 }
 
 export class ReplayRuntime {
   private provider = new ReplayMarketDataProvider();
-  private executionProvider = getReplayExecutionProvider();
+  private executionProvider =
+    getReplayExecutionProvider();
+
+  private sessionManager =
+    getSharedReplaySessionManager();
+
   private listeners = new Set<ReplayListener>();
   private snapshot: ReplaySnapshot = emptySnapshot();
-  private disconnectProvider: (() => void) | null = null;
+
+  private disconnectProvider:
+    | (() => void)
+    | null = null;
+
+  private replayStartIndex = 0;
+  private currentSession: ReplaySession | null = null;
 
   subscribe(listener: ReplayListener): () => void {
     this.listeners.add(listener);
@@ -54,71 +80,140 @@ export class ReplayRuntime {
     return this.snapshot;
   }
 
-  async load(config: ReplaySessionConfig): Promise<ReplaySnapshot> {
+  getSession(): ReplaySession | null {
+    return this.currentSession;
+  }
+
+  async load(
+    config: ReplaySessionConfig,
+  ): Promise<ReplaySnapshot> {
     this.disconnectProvider?.();
     this.disconnectProvider = null;
+
+    this.currentSession = null;
     this.executionProvider.resetAccount();
 
     this.publish({
       ...emptySnapshot(),
       state: "loading",
       symbol: config.symbol.trim().toUpperCase(),
-      timeframe: config.timeframe.trim().toLowerCase(),
+      timeframe: config.timeframe
+        .trim()
+        .toLowerCase(),
       speed: config.speed ?? DEFAULT_SPEED,
     });
 
     try {
-      const bars = await this.provider.loadHistory(config);
+      const bars =
+        await this.provider.loadHistory(config);
+
+      const tradingDate =
+        normalizeTradingDate(config.date);
+
+      if (tradingDate) {
+        this.currentSession =
+          this.sessionManager.createSession(
+            bars,
+            {
+              tradingDate,
+              startMode:
+                config.startMode ??
+                "market-open",
+              customStartTime:
+                config.customStartTime ??
+                null,
+            },
+          );
+      }
+
+      const requestedStartIndex =
+        config.startIndex != null
+          ? Math.floor(config.startIndex)
+          : this.currentSession?.replayStartIndex ??
+            Math.min(
+              60,
+              Math.max(0, bars.length - 1),
+            );
+
       const startIndex = Math.max(
         0,
         Math.min(
-          bars.length > 0 ? bars.length - 1 : 0,
-          Math.floor(config.startIndex ?? 0),
+          bars.length > 0
+            ? bars.length - 1
+            : 0,
+          requestedStartIndex,
         ),
       );
 
-      this.provider.setSpeed(config.speed ?? DEFAULT_SPEED);
+      this.replayStartIndex = startIndex;
 
-      this.disconnectProvider = this.provider.connect(
-        config,
-        {
-          onStatus: () => {
-            // Replay lifecycle is tracked by ReplayRuntime state.
-          },
-          onBar: (bar) => {
-            this.handleBar(bar);
-          },
-          onError: (error) => {
-            this.publish({
-              ...this.snapshot,
-              state: "error",
-              error: error.message,
-            });
-          },
-        },
+      this.provider.setSpeed(
+        config.speed ?? DEFAULT_SPEED,
       );
 
-      this.provider.seek(startIndex);
+      this.disconnectProvider =
+        this.provider.connect(
+          config,
+          {
+            onStatus: () => {
+              // Replay lifecycle is tracked by ReplayRuntime state.
+            },
 
-      const currentBar = bars[startIndex] ?? null;
+            onBar: (bar) => {
+              this.handleBar(bar);
+            },
+
+            onError: (error) => {
+              this.publish({
+                ...this.snapshot,
+                state: "error",
+                error: error.message,
+              });
+            },
+          },
+        );
+
+      this.provider.setNextIndex(
+        Math.min(
+          this.currentSession?.nextPlaybackIndex ??
+            startIndex + 1,
+          bars.length,
+        ),
+      );
+
+      const currentBar =
+        bars[startIndex] ?? null;
 
       this.publish({
         ...this.snapshot,
-        state: config.autoplay ? "playing" : "ready",
+        state: config.autoplay
+          ? "playing"
+          : "ready",
+
         bars,
-        visibleBars: bars.slice(0, startIndex + 1),
+
+        visibleBars:
+          bars.length > 0
+            ? bars.slice(0, startIndex + 1)
+            : [],
+
         currentIndex: startIndex,
         currentBar,
+
         currentTime:
           currentBar != null
             ? Number(currentBar.time)
             : null,
+
         progress:
           bars.length > 1
-            ? startIndex / (bars.length - 1)
+            ? startIndex /
+              (bars.length - 1)
             : bars.length === 1
               ? 1
               : 0,
+
+        session: this.currentSession,
       });
 
       this.executionProvider.setReplayContext(
@@ -151,7 +246,9 @@ export class ReplayRuntime {
     if (
       this.snapshot.state === "error" ||
       this.snapshot.state === "loading" ||
-      this.snapshot.bars.length === 0
+      this.snapshot.bars.length === 0 ||
+      this.snapshot.currentIndex >=
+        this.snapshot.bars.length - 1
     ) {
       return;
     }
@@ -181,11 +278,69 @@ export class ReplayRuntime {
   reset(): void {
     this.pause();
     this.executionProvider.resetAccount();
-    this.seek(0);
+
+    if (
+      this.snapshot.bars.length === 0
+    ) {
+      return;
+    }
+
+    const safeStartIndex = Math.max(
+      0,
+      Math.min(
+        this.snapshot.bars.length - 1,
+        this.replayStartIndex,
+      ),
+    );
+
+    this.provider.setNextIndex(
+      Math.min(
+        this.currentSession
+          ?.nextPlaybackIndex ??
+          safeStartIndex + 1,
+        this.snapshot.bars.length,
+      ),
+    );
+
+    const bar =
+      this.snapshot.bars[
+        safeStartIndex
+      ] ?? null;
+
+    this.executionProvider.setReplayContext(
+      this.snapshot.symbol,
+      bar,
+    );
 
     this.publish({
       ...this.snapshot,
       state: "ready",
+
+      currentIndex: safeStartIndex,
+      currentBar: bar,
+
+      currentTime: bar
+        ? Number(bar.time)
+        : null,
+
+      visibleBars:
+        this.snapshot.bars.slice(
+          0,
+          safeStartIndex + 1,
+        ),
+
+      progress:
+        this.snapshot.bars.length > 1
+          ? safeStartIndex /
+            (
+              this.snapshot.bars.length -
+              1
+            )
+          : this.snapshot.bars.length === 1
+            ? 1
+            : 0,
+
+      session: this.currentSession,
     });
   }
 
@@ -212,7 +367,11 @@ export class ReplayRuntime {
   }
 
   seek(index: number): void {
-    if (this.snapshot.bars.length === 0) return;
+    if (
+      this.snapshot.bars.length === 0
+    ) {
+      return;
+    }
 
     const safeIndex = Math.max(
       0,
@@ -223,15 +382,24 @@ export class ReplayRuntime {
     );
 
     const movingBackward =
-      safeIndex < this.snapshot.currentIndex;
+      safeIndex <
+      this.snapshot.currentIndex;
 
     if (movingBackward) {
       this.executionProvider.resetAccount();
     }
 
-    this.provider.seek(safeIndex);
+    this.provider.setNextIndex(
+      Math.min(
+        safeIndex + 1,
+        this.snapshot.bars.length,
+      ),
+    );
 
-    const bar = this.snapshot.bars[safeIndex] ?? null;
+    const bar =
+      this.snapshot.bars[
+        safeIndex
+      ] ?? null;
 
     if (bar) {
       this.executionProvider.processReplayBar(
@@ -247,20 +415,39 @@ export class ReplayRuntime {
 
     this.publish({
       ...this.snapshot,
+
       currentIndex: safeIndex,
       currentBar: bar,
-      currentTime: bar ? Number(bar.time) : null,
-      visibleBars: this.snapshot.bars.slice(0, safeIndex + 1),
+
+      currentTime: bar
+        ? Number(bar.time)
+        : null,
+
+      visibleBars:
+        this.snapshot.bars.slice(
+          0,
+          safeIndex + 1,
+        ),
+
       progress:
         this.snapshot.bars.length > 1
-          ? safeIndex / (this.snapshot.bars.length - 1)
+          ? safeIndex /
+            (
+              this.snapshot.bars.length -
+              1
+            )
           : 1,
+
       state:
-        safeIndex >= this.snapshot.bars.length - 1
+        safeIndex >=
+        this.snapshot.bars.length - 1
           ? "completed"
-          : this.snapshot.state === "playing"
+          : this.snapshot.state ===
+              "playing"
             ? "playing"
             : "paused",
+
+      session: this.currentSession,
     });
   }
 
@@ -276,19 +463,28 @@ export class ReplayRuntime {
   destroy(): void {
     this.disconnectProvider?.();
     this.disconnectProvider = null;
+
     this.provider.destroy();
     this.executionProvider.resetAccount();
+
     this.listeners.clear();
     this.snapshot = emptySnapshot();
+
+    this.replayStartIndex = 0;
+    this.currentSession = null;
   }
 
   private handleBar(bar: CleanBar): void {
-    const index = this.snapshot.bars.findIndex(
-      (candidate) =>
-        Number(candidate.time) === Number(bar.time),
-    );
+    const index =
+      this.snapshot.bars.findIndex(
+        (candidate) =>
+          Number(candidate.time) ===
+          Number(bar.time),
+      );
 
-    if (index < 0) return;
+    if (index < 0) {
+      return;
+    }
 
     this.executionProvider.processReplayBar(
       this.snapshot.symbol,
@@ -296,42 +492,69 @@ export class ReplayRuntime {
     );
 
     const completed =
-      index >= this.snapshot.bars.length - 1;
+      index >=
+      this.snapshot.bars.length - 1;
 
     this.publish({
       ...this.snapshot,
-      state: completed ? "completed" : "playing",
+
+      state: completed
+        ? "completed"
+        : "playing",
+
       currentIndex: index,
       currentBar: bar,
       currentTime: Number(bar.time),
-      visibleBars: this.snapshot.bars.slice(0, index + 1),
+
+      visibleBars:
+        this.snapshot.bars.slice(
+          0,
+          index + 1,
+        ),
+
       progress:
         this.snapshot.bars.length > 1
-          ? index / (this.snapshot.bars.length - 1)
+          ? index /
+            (
+              this.snapshot.bars.length -
+              1
+            )
           : 1,
+
+      session: this.currentSession,
     });
   }
 
-  private publish(snapshot: ReplaySnapshot): void {
+  private publish(
+    snapshot: ReplaySnapshot,
+  ): void {
     this.snapshot = snapshot;
 
-    for (const listener of this.listeners) {
+    for (
+      const listener of
+      this.listeners
+    ) {
       listener(snapshot);
     }
   }
 }
 
-let sharedReplayRuntime: ReplayRuntime | null = null;
+let sharedReplayRuntime:
+  | ReplayRuntime
+  | null = null;
 
-export function getSharedReplayRuntime(): ReplayRuntime {
+export function getSharedReplayRuntime():
+  ReplayRuntime {
   if (!sharedReplayRuntime) {
-    sharedReplayRuntime = new ReplayRuntime();
+    sharedReplayRuntime =
+      new ReplayRuntime();
   }
 
   return sharedReplayRuntime;
 }
 
-export function resetSharedReplayRuntime(): void {
+export function resetSharedReplayRuntime():
+  void {
   sharedReplayRuntime?.destroy();
   sharedReplayRuntime = null;
 }

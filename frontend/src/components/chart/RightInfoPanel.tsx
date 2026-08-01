@@ -164,7 +164,7 @@ export default function RightInfoPanel({
           {workspace === "trade" && (
             <TradingWorkspacePanel
               symbol={symbol}
-              currentPrice={chartState?.lastPrice ?? 0}
+              currentPrice={chartState?.price ?? 0}
             />
           )}
 

@@ -5,6 +5,7 @@ import type { CleanBar } from "./ChartTypes";
 export type DrawingTool =
   | "cursor"
   | "trendline"
+  | "marketStructure"
   | "horizontal"
   | "ray"
   | "rectangle"
@@ -43,6 +44,18 @@ export const DEFAULT_DRAWING_STYLE: DrawingStyle = {
   extendRight: true,
 };
 
+export type MarketStructureNodeClassification =
+  | "high"
+  | "low"
+  | "hh"
+  | "hl"
+  | "lh"
+  | "ll";
+
+export type MarketStructureNode = DrawingPoint & {
+  classification?: MarketStructureNodeClassification;
+};
+
 export type HorizontalLineDrawing = {
   id: string;
   type: "horizontal";
@@ -57,6 +70,15 @@ export type TrendlineDrawing = {
   p2: DrawingPoint;
   style: DrawingStyle;
   selected?: boolean;
+};
+
+export type MarketStructureDrawing = {
+  id: string;
+  type: "marketStructure";
+  nodes: MarketStructureNode[];
+  style: DrawingStyle;
+  selected?: boolean;
+  selectedNodeIndex?: number | null;
 };
 
 export type RectangleDrawing = {
@@ -91,6 +113,7 @@ export type LongPositionDrawing = {
 export type ChartDrawing =
   | HorizontalLineDrawing
   | TrendlineDrawing
+  | MarketStructureDrawing
   | RectangleDrawing
   | PriceRangeDrawing
   | LongPositionDrawing;

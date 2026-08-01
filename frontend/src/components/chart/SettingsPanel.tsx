@@ -4,8 +4,8 @@ import ChartSettings from "./ChartSettings";
 import DrawingSettings from "./DrawingSettings";
 import FunctionSettings from "./FunctionSettings";
 import type { DrawingStyle } from "./DrawingTypes";
-import type { ChartSettings as ChartSettingsModel } from "../../chart/ChartSettingsTypes";
-import type { FxAnalysisSettings, FxAnalysisToolId } from "../../chart/analysis";
+import type { ChartSettings as ChartSettingsModel } from "./ChartSettingsTypes";
+import type { FxAnalysisSettings, FxAnalysisToolId } from "./analysis";
 
 export type SettingsMode = "drawing" | "function" | "chart";
 

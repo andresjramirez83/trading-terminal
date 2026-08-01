@@ -53,6 +53,7 @@ type Props = {
 
   marketDataMode: MarketDataMode;
   replaySnapshot: ReplaySnapshot;
+  practiceTradingDate: string;
 
   onSymbolChange: (symbol: string) => void;
   onTimeframeChange: (timeframe: string) => void;
@@ -66,6 +67,7 @@ type Props = {
   onReplayStepForward: () => void;
   onReplaySeek: (index: number) => void;
   onReplaySpeedChange: (speed: ReplaySpeed) => void;
+  onPracticeTradingDateChange: (tradingDate: string) => void;
 };
 
 const compactButton: CSSProperties = {
@@ -104,6 +106,7 @@ export default function ChartToolbarV2({
   studyVisibility,
   marketDataMode,
   replaySnapshot,
+  practiceTradingDate,
   onSymbolChange,
   onTimeframeChange,
   onStudyVisibilityChange,
@@ -115,6 +118,7 @@ export default function ChartToolbarV2({
   onReplayStepForward,
   onReplaySeek,
   onReplaySpeedChange,
+  onPracticeTradingDateChange,
 }: Props) {
   const location = useLocation();
   const onScanner = location.pathname === "/scanner";
@@ -432,6 +436,26 @@ export default function ChartToolbarV2({
               minWidth: 70,
               accentColor: "#38bdf8",
               cursor: replayReady ? "pointer" : "default",
+            }}
+          />
+
+          <input
+            type="date"
+            value={practiceTradingDate}
+            onChange={(event) =>
+              onPracticeTradingDateChange(event.target.value)
+            }
+            title="Replay trading date"
+            aria-label="Replay trading date"
+            style={{
+              ...compactButton,
+              width: 126,
+              minWidth: 126,
+              padding: "0 7px",
+              colorScheme: "dark",
+              color: "#bfdbfe",
+              borderColor: "rgba(59,130,246,.42)",
+              background: "#080c13",
             }}
           />
 

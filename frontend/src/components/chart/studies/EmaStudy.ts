@@ -1,5 +1,5 @@
 import type { LineData, Time } from "lightweight-charts";
-import type { CleanBar } from "../chart/ChartTypes";
+import type { CleanBar } from "../ChartTypes";
 
 export function buildEmaBars(
   bars: CleanBar[],

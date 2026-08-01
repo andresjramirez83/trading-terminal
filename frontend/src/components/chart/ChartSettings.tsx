@@ -1,7 +1,7 @@
 // src/components/ChartPanelV2/ChartSettings.tsx
 
 import { useEffect, useRef } from "react";
-import type { ChartSettings } from "../../chart/ChartSettingsTypes";
+import type { ChartSettings } from "./ChartSettingsTypes";
 
 type Props = {
   open: boolean;

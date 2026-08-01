@@ -2,6 +2,7 @@ import {
   BaselineSeries,
   LineSeries,
   type BaselineData,
+  type BusinessDay,
   type IChartApi,
   type ISeriesApi,
   type LineData,
@@ -34,6 +35,71 @@ function lineWidth(value: number): 1 | 2 | 3 | 4 {
   if (value === 2) return 2;
   if (value === 3) return 3;
   return 4;
+}
+
+function isBusinessDay(time: Time): time is BusinessDay {
+  return (
+    typeof time === "object" &&
+    time !== null &&
+    "year" in time &&
+    "month" in time &&
+    "day" in time
+  );
+}
+
+function timeValue(time: Time): number {
+  if (typeof time === "number") {
+    return time;
+  }
+
+  if (typeof time === "string") {
+    const parsed = Date.parse(time);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  if (isBusinessDay(time)) {
+    return Date.UTC(time.year, time.month - 1, time.day);
+  }
+
+  return 0;
+}
+
+function orderedTimes(
+  first: Time,
+  second: Time,
+): [Time] | [Time, Time] {
+  const firstValue = timeValue(first);
+  const secondValue = timeValue(second);
+
+  if (firstValue === secondValue) {
+    return [first];
+  }
+
+  return firstValue < secondValue
+    ? [first, second]
+    : [second, first];
+}
+
+function makeBaselineData(
+  first: Time,
+  second: Time,
+  value: number,
+): BaselineData<Time>[] {
+  return orderedTimes(first, second).map((time) => ({
+    time,
+    value,
+  }));
+}
+
+function makeLineData(
+  first: Time,
+  second: Time,
+  value: number,
+): LineData<Time>[] {
+  return orderedTimes(first, second).map((time) => ({
+    time,
+    value,
+  }));
 }
 
 export class AnalysisRenderer {
@@ -93,7 +159,9 @@ export class AnalysisRenderer {
     const selectedColor = "#38bdf8";
     const baseColor = toolSettings.color;
     const visualColor = selected ? selectedColor : baseColor;
-    const visualWidth = lineWidth((toolSettings.lineWidth ?? 2) + (selected ? 1 : 0));
+    const visualWidth = lineWidth(
+      (toolSettings.lineWidth ?? 2) + (selected ? 1 : 0),
+    );
 
     if (result.zone) {
       const zoneFrom = result.anchorTime;
@@ -108,7 +176,9 @@ export class AnalysisRenderer {
           price: result.zone.low,
         },
         topLineColor: visualColor,
-        bottomLineColor: selected ? visualColor : "rgba(0,0,0,0)",
+        bottomLineColor: selected
+          ? visualColor
+          : "rgba(0,0,0,0)",
         topFillColor1: fillColor,
         topFillColor2: fillColor,
         bottomFillColor1: "rgba(0,0,0,0)",
@@ -121,22 +191,37 @@ export class AnalysisRenderer {
         autoscaleInfoProvider: () => null,
       });
 
-      zone.setData([
-        { time: zoneFrom, value: result.zone.high },
-        { time: zoneTo, value: result.zone.high },
-      ] as BaselineData<Time>[]);
+      zone.setData(
+        makeBaselineData(
+          zoneFrom,
+          zoneTo,
+          result.zone.high,
+        ),
+      );
 
       this.zoneSeries.set(result.zone.id, zone);
     }
 
-    const lineFrom = result.zone ? result.anchorTime : from;
+    const lineFrom = result.zone
+      ? result.anchorTime
+      : from;
 
     for (const line of result.lines) {
-      const lineTo = extendRight ? to : result.anchorTime;
+      const lineTo = extendRight
+        ? to
+        : result.anchorTime;
 
       const series = this.chart.addSeries(LineSeries, {
-        color: selected ? selectedColor : toolSettings.color || line.color,
-        lineWidth: selected ? visualWidth : lineWidth(toolSettings.lineWidth ?? line.lineWidth ?? 2),
+        color: selected
+          ? selectedColor
+          : toolSettings.color || line.color,
+        lineWidth: selected
+          ? visualWidth
+          : lineWidth(
+              toolSettings.lineWidth ??
+                line.lineWidth ??
+                2,
+            ),
         lineStyle: line.lineStyle,
         priceLineVisible: showLabel,
         lastValueVisible: showLabel,
@@ -145,10 +230,13 @@ export class AnalysisRenderer {
         autoscaleInfoProvider: () => null,
       });
 
-      series.setData([
-        { time: lineFrom, value: line.price },
-        { time: lineTo, value: line.price },
-      ] as LineData<Time>[]);
+      series.setData(
+        makeLineData(
+          lineFrom,
+          lineTo,
+          line.price,
+        ),
+      );
 
       this.lineSeries.set(line.id, series);
     }

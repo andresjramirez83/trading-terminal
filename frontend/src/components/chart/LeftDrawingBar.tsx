@@ -42,6 +42,32 @@ type Props = {
   onToggleSettings: () => void;
 };
 
+function MarketStructureIcon() {
+  return (
+    <svg
+      width="22"
+      height="22"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <path
+        d="M3 17L8 10L13 14L18 6L21 9"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="3" cy="17" r="1.6" fill="currentColor" />
+      <circle cx="8" cy="10" r="1.6" fill="currentColor" />
+      <circle cx="13" cy="14" r="1.6" fill="currentColor" />
+      <circle cx="18" cy="6" r="1.6" fill="currentColor" />
+      <circle cx="21" cy="9" r="1.6" fill="currentColor" />
+    </svg>
+  );
+}
+
 const FX_ANALYSIS_TOOLS: FxAnalysisItem[] = [
   { key: "supportPrediction", label: "FX Support Prediction", letter: "S" },
   { key: "resistancePrediction", label: "FX Resistance Prediction", letter: "R" },
@@ -51,6 +77,12 @@ const FX_ANALYSIS_TOOLS: FxAnalysisItem[] = [
 const TOOLS: ToolItem[] = [
   { key: "cursor", label: "Cursor", shortcut: "Esc", icon: <CursorIcon /> },
   { key: "trendline", label: "Trendline", shortcut: "T", icon: <TrendlineIcon /> },
+  {
+    key: "marketStructure",
+    label: "Market Structure",
+    shortcut: "M",
+    icon: <MarketStructureIcon />,
+  },
   { key: "horizontal", label: "Horizontal Line", shortcut: "H", icon: <HorizontalLineIcon /> },
   { key: "rectangle", label: "Rectangle", shortcut: "R", icon: <RectangleIcon /> },
   { key: "ray", label: "Ray", icon: <RayIcon />, disabled: true },

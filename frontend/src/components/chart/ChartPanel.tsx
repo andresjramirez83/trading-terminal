@@ -12,6 +12,14 @@ import type {
   ReplaySnapshot,
   ReplaySpeed,
 } from "../../trading/replay/ReplayTypes";
+import {
+  readSavedPracticeReplayRequest,
+  readSelectedPracticeTradingDate,
+  saveSelectedPracticeTradingDate,
+  subscribeToPracticeReplayRequests,
+  subscribeToSelectedPracticeTradingDate,
+} from "../../trading/practice/PracticeReplayLauncher";
+import type { ReplayStartMode } from "../../trading/replay/ReplaySessionManager";
 import { switchExecutionMode } from "../../trading/execution/router/ExecutionProviderRuntime";
 import { useActiveSymbol } from "./ActiveSymbolContext";
 import ChartToolbarV2 from "./ChartToolbarV2";
@@ -24,6 +32,7 @@ import { HorizontalLineTool } from "./interaction/tools/HorizontalLineTool";
 import { RectangleTool } from "./interaction/tools/RectangleTool";
 import { PriceRangeTool } from "./interaction/tools/PriceRangeTool";
 import { LongPositionTool } from "./interaction/tools/LongPositionTool";
+import { MarketStructureTool } from "./interaction/tools/MarketStructureTool";
 import { SelectTool } from "./interaction/tools/SelectTool";
 import {
   CHART_TOOL_COMPLETED_EVENT,
@@ -71,6 +80,7 @@ function loadStudyVisibility(): StudyVisibility {
     ema9: true,
     ema20: true,
     volume: true,
+    marketStructure: true,
   };
 
   const saved = localStorage.getItem(STUDY_STORAGE_KEY);
@@ -139,6 +149,7 @@ function loadChartSettings(): ChartSettings {
 
 function getInteractionToolId(tool: DrawingTool): string {
   if (tool === "trendline") return "trendline";
+  if (tool === "marketStructure") return "market-structure";
   if (tool === "horizontal") return "horizontal-line";
   if (tool === "rectangle") return "rectangle";
   if (tool === "priceRange") return "price-range";
@@ -149,11 +160,42 @@ function getInteractionToolId(tool: DrawingTool): string {
 function isInteractionOwnedDrawingTool(tool: DrawingTool): boolean {
   return (
     tool === "trendline" ||
+    tool === "marketStructure" ||
     tool === "horizontal" ||
     tool === "rectangle" ||
     tool === "priceRange" ||
     tool === "longPosition"
   );
+}
+
+function getHistoricalRequest(timeframe: string): {
+  lookback: string;
+  limit: number;
+} {
+  const normalized = String(timeframe).trim().toLowerCase();
+
+  // Extended-hours sessions can contain up to 960 one-minute bars per
+  // trading day and 192 five-minute bars per trading day. The larger
+  // lookback gives the backend enough calendar-day room for weekends
+  // and market holidays; ChartEngine trims the result to exact trading days.
+  if (normalized === "1m" || normalized === "1min") {
+    return {
+      lookback: "10d",
+      limit: 4000,
+    };
+  }
+
+  if (normalized === "5m" || normalized === "5min") {
+    return {
+      lookback: "10d",
+      limit: 1500,
+    };
+  }
+
+  return {
+    lookback: "5d",
+    limit: 500,
+  };
 }
 
 function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
@@ -210,6 +252,25 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const [replaySnapshot, setReplaySnapshot] = useState<ReplaySnapshot>(() =>
     replayRuntime.getSnapshot(),
   );
+  const [practiceTradingDate, setPracticeTradingDate] = useState(
+    () => readSelectedPracticeTradingDate(),
+  );
+  const [replayStartMode, setReplayStartMode] =
+    useState<ReplayStartMode>(() => {
+      return (
+        readSavedPracticeReplayRequest()?.startMode ??
+        "market-open"
+      );
+    });
+  const [
+    replayCustomStartTime,
+    setReplayCustomStartTime,
+  ] = useState<string | null>(() => {
+    return (
+      readSavedPracticeReplayRequest()
+        ?.customStartTime ?? null
+    );
+  });
 
   function commitChartState(engine: ChartEngine, reason: string): void {
     const nextState = engine.getState();
@@ -221,7 +282,55 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     setActiveSymbol(nextSymbol, "toolbar");
   }
 
+  function handlePracticeTradingDateChange(
+    tradingDate: string,
+  ): void {
+    if (!tradingDate) return;
+
+    const savedDate =
+      saveSelectedPracticeTradingDate(tradingDate);
+
+    setPracticeTradingDate(savedDate);
+
+    if (marketDataMode !== "replay") {
+      setMarketDataMode("replay");
+    }
+  }
+
   useEffect(() => {}, [activeSymbol]);
+
+  useEffect(() => {
+    return subscribeToSelectedPracticeTradingDate(
+      (tradingDate) => {
+        setPracticeTradingDate(tradingDate);
+      },
+    );
+  }, []);
+
+  useEffect(() => {
+    return subscribeToPracticeReplayRequests(
+      (request) => {
+        setPracticeTradingDate(
+          request.tradingDate,
+        );
+        setReplayStartMode(
+          request.startMode ??
+            "market-open",
+        );
+        setReplayCustomStartTime(
+          request.customStartTime ??
+            null,
+        );
+
+        setActiveSymbol(
+          request.symbol,
+          "practice-replay",
+        );
+        setTimeframe(request.timeframe);
+        setMarketDataMode("replay");
+      },
+    );
+  }, [setActiveSymbol]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -247,6 +356,12 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     engine.registerInteractionTool(new SelectTool(drawingEngine));
     engine.registerInteractionTool(
       new TrendlineTool(drawingEngine, () => drawingStyleRef.current),
+    );
+    engine.registerInteractionTool(
+      new MarketStructureTool(
+        drawingEngine,
+        () => drawingStyleRef.current,
+      ),
     );
     engine.registerInteractionTool(
       new HorizontalLineTool(drawingEngine, () => drawingStyleRef.current),
@@ -684,9 +799,12 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           const snapshot = await replayRuntime.load({
             symbol,
             timeframe,
-            lookback: "30d",
-            limit: 2000,
-            startIndex: 100,
+            date: practiceTradingDate || undefined,
+            lookback: practiceTradingDate ? undefined : "30d",
+            limit: 4000,
+            startMode: replayStartMode,
+            customStartTime:
+              replayCustomStartTime,
             speed: replaySnapshot.speed,
             autoplay: false,
           });
@@ -707,10 +825,12 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           return;
         }
 
+        const historyRequest = getHistoricalRequest(timeframe);
         const bars = await loadHistoricalBars({
           symbol,
           timeframe,
-          forceRefresh: true,
+          lookback: historyRequest.lookback,
+          limit: historyRequest.limit,
         });
 
         if (cancelled) return;
@@ -735,7 +855,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [marketDataMode, symbol, timeframe]);
+  }, [
+    marketDataMode,
+    practiceTradingDate,
+    replayCustomStartTime,
+    replayStartMode,
+    symbol,
+    timeframe,
+  ]);
 
   useEffect(() => {
     if (marketDataMode !== "live") {
@@ -855,6 +982,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         studyVisibility={studyVisibility}
         marketDataMode={marketDataMode}
         replaySnapshot={replaySnapshot}
+        practiceTradingDate={practiceTradingDate}
         onSymbolChange={handleSymbolChange}
         onTimeframeChange={setTimeframe}
         onStudyVisibilityChange={setStudyVisibility}
@@ -867,6 +995,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         onReplaySeek={(index) => replayRuntime.seek(index)}
         onReplaySpeedChange={(speed: ReplaySpeed) =>
           replayRuntime.setSpeed(speed)
+        }
+        onPracticeTradingDateChange={
+          handlePracticeTradingDateChange
         }
       />
 

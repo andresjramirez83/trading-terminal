@@ -104,6 +104,57 @@ function getPrimaryTarget(trade: TradeObject): number {
   return safeNumber(trade.targets[0]?.price);
 }
 
+function tradeFillsToFilledOrders(trade: TradeObject): FilledOrderState[] {
+  return trade.fills
+    .filter(
+      (fill) =>
+        Number(fill.shares) > 0 &&
+        Number(fill.price) > 0,
+    )
+    .map((fill) => {
+      const orderId = String(fill.orderId ?? fill.id).trim();
+
+      return {
+        id: orderId,
+        orderId,
+        symbol: cleanSymbol(trade.symbol),
+        side: fill.side,
+        shares: safeNumber(fill.shares),
+        type: "unknown",
+        averageFillPrice: safeNumber(fill.price),
+        filledAt: fill.timestamp,
+        status: "filled",
+        raw: fill,
+      };
+    });
+}
+
+function mergeTradeFills(
+  externalFills: FilledOrderState[],
+  internalFills: FilledOrderState[],
+): FilledOrderState[] {
+  const merged = new Map<string, FilledOrderState>();
+
+  for (const fill of externalFills) {
+    const key = String(fill.orderId || fill.id).trim();
+    if (key) merged.set(key, fill);
+  }
+
+  for (const fill of internalFills) {
+    const key = String(fill.orderId || fill.id).trim();
+    if (!key) continue;
+
+    // TradeEngine fills are authoritative during Practice mode and also act as
+    // a safe fallback when an execution snapshot no longer contains an older
+    // completed order. Prefer the internal fill when both sources exist.
+    merged.set(key, fill);
+  }
+
+  return Array.from(merged.values()).sort(
+    (a, b) => toTimestamp(a.filledAt) - toTimestamp(b.filledAt),
+  );
+}
+
 function inferExitReason(
   trade: TradeObject,
   exitPrice: number,
@@ -344,7 +395,7 @@ export class TradeHistoryEngine {
   ): TradeHistoryEntry | null {
     const linkedOrderIds = new Set(trade.links.alpacaOrderIds ?? []);
 
-    const linkedFills = this.filledOrders.filter((order) => {
+    const externalLinkedFills = this.filledOrders.filter((order) => {
       if (linkedOrderIds.has(order.orderId) || linkedOrderIds.has(order.id)) {
         return true;
       }
@@ -352,8 +403,17 @@ export class TradeHistoryEngine {
       return false;
     });
 
-    // Journal and performance are execution records, not order-history records.
-    // A trade must have at least one real Alpaca fill before it can appear.
+    const internalTradeFills = tradeFillsToFilledOrders(trade);
+    const linkedFills = mergeTradeFills(
+      externalLinkedFills,
+      internalTradeFills,
+    );
+
+    // Journal and Performance are execution records, not submitted-order
+    // records. TradeEngine owns the complete Practice fill history, while the
+    // execution snapshot may contain only the newest filled order. Using both
+    // sources prevents completed Practice trades from disappearing when a
+    // later snapshot replaces the filled-order array.
     if (linkedFills.length === 0) {
       return null;
     }

@@ -60,21 +60,13 @@ export class FocusBoxTool implements ChartTool {
 
     const leftX = Math.min(start.x, end.x);
     const rightX = Math.max(start.x, end.x);
-    const topPrice = Math.max(start.rawPrice, end.rawPrice);
-    const bottomPrice = Math.min(start.rawPrice, end.rawPrice);
-
     if (
       Math.abs(rightX - leftX) >= MIN_FOCUS_WIDTH_PX &&
-      Math.abs(start.y - end.y) >= MIN_FOCUS_HEIGHT_PX &&
-      Number.isFinite(topPrice) &&
-      Number.isFinite(bottomPrice) &&
-      topPrice > bottomPrice
+      Math.abs(start.y - end.y) >= MIN_FOCUS_HEIGHT_PX
     ) {
       context.focusSelection?.({
         leftX,
         rightX,
-        topPrice,
-        bottomPrice,
       });
     }
 

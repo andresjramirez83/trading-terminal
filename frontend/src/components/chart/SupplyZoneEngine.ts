@@ -1,7 +1,7 @@
 // src/components/chart/SupplyZoneEngine.ts
 
 import type { UTCTimestamp } from "lightweight-charts";
-import type { Candle } from "../types/market";
+import type { Candle } from "../../types/market";
 import type { RectangleModel } from "./ChartTypes";
 
 export interface SupplyZone extends RectangleModel {

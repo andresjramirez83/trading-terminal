@@ -1,9 +1,10 @@
 import PanelCard from "../components/PanelCard";
 import { useDecisionCenter } from "../DecisionCenterContext";
 
-function getToneColor(tone: "good" | "warn" | "bad") {
+function getToneColor(tone: "good" | "warn" | "bad" | "neutral") {
   if (tone === "good") return "#22c55e";
   if (tone === "bad") return "#ef4444";
+  if (tone === "neutral") return "#64748b";
   return "#f59e0b";
 }
 

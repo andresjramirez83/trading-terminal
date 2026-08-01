@@ -88,14 +88,16 @@ export type ExecutionEventPayloadMap = {
 
 export type ExecutionEvent<
   TType extends ExecutionEventType = ExecutionEventType,
-> = {
-  id: string;
-  type: TType;
-  source: ExecutionEventSource;
-  mode: ExecutionMode;
-  timestamp: number;
-  payload: ExecutionEventPayloadMap[TType];
-};
+> = TType extends ExecutionEventType
+  ? {
+      id: string;
+      type: TType;
+      source: ExecutionEventSource;
+      mode: ExecutionMode;
+      timestamp: number;
+      payload: ExecutionEventPayloadMap[TType];
+    }
+  : never;
 
 export type ExecutionEventListener<
   TType extends ExecutionEventType = ExecutionEventType,
@@ -122,5 +124,5 @@ export function createExecutionEvent<
     mode,
     timestamp: Date.now(),
     payload,
-  };
+  } as ExecutionEvent<TType>;
 }

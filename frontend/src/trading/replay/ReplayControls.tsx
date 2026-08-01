@@ -34,6 +34,31 @@ function formatReplayTime(value: number | null): string {
   }).format(new Date(value * 1000));
 }
 
+
+function formatStartMode(
+  startMode:
+    | NonNullable<ReplaySnapshot["session"]>["startMode"]
+    | undefined,
+): string {
+  switch (startMode) {
+    case "previous-close":
+      return "Previous Close";
+    case "after-hours":
+      return "After Hours";
+    case "overnight":
+      return "Overnight";
+    case "premarket":
+      return "Premarket";
+    case "seven-am-pacific":
+      return "7:00 AM Pacific";
+    case "custom":
+      return "Custom Time";
+    case "market-open":
+    default:
+      return "Market Open";
+  }
+}
+
 const buttonStyle: React.CSSProperties = {
   border: "1px solid rgba(148,163,184,.25)",
   background: "rgba(30,41,59,.72)",
@@ -65,6 +90,8 @@ export default function ReplayControls({
     !isReplay ||
     snapshot.state === "loading" ||
     snapshot.bars.length === 0;
+
+  const session = snapshot.session ?? null;
 
   return (
     <div
@@ -126,6 +153,40 @@ export default function ReplayControls({
           margin: "0 2px",
         }}
       />
+
+      {isReplay && session ? (
+        <>
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 800,
+              color: "#bfdbfe",
+              border: "1px solid rgba(59,130,246,.28)",
+              borderRadius: 6,
+              padding: "4px 7px",
+              background: "rgba(37,99,235,.1)",
+            }}
+            title="Selected replay trading date"
+          >
+            {session.tradingDate}
+          </span>
+
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 800,
+              color: "#cbd5e1",
+              border: "1px solid rgba(148,163,184,.22)",
+              borderRadius: 6,
+              padding: "4px 7px",
+              background: "rgba(30,41,59,.55)",
+            }}
+            title="Replay session start mode"
+          >
+            {formatStartMode(session.startMode)}
+          </span>
+        </>
+      ) : null}
 
       <button
         type="button"
@@ -236,6 +297,34 @@ export default function ReplayControls({
       {snapshot.state === "loading" ? (
         <span style={{ fontSize: 11, color: "#facc15" }}>
           Loading replay…
+        </span>
+      ) : null}
+
+      {isReplay && session ? (
+        <span
+          style={{
+            fontSize: 10,
+            color: "#94a3b8",
+            whiteSpace: "nowrap",
+          }}
+          title="Loaded replay session coverage"
+        >
+          {[
+            session.loadedPreviousRegularSession
+              ? "Prev RTH"
+              : null,
+            session.loadedAfterHours
+              ? "AH"
+              : null,
+            session.loadedOvernight
+              ? "Overnight"
+              : null,
+            session.loadedPremarket
+              ? "Premarket"
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" • ") || "Selected session"}
         </span>
       ) : null}
 

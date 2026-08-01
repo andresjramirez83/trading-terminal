@@ -7,7 +7,7 @@ import type {
   UTCTimestamp,
 } from "lightweight-charts";
 
-import type { Candle } from "../types/market";
+import type { Candle } from "../../types/market";
 
 export type LiveStatus = "connecting" | "live" | "connected" | "disconnected" | "error";
 
@@ -35,12 +35,20 @@ export interface StudyVisibility {
   ema9: boolean;
   ema20: boolean;
   volume: boolean;
+
+  /**
+   * Controls only the automatic HH/HL/LH/LL study.
+   * Manual market-structure drawings remain independent.
+   */
+  marketStructure: boolean;
 }
 
 export type ChartSeriesBundle = {
   candles: ISeriesApi<"Candlestick">;
   volume: ISeriesApi<"Histogram">;
   vwap: ISeriesApi<"Line">;
+  ema9: ISeriesApi<"Line">;
+  ema20: ISeriesApi<"Line">;
 };
 
 export type PriceLineKind =

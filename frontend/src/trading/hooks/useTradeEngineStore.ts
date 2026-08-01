@@ -287,7 +287,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         event.type === "trade-selected" ||
         event.type === "trade-status-changed"
       ) {
-        applyTradeToStore(event.trade);
+        applyTradeToStore(event.trade ?? null);
         return;
       }
 

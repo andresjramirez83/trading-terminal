@@ -1,7 +1,7 @@
 // src/chart/ProjectionEngine.ts
 
 import type { UTCTimestamp } from "lightweight-charts";
-import type { Candle } from "../types/market";
+import type { Candle } from "../../types/market";
 import type { ProjectionModel } from "./ChartTypes";
 
 export interface ProjectionOptions {

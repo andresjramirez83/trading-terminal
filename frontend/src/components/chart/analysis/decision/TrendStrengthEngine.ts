@@ -19,7 +19,7 @@ export function buildTrendStrength(
   // EMA Alignment
   //
 
-  if (snapshot.ema9 > snapshot.ema20) {
+  if ((snapshot.ema.ema9 ?? 0) > (snapshot.ema.ema20 ?? 0)) {
     emaAlignment = 100;
     score += 12;
   } else {
@@ -31,7 +31,7 @@ export function buildTrendStrength(
   // VWAP Alignment
   //
 
-  if (snapshot.close >= snapshot.vwap) {
+  if ((snapshot.price ?? 0) >= (snapshot.vwap.value ?? snapshot.price ?? 0)) {
     vwapAlignment = 100;
     score += 10;
   } else {
@@ -43,8 +43,8 @@ export function buildTrendStrength(
   // Structure Alignment
   //
 
-  if (snapshot.structureScore !== undefined) {
-    structureAlignment = clamp(snapshot.structureScore);
+  if (snapshot.structure.strength !== undefined) {
+    structureAlignment = clamp(snapshot.structure.strength);
     score += (structureAlignment - 50) * 0.20;
   }
 
@@ -52,8 +52,8 @@ export function buildTrendStrength(
   // Momentum Alignment
   //
 
-  if (snapshot.momentumScore !== undefined) {
-    momentumAlignment = clamp(snapshot.momentumScore);
+  if (snapshot.momentum.score !== undefined) {
+    momentumAlignment = clamp(snapshot.momentum.score);
     score += (momentumAlignment - 50) * 0.20;
   }
 

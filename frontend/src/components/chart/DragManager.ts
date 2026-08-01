@@ -9,6 +9,8 @@ import type {
   PriceRangeDrawing,
   LongPositionDrawing,
   TrendlineDrawing,
+  MarketStructureDrawing,
+  MarketStructureNode,
 } from "./DrawingTypes";
 
 export type DragMode =
@@ -28,7 +30,9 @@ export type DragMode =
   | "long-position"
   | "long-entry"
   | "long-stop"
-  | "long-target";
+  | "long-target"
+  | "market-structure"
+  | `market-node-${number}`;
 
 export type DragState = {
   drawingId: string;
@@ -58,6 +62,15 @@ function clonePoint(point: DrawingPoint): DrawingPoint {
   };
 }
 
+function cloneMarketStructureNode(
+  node: MarketStructureNode,
+): MarketStructureNode {
+  return {
+    ...clonePoint(node),
+    classification: node.classification,
+  };
+}
+
 function cloneDrawing(drawing: ChartDrawing): ChartDrawing {
   if (drawing.type === "horizontal") {
     return {
@@ -73,6 +86,15 @@ function cloneDrawing(drawing: ChartDrawing): ChartDrawing {
       stop: clonePoint(drawing.stop),
       target: clonePoint(drawing.target),
       style: { ...drawing.style },
+    };
+  }
+
+  if (drawing.type === "marketStructure") {
+    return {
+      ...drawing,
+      nodes: drawing.nodes.map(cloneMarketStructureNode),
+      style: { ...drawing.style },
+      selectedNodeIndex: drawing.selectedNodeIndex ?? null,
     };
   }
 
@@ -124,6 +146,13 @@ function buildRectangleFromBounds(
   };
 }
 
+function parseMarketNodeIndex(mode: DragMode): number | null {
+  if (!mode.startsWith("market-node-")) return null;
+
+  const index = Number(mode.slice("market-node-".length));
+  return Number.isInteger(index) && index >= 0 ? index : null;
+}
+
 export class DragManager {
   private dragState: DragState | null = null;
 
@@ -149,6 +178,10 @@ export class DragManager {
 
     if (drawing.type === "trendline") {
       return this.dragTrendline(drawing, point);
+    }
+
+    if (drawing.type === "marketStructure") {
+      return this.dragMarketStructure(drawing, point);
     }
 
     if (drawing.type === "horizontal") {
@@ -217,15 +250,72 @@ export class DragManager {
       ...original.p1,
       time: Number(original.p1.time) + deltaTime,
       price: Number(original.p1.price) + deltaPrice,
+      rawPrice: Number(original.p1.price) + deltaPrice,
     };
 
     updated.p2 = {
       ...original.p2,
       time: Number(original.p2.time) + deltaTime,
       price: Number(original.p2.price) + deltaPrice,
+      rawPrice: Number(original.p2.price) + deltaPrice,
     };
 
     return updated;
+  }
+
+  private dragMarketStructure(
+    drawing: MarketStructureDrawing,
+    point: DrawingPointerEvent,
+  ): MarketStructureDrawing | null {
+    if (!this.dragState) return null;
+    if (this.dragState.original.type !== "marketStructure") return null;
+
+    const original = this.dragState.original;
+    const nodeIndex = parseMarketNodeIndex(this.dragState.mode);
+
+    if (nodeIndex != null) {
+      if (nodeIndex >= original.nodes.length) return null;
+
+      const nodes = original.nodes.map(cloneMarketStructureNode);
+      nodes[nodeIndex] = {
+        ...cloneMarketStructureNode(nodes[nodeIndex]),
+        ...clonePoint(point),
+        classification: nodes[nodeIndex].classification,
+      };
+
+      return {
+        ...drawing,
+        nodes,
+        selected: true,
+        selectedNodeIndex: nodeIndex,
+        style: { ...drawing.style },
+      };
+    }
+
+    if (this.dragState.mode !== "market-structure") return null;
+
+    const deltaTime =
+      Number(point.time) - Number(this.dragState.startPoint.time);
+    const startPrice = Number(
+      this.dragState.startPoint.rawPrice ?? this.dragState.startPoint.price,
+    );
+    const currentPrice = getPointPrice(point);
+    const deltaPrice = currentPrice - startPrice;
+
+    const nodes = original.nodes.map((node) => ({
+      ...cloneMarketStructureNode(node),
+      time: Number(node.time) + deltaTime,
+      price: Number(node.price) + deltaPrice,
+      rawPrice: Number(node.price) + deltaPrice,
+    }));
+
+    return {
+      ...drawing,
+      nodes,
+      selected: true,
+      selectedNodeIndex: null,
+      style: { ...drawing.style },
+    };
   }
 
   private dragHorizontalLine(
@@ -247,8 +337,9 @@ export class DragManager {
     if (
       this.dragState.original.type !== "rectangle" &&
       this.dragState.original.type !== "priceRange"
-    )
+    ) {
       return null;
+    }
 
     const original = this.dragState.original;
     const mode = this.dragState.mode;
@@ -268,11 +359,13 @@ export class DragManager {
           ...original.p1,
           time: Number(original.p1.time) + deltaTime,
           price: Number(original.p1.price) + deltaPrice,
+          rawPrice: Number(original.p1.price) + deltaPrice,
         },
         p2: {
           ...original.p2,
           time: Number(original.p2.time) + deltaTime,
           price: Number(original.p2.price) + deltaPrice,
+          rawPrice: Number(original.p2.price) + deltaPrice,
         },
         style: { ...drawing.style },
       };

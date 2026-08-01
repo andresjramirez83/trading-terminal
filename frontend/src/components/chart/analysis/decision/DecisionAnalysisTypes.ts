@@ -16,3 +16,11 @@ export interface DecisionAnalysisResult {
   confidence: number;
   signals: DecisionSignal[];
 }
+
+export type {
+  DecisionCenterAI,
+  DecisionCenterBalance,
+  DecisionCenterEntryQuality,
+  DecisionCenterRisk,
+  DecisionCenterTrendStrength,
+} from "../../right-panel/DecisionCenterTypes";

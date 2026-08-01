@@ -11,8 +11,6 @@ import type {
 export type FocusSelection = {
   leftX: number;
   rightX: number;
-  topPrice: number;
-  bottomPrice: number;
 };
 
 export type ToolContext = {

@@ -9,7 +9,11 @@ import {
   type ChartToolCompletionEvent,
   type ChartToolId,
 } from "./ChartTool";
-import type { ChartPointBuilder, FocusSelection, ToolContext } from "./ToolContext";
+import type {
+  ChartPointBuilder,
+  FocusSelection,
+  ToolContext,
+} from "./ToolContext";
 import { createChartMouseEvent } from "./events/ChartMouseEvent";
 import { SelectTool } from "./tools/SelectTool";
 import { FocusBoxTool } from "./tools/FocusBoxTool";
@@ -65,7 +69,8 @@ export class ChartInteractionManager {
     this.chart = options.chart;
     this.buildPointFromClick = options.buildPointFromClick;
     this.buildPointFromPointerEvent = options.buildPointFromPointerEvent;
-    this.buildFallbackPointFromMouseEvent = options.buildFallbackPointFromMouseEvent;
+    this.buildFallbackPointFromMouseEvent =
+      options.buildFallbackPointFromMouseEvent;
 
     this.overlayCanvas = document.createElement("canvas");
     this.overlayCanvas.style.position = "absolute";
@@ -156,7 +161,9 @@ export class ChartInteractionManager {
     return () => this.pointerUpListeners.delete(listener);
   }
 
-  subscribeContextMenu(listener: (point: ChartPointerPoint) => void): () => void {
+  subscribeContextMenu(
+    listener: (point: ChartPointerPoint) => void,
+  ): () => void {
     this.contextMenuListeners.add(listener);
     return () => this.contextMenuListeners.delete(listener);
   }
@@ -173,7 +180,8 @@ export class ChartInteractionManager {
     if (!point) return;
 
     const event = createChartMouseEvent("click", point, point.nativeEvent);
-    const handled = this.registry.getActiveTool()?.onClick?.(event, this.toolContext) === true;
+    const handled =
+      this.registry.getActiveTool()?.onClick?.(event, this.toolContext) === true;
 
     if (!handled) {
       for (const listener of this.clickListeners) listener(point);
@@ -193,9 +201,13 @@ export class ChartInteractionManager {
     if (nativeEvent.shiftKey) {
       this.focusGestureActive = true;
       this.setNavigationSuppressed(true);
-      handled = this.focusBoxTool.onMouseDown?.(event, this.toolContext) === true;
+      handled =
+        this.focusBoxTool.onMouseDown?.(event, this.toolContext) === true;
     } else {
-      handled = this.registry.getActiveTool()?.onMouseDown?.(event, this.toolContext) === true;
+      handled =
+        this.registry
+          .getActiveTool()
+          ?.onMouseDown?.(event, this.toolContext) === true;
     }
 
     if (handled) {
@@ -217,9 +229,13 @@ export class ChartInteractionManager {
     let handled = false;
     if (this.focusGestureActive || nativeEvent.shiftKey) {
       if (nativeEvent.shiftKey) this.setNavigationSuppressed(true);
-      handled = this.focusBoxTool.onMouseMove?.(event, this.toolContext) === true;
+      handled =
+        this.focusBoxTool.onMouseMove?.(event, this.toolContext) === true;
     } else {
-      handled = this.registry.getActiveTool()?.onMouseMove?.(event, this.toolContext) === true;
+      handled =
+        this.registry
+          .getActiveTool()
+          ?.onMouseMove?.(event, this.toolContext) === true;
     }
 
     if (handled) {
@@ -248,7 +264,9 @@ export class ChartInteractionManager {
       this.focusGestureActive = false;
       this.setNavigationSuppressed(false);
     } else {
-      handled = this.registry.getActiveTool()?.onMouseUp?.(event, this.toolContext) === true;
+      handled =
+        this.registry.getActiveTool()?.onMouseUp?.(event, this.toolContext) ===
+        true;
     }
 
     if (handled) {
@@ -271,10 +289,15 @@ export class ChartInteractionManager {
     if (!point) return;
 
     const event = createChartMouseEvent("contextmenu", point, nativeEvent);
-    const handled = this.registry.getActiveTool()?.onContextMenu?.(event, this.toolContext) === true;
+    const handled =
+      this.registry
+        .getActiveTool()
+        ?.onContextMenu?.(event, this.toolContext) === true;
 
     if (handled) {
       this.blockNativeEvent(nativeEvent);
+      this.processCompletedTool();
+      this.scheduleOverlayRender();
       return;
     }
 
@@ -287,11 +310,21 @@ export class ChartInteractionManager {
 
     const event = createChartMouseEvent("doubleclick", point, nativeEvent);
 
+    let handled = false;
+
     if (nativeEvent.shiftKey) {
-      const handled = this.focusBoxTool.onDoubleClick?.(event, this.toolContext) === true;
-      if (handled) this.blockNativeEvent(nativeEvent);
+      handled =
+        this.focusBoxTool.onDoubleClick?.(event, this.toolContext) === true;
     } else {
-      this.registry.getActiveTool()?.onDoubleClick?.(event, this.toolContext);
+      handled =
+        this.registry
+          .getActiveTool()
+          ?.onDoubleClick?.(event, this.toolContext) === true;
+    }
+
+    if (handled) {
+      this.blockNativeEvent(nativeEvent);
+      this.processCompletedTool();
     }
 
     this.scheduleOverlayRender();
@@ -305,20 +338,42 @@ export class ChartInteractionManager {
     }
 
     if (event.key === "Escape") {
-      const focusHandled = this.focusBoxTool.onCancel?.(this.toolContext) === true;
+      const activeTool = this.registry.getActiveTool();
+      const toolHandled =
+        activeTool?.onKeyDown?.(event, this.toolContext) === true;
+
+      if (toolHandled) {
+        this.focusGestureActive = false;
+        this.setNavigationSuppressed(false);
+        this.processCompletedTool();
+        this.scheduleOverlayRender();
+        return;
+      }
+
+      const focusHandled =
+        this.focusBoxTool.onCancel?.(this.toolContext) === true;
+
       this.focusGestureActive = false;
       this.setNavigationSuppressed(false);
       this.clearOverlay();
 
-      if (!focusHandled) this.registry.cancelActiveTool();
+      if (!focusHandled) {
+        this.registry.cancelActiveTool();
+      }
+
+      this.scheduleOverlayRender();
       return;
     }
 
-    const handled = this.registry.getActiveTool()?.onKeyDown?.(event, this.toolContext) === true;
+    const handled =
+      this.registry.getActiveTool()?.onKeyDown?.(event, this.toolContext) ===
+      true;
+
     if (handled) {
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation?.();
+      this.processCompletedTool();
       this.scheduleOverlayRender();
     }
   }
@@ -364,6 +419,7 @@ export class ChartInteractionManager {
 
   private setNavigationSuppressed(suppressed: boolean): void {
     if (this.navigationSuppressed === suppressed) return;
+
     this.navigationSuppressed = suppressed;
     this.toolContext.setChartNavigationEnabled?.(!suppressed);
   }
@@ -384,7 +440,14 @@ export class ChartInteractionManager {
     this.overlayCanvas.style.height = `${height}px`;
     this.overlayCanvas.width = Math.max(1, Math.floor(width * pixelRatio));
     this.overlayCanvas.height = Math.max(1, Math.floor(height * pixelRatio));
-    this.overlayContext.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    this.overlayContext.setTransform(
+      pixelRatio,
+      0,
+      0,
+      pixelRatio,
+      0,
+      0,
+    );
     this.scheduleOverlayRender();
   }
 
@@ -412,11 +475,27 @@ export class ChartInteractionManager {
 
   destroy(): void {
     this.chart.unsubscribeClick(this.handleClick);
-    this.container.removeEventListener("pointerdown", this.handlePointerDown, true);
-    this.container.removeEventListener("pointermove", this.handlePointerMove, true);
+    this.container.removeEventListener(
+      "pointerdown",
+      this.handlePointerDown,
+      true,
+    );
+    this.container.removeEventListener(
+      "pointermove",
+      this.handlePointerMove,
+      true,
+    );
     window.removeEventListener("pointerup", this.handlePointerUp, true);
-    this.container.removeEventListener("contextmenu", this.handleContextMenu, true);
-    this.container.removeEventListener("dblclick", this.handleDoubleClick, true);
+    this.container.removeEventListener(
+      "contextmenu",
+      this.handleContextMenu,
+      true,
+    );
+    this.container.removeEventListener(
+      "dblclick",
+      this.handleDoubleClick,
+      true,
+    );
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
     window.removeEventListener("resize", this.handleResize);
@@ -432,6 +511,7 @@ export class ChartInteractionManager {
     this.pointerUpListeners.clear();
     this.contextMenuListeners.clear();
     this.toolCompletedListeners.clear();
+
     this.clearOverlay();
     this.overlayCanvas.remove();
     this.container.style.cursor = "";

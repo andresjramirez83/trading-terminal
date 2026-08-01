@@ -18,6 +18,36 @@ function finitePrice(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function buildRangeFromBars(bars: CleanBar[]): PriceRange | null {
+  let minValue = Number.POSITIVE_INFINITY;
+  let maxValue = Number.NEGATIVE_INFINITY;
+
+  for (const bar of bars) {
+    const high = finitePrice(bar.high);
+    const low = finitePrice(bar.low);
+
+    if (high == null || low == null) {
+      continue;
+    }
+
+    minValue = Math.min(minValue, low);
+    maxValue = Math.max(maxValue, high);
+  }
+
+  if (
+    !Number.isFinite(minValue) ||
+    !Number.isFinite(maxValue) ||
+    minValue >= maxValue
+  ) {
+    return null;
+  }
+
+  return {
+    minValue,
+    maxValue,
+  };
+}
+
 function padRange(range: PriceRange): PriceRange {
   const minValue = finitePrice(range.minValue);
   const maxValue = finitePrice(range.maxValue);
@@ -28,6 +58,7 @@ function padRange(range: PriceRange): PriceRange {
 
   if (minValue === maxValue) {
     const padding = Math.max(Math.abs(minValue) * 0.03, 0.01);
+
     return {
       minValue: minValue - padding,
       maxValue: maxValue + padding,
@@ -70,6 +101,18 @@ export class ChartAutoScaleManager {
     };
   }
 
+  setFocusedBars(bars: CleanBar[]): boolean {
+    const range = buildRangeFromBars(bars);
+
+    if (!range) {
+      this.focusedPriceRange = null;
+      return false;
+    }
+
+    this.focusedPriceRange = range;
+    return true;
+  }
+
   clearFocusedPriceRange(): void {
     this.focusedPriceRange = null;
   }
@@ -90,25 +133,12 @@ export class ChartAutoScaleManager {
     }
 
     const recentBars = input.bars.slice(-650);
-    let minValue = Number.POSITIVE_INFINITY;
-    let maxValue = Number.NEGATIVE_INFINITY;
+    const recentRange = buildRangeFromBars(recentBars);
 
-    for (const bar of recentBars) {
-      const high = finitePrice(bar.high);
-      const low = finitePrice(bar.low);
-
-      if (high == null || low == null) {
-        continue;
-      }
-
-      minValue = Math.min(minValue, low);
-      maxValue = Math.max(maxValue, high);
-    }
-
-    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+    if (!recentRange) {
       return input.baseRange ? padRange(input.baseRange) : input.baseRange;
     }
 
-    return padRange({ minValue, maxValue });
+    return padRange(recentRange);
   }
 }

@@ -15,7 +15,7 @@ export function buildBalance(snapshot: StudySnapshot): DecisionCenterBalance {
   const structureStrength = snapshot.structure?.strength ?? 50;
   const compressionScore = snapshot.compression?.score ?? 50;
   const relativeVolume = snapshot.volume?.relative ?? 1;
-  const price = snapshot.price?.close ?? 0;
+  const price = snapshot.price ?? 0;
   const vwap = snapshot.vwap?.value ?? price;
 
   const aboveVWAP = price >= vwap;

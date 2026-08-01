@@ -1,4 +1,4 @@
-import type { StatusTone } from "./widgets/StatusDot";
+import type { StatusTone } from "./components/StatusDot";
 
 export type DecisionCenterStatus = "Ready" | "Caution" | "Avoid";
 
@@ -20,9 +20,9 @@ export interface DecisionCenterPerformanceItem {
 }
 
 export interface DecisionCenterScoreBlock {
-  score: number | string;
+  score: number;
   subtitle: string;
-  badge?: string;
+  badge: string;
   tone: StatusTone;
 }
 
@@ -53,6 +53,15 @@ export interface DecisionCenterStats {
   volume: string;
   atr: string;
   rr: string;
+}
+
+export interface DecisionCenterKeyStats {
+  price?: number;
+  range?: number;
+  volume?: number;
+  atr?: number;
+  vwapDistance?: number;
+  rr?: string;
 }
 
 export interface DecisionCenterTrendStrength {
@@ -98,8 +107,22 @@ export interface DecisionCenterRisk {
   expectedRR: string;
 }
 
+export type DecisionCenterAction =
+  | "BUY"
+  | "WATCH LONG"
+  | "WAIT"
+  | "WATCH SHORT"
+  | "SELL"
+  | "AVOID";
+
 export interface DecisionCenterAI {
-  action: "BUY" | "WAIT" | "SELL" | "AVOID";
+  /**
+   * Direction and execution readiness are intentionally separate.
+   *
+   * WATCH LONG / WATCH SHORT means market structure has established a
+   * directional bias, but the current entry or risk conditions are not ready.
+   */
+  action: DecisionCenterAction;
   confidence: number;
   reason: string;
   tone: StatusTone;
@@ -113,6 +136,7 @@ export interface DecisionCenterState {
   momentum: DecisionCenterMomentum;
   vwap: DecisionCenterVWAP;
   stats: DecisionCenterStats;
+  keyStats: DecisionCenterKeyStats;
 
   trendStrength: DecisionCenterTrendStrength;
   balance: DecisionCenterBalance;

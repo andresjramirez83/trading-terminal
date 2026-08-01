@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { StudyVisibility } from "../../chart/ChartTypes";
+import type { StudyVisibility } from "./ChartTypes";
 
 type Props = {
   visibility: StudyVisibility;
@@ -11,6 +11,7 @@ const TOGGLES: { key: keyof StudyVisibility; label: string }[] = [
   { key: "ema9", label: "EMA 9" },
   { key: "ema20", label: "EMA 20" },
   { key: "volume", label: "Volume" },
+  { key: "marketStructure", label: "Auto Market Structure" },
 ];
 
 export default function ChartStudyToggles({ visibility, onChange }: Props) {

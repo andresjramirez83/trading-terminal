@@ -12,6 +12,7 @@ import type {
   DrawingStyle,
   HorizontalLineDrawing,
   LongPositionDrawing,
+  MarketStructureDrawing,
   PriceRangeDrawing,
   RectangleDrawing,
   TrendlineDrawing,
@@ -133,6 +134,14 @@ export class DrawingRenderer {
 
     const activeIds = new Set(drawings.map((drawing) => drawing.id));
 
+    for (const id of Array.from(this.drawingSeries.keys())) {
+      if (!activeIds.has(id)) this.removeLine(id);
+    }
+
+    for (const id of Array.from(this.handleSeries.keys())) {
+      if (!activeIds.has(id)) this.removeHandles(id);
+    }
+
     for (const id of Array.from(this.boxElements.keys())) {
       if (!activeIds.has(id)) this.removeBox(id);
     }
@@ -143,21 +152,29 @@ export class DrawingRenderer {
   }
 
   renderDrawing(drawing: ChartDrawing, selectedDrawingId: string | null): void {
-    this.removeLine(drawing.id);
-    this.removeHandles(drawing.id);
-    this.removeBox(drawing.id);
-
     if (drawing.type === "horizontal") {
+      this.removeBox(drawing.id);
       this.renderHorizontalLine(drawing);
       this.renderHandlesForDrawing(drawing, selectedDrawingId);
       return;
     }
 
     if (drawing.type === "trendline") {
+      this.removeBox(drawing.id);
       this.renderTrendline(drawing);
       this.renderHandlesForDrawing(drawing, selectedDrawingId);
       return;
     }
+
+    if (drawing.type === "marketStructure") {
+      this.removeBox(drawing.id);
+      this.renderMarketStructure(drawing);
+      this.renderHandlesForDrawing(drawing, selectedDrawingId);
+      return;
+    }
+
+    this.removeLine(drawing.id);
+    this.removeHandles(drawing.id);
 
     if (drawing.type === "rectangle" || drawing.type === "priceRange") {
       this.renderBox(drawing, selectedDrawingId);
@@ -219,10 +236,17 @@ export class DrawingRenderer {
   }
 
   private renderHorizontalLine(drawing: HorizontalLineDrawing): void {
-    const series = this.chart.addSeries(
-      LineSeries,
-      this.baseLineOptions(drawing.style),
-    );
+    let series = this.drawingSeries.get(drawing.id);
+
+    if (!series) {
+      series = this.chart.addSeries(
+        LineSeries,
+        this.baseLineOptions(drawing.style),
+      );
+      this.drawingSeries.set(drawing.id, series);
+    } else {
+      series.applyOptions(this.baseLineOptions(drawing.style));
+    }
 
     const range = this.chart.timeScale().getVisibleRange();
     const from = Number(range?.from ?? Math.floor(Date.now() / 1000) - 86400);
@@ -232,27 +256,71 @@ export class DrawingRenderer {
       { time: from as Time, value: drawing.price },
       { time: to as Time, value: drawing.price },
     ]);
-
-    this.drawingSeries.set(drawing.id, series);
   }
 
   private renderTrendline(drawing: TrendlineDrawing): void {
     const { p1Time, p1Price, p2Time, p2Price } =
       this.getRenderedTrendlinePoints(drawing);
 
-    if (p1Time === p2Time) return;
+    if (p1Time === p2Time) {
+      this.removeLine(drawing.id);
+      return;
+    }
 
-    const series = this.chart.addSeries(
-      LineSeries,
-      this.baseLineOptions(drawing.style),
-    );
+    let series = this.drawingSeries.get(drawing.id);
+
+    if (!series) {
+      series = this.chart.addSeries(
+        LineSeries,
+        this.baseLineOptions(drawing.style),
+      );
+      this.drawingSeries.set(drawing.id, series);
+    } else {
+      series.applyOptions(this.baseLineOptions(drawing.style));
+    }
 
     series.setData([
       { time: p1Time as Time, value: p1Price },
       { time: p2Time as Time, value: p2Price },
     ]);
+  }
 
-    this.drawingSeries.set(drawing.id, series);
+  private renderMarketStructure(drawing: MarketStructureDrawing): void {
+    const points = drawing.nodes
+      .map((node) => ({
+        time: Number(node.time),
+        price: Number(node.price),
+      }))
+      .filter(
+        (node) =>
+          Number.isFinite(node.time) &&
+          Number.isFinite(node.price),
+      )
+      .sort((a, b) => a.time - b.time);
+
+    if (points.length < 2) {
+      this.removeLine(drawing.id);
+      return;
+    }
+
+    let series = this.drawingSeries.get(drawing.id);
+
+    if (!series) {
+      series = this.chart.addSeries(
+        LineSeries,
+        this.baseLineOptions(drawing.style),
+      );
+      this.drawingSeries.set(drawing.id, series);
+    } else {
+      series.applyOptions(this.baseLineOptions(drawing.style));
+    }
+
+    series.setData(
+      points.map((point) => ({
+        time: point.time as Time,
+        value: point.price,
+      })),
+    );
   }
 
   private renderBox(
@@ -587,28 +655,52 @@ export class DrawingRenderer {
     drawing: ChartDrawing,
     selectedDrawingId: string | null,
   ): void {
-    this.removeHandles(drawing.id);
+    if (
+      drawing.id !== selectedDrawingId ||
+      (drawing.type !== "trendline" && drawing.type !== "marketStructure")
+    ) {
+      this.removeHandles(drawing.id);
+      return;
+    }
 
-    if (drawing.id !== selectedDrawingId) return;
-    if (drawing.type !== "trendline") return;
+    let series = this.handleSeries.get(drawing.id);
 
-    const series = this.chart.addSeries(
-      LineSeries,
-      this.handleLineOptions(drawing.style),
-    );
+    if (!series) {
+      series = this.chart.addSeries(
+        LineSeries,
+        this.handleLineOptions(drawing.style),
+      );
+      this.handleSeries.set(drawing.id, series);
+    } else {
+      series.applyOptions(this.handleLineOptions(drawing.style));
+    }
 
-    series.setData([
-      {
-        time: Number(drawing.p1.time) as Time,
-        value: Number(drawing.p1.price),
-      },
-      {
-        time: Number(drawing.p2.time) as Time,
-        value: Number(drawing.p2.price),
-      },
-    ]);
-
-    this.handleSeries.set(drawing.id, series);
+    if (drawing.type === "trendline") {
+      series.setData([
+        {
+          time: Number(drawing.p1.time) as Time,
+          value: Number(drawing.p1.price),
+        },
+        {
+          time: Number(drawing.p2.time) as Time,
+          value: Number(drawing.p2.price),
+        },
+      ]);
+    } else {
+      series.setData(
+        drawing.nodes
+          .map((node) => ({
+            time: Number(node.time) as Time,
+            value: Number(node.price),
+          }))
+          .filter(
+            (node) =>
+              Number.isFinite(Number(node.time)) &&
+              Number.isFinite(node.value),
+          )
+          .sort((a, b) => Number(a.time) - Number(b.time)),
+      );
+    }
   }
 
   private resizeSvgOverlay(): void {

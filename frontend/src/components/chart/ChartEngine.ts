@@ -28,7 +28,7 @@ import { getSmartSnapPrice } from "./SnapManager";
 import { StudyRenderer } from "./studies/StudyRenderer";
 import { ChartInteractionManager } from "./interaction/ChartInteractionManager";
 import type { ChartTool, ChartToolId } from "./interaction/ChartTool";
-import type { ChartFocusSelection } from "./interaction/ToolContext";
+import type { FocusSelection } from "./interaction/ToolContext";
 import { ChartAutoScaleManager } from "./ChartAutoScaleManager";
 import { getCurrentVWAP } from "./studies/VWAPStudy";
 import { getCurrentATR } from "./studies/ATRStudy";
@@ -94,6 +94,60 @@ const NEW_YORK_TIME_PARTS_FORMATTER = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
   hour12: false,
 });
+
+const NEW_YORK_MARKET_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function getMarketDateKey(time: Time): string | null {
+  const timestamp = chartTimeToTimestampMs(time);
+  if (timestamp == null) return null;
+
+  return NEW_YORK_MARKET_DATE_FORMATTER.format(new Date(timestamp));
+}
+
+function getTradingDayLimit(timeframe?: string): number | null {
+  const normalized = String(timeframe ?? "").trim().toLowerCase();
+
+  if (normalized === "1m" || normalized === "1min") return 3;
+  if (normalized === "5m" || normalized === "5min") return 5;
+
+  return null;
+}
+
+function trimBarsForTimeframe(
+  bars: CleanBar[],
+  timeframe?: string,
+): CleanBar[] {
+  const tradingDayLimit = getTradingDayLimit(timeframe);
+
+  if (tradingDayLimit == null) {
+    return bars.slice(-500);
+  }
+
+  const keptDates = new Set<string>();
+  let startIndex = bars.length;
+
+  for (let index = bars.length - 1; index >= 0; index -= 1) {
+    const dateKey = getMarketDateKey(bars[index].time);
+    if (!dateKey) continue;
+
+    if (!keptDates.has(dateKey)) {
+      if (keptDates.size >= tradingDayLimit) {
+        break;
+      }
+
+      keptDates.add(dateKey);
+    }
+
+    startIndex = index;
+  }
+
+  return bars.slice(startIndex);
+}
 
 function getEasternMinutes(time: Time): number | null {
   const timestamp =
@@ -815,7 +869,7 @@ export class ChartEngine {
   }
 
   setBars(bars: CleanBar[]): void {
-    this.bars = bars.slice(-500);
+    this.bars = trimBarsForTimeframe(bars, this.timeframe);
     this.lastCrosshairInfo = this.getLastBarInfo();
 
     const newestBar = this.bars[this.bars.length - 1];
@@ -850,7 +904,7 @@ export class ChartEngine {
       this.bars.push(bar);
     }
 
-    this.bars = this.bars.slice(-500);
+    this.bars = trimBarsForTimeframe(this.bars, this.timeframe);
     this.lastCrosshairInfo = buildCrosshairInfoFromBar(bar);
     this.positionOverlayEngine.updateMarketPrice(bar.close);
 
@@ -895,6 +949,7 @@ export class ChartEngine {
   }
 
   setStudyVisibility(visibility: StudyVisibility): void {
+    this.studyRenderer.setStructureVisible(visibility.marketStructure);
     this.series.vwap.applyOptions({ visible: visibility.vwap });
     this.series.ema9.applyOptions({ visible: visibility.ema9 });
     this.series.ema20.applyOptions({ visible: visibility.ema20 });
@@ -905,19 +960,15 @@ export class ChartEngine {
     this.chart.timeScale().fitContent();
   }
 
-  focusSelection(selection: ChartFocusSelection): void {
+  focusSelection(selection: FocusSelection): void {
     const leftX = Number(selection.leftX);
     const rightX = Number(selection.rightX);
-    const topPrice = Number(selection.topPrice);
-    const bottomPrice = Number(selection.bottomPrice);
 
     if (
       !Number.isFinite(leftX) ||
       !Number.isFinite(rightX) ||
-      !Number.isFinite(topPrice) ||
-      !Number.isFinite(bottomPrice) ||
       rightX <= leftX ||
-      topPrice <= bottomPrice
+      !this.bars.length
     ) {
       return;
     }
@@ -927,28 +978,52 @@ export class ChartEngine {
       setVisibleLogicalRange?: (range: { from: number; to: number }) => void;
     };
 
-    const fromLogical = timeScale.coordinateToLogical?.(leftX);
-    const toLogical = timeScale.coordinateToLogical?.(rightX);
+    const leftLogical = timeScale.coordinateToLogical?.(leftX);
+    const rightLogical = timeScale.coordinateToLogical?.(rightX);
 
     if (
-      fromLogical != null &&
-      toLogical != null &&
-      Number.isFinite(Number(fromLogical)) &&
-      Number.isFinite(Number(toLogical))
+      leftLogical == null ||
+      rightLogical == null ||
+      !Number.isFinite(Number(leftLogical)) ||
+      !Number.isFinite(Number(rightLogical))
     ) {
-      const from = Math.min(Number(fromLogical), Number(toLogical));
-      const to = Math.max(Number(fromLogical), Number(toLogical));
-
-      if (to - from >= 0.5) {
-        timeScale.setVisibleLogicalRange?.({ from, to });
-      }
+      return;
     }
 
-    this.autoScaleManager.setFocusedPriceRange({
-      minValue: bottomPrice,
-      maxValue: topPrice,
-    });
+    const from = Math.min(Number(leftLogical), Number(rightLogical));
+    const to = Math.max(Number(leftLogical), Number(rightLogical));
+
+    if (to - from < 0.5) {
+      return;
+    }
+
+    // Logical indexes map directly to the candle order supplied through
+    // setData(). Include partially selected candles at both edges.
+    const firstIndex = Math.max(
+      0,
+      Math.min(this.bars.length - 1, Math.floor(from)),
+    );
+    const lastIndex = Math.max(
+      firstIndex,
+      Math.min(this.bars.length - 1, Math.ceil(to)),
+    );
+    const selectedBars = this.bars.slice(firstIndex, lastIndex + 1);
+
+    if (!selectedBars.length) {
+      return;
+    }
+
+    // The vertical height of the Shift-drag rectangle is visual only.
+    // Focus the price scale on the actual highest high and lowest low of
+    // the candles contained in the selected time range.
+    if (!this.autoScaleManager.setFocusedBars(selectedBars)) {
+      return;
+    }
+
+    timeScale.setVisibleLogicalRange?.({ from, to });
     this.refreshCandleAutoscale();
+    this.scheduleSessionBandsRender();
+    this.studyRenderer.scheduleOverlayRender();
   }
 
   resetFocus(): void {
@@ -962,7 +1037,7 @@ export class ChartEngine {
     this.renderFxAnalysis();
   }
 
-  getLastBarInfo(): CrosshairInfo | null {
+  getLastBarInfo(): (CrosshairInfo & { range: number }) | null {
     const lastBar = this.bars[this.bars.length - 1];
 
     if (!lastBar) {

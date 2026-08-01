@@ -1,7 +1,7 @@
 // src/components/chart/DemandZoneEngine.ts
 
 import type { UTCTimestamp } from "lightweight-charts";
-import type { Candle } from "../types/market";
+import type { Candle } from "../../types/market";
 import type { DemandZone } from "./ChartTypes";
 
 export interface DemandZoneOptions {

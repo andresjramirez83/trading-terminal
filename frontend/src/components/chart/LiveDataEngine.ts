@@ -42,14 +42,24 @@ export function normalizeLiveBar(bar: LiveBarMessage | any): CleanBar | null {
 export async function loadHistoricalBars(params: {
   symbol: string;
   timeframe: string;
+
+  /**
+   * Optional exchange trading day in YYYY-MM-DD format.
+   * When present, the backend returns bars for that specific session.
+   */
+  date?: string;
+
   lookback?: string;
   limit?: number;
 }): Promise<CleanBar[]> {
   const cleanSymbol = String(params.symbol || "SPY").trim().toUpperCase();
   const cleanTimeframe = String(params.timeframe || "5m").trim().toLowerCase();
 
+  const cleanDate = String(params.date ?? "").trim();
+
   const response = await fetchBars(cleanSymbol, cleanTimeframe, {
-    lookback: params.lookback ?? "5d",
+    date: cleanDate || undefined,
+    lookback: cleanDate ? undefined : params.lookback ?? "5d",
     session: "extended",
     limit: params.limit ?? 500,
     forceRefresh: true,

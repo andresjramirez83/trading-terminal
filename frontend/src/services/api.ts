@@ -196,15 +196,27 @@ export async function fetchBars(
 ): Promise<BarsResponse> {
   const normalizedSymbol = symbol.trim().toUpperCase();
   const normalizedTimeframe = timeframe.trim().toLowerCase();
-  const normalizedLookback = normalizeLookback(normalizedTimeframe, options?.lookback);
+  const normalizedDate = String(options?.date ?? "").trim();
+
+  const normalizedLookback = normalizedDate
+    ? ""
+    : normalizeLookback(
+        normalizedTimeframe,
+        options?.lookback,
+      );
 
   const params = new URLSearchParams({
     symbol: normalizedSymbol,
     timeframe: normalizedTimeframe,
   });
 
-  if (options?.date) params.set("date", options.date);
-  if (normalizedLookback) params.set("lookback", normalizedLookback);
+  if (normalizedDate) {
+    params.set("date", normalizedDate);
+  }
+
+  if (normalizedLookback) {
+    params.set("lookback", normalizedLookback);
+  }
 
   const normalizedSession =
     options?.session === "regular"
@@ -229,7 +241,7 @@ export async function fetchBars(
     params.set("_ts", String(Date.now()));
   }
 
-  const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${options?.date ?? ""}|${normalizedLookback}|${normalizedSession ?? ""}|${limit}`;
+  const cacheKey = `${normalizedSymbol}|${normalizedTimeframe}|${normalizedDate}|${normalizedLookback}|${normalizedSession ?? ""}|${limit}`;
   const now = Date.now();
   pruneBarsCache(now);
 

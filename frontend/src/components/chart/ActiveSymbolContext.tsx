@@ -16,6 +16,8 @@ type SymbolSelectionSource =
   | "trading"
   | "positions"
   | "orders"
+  | "practice-replay"
+  | "watchlist-remove"
   | "system";
 
 interface ActiveSymbolContextValue {

@@ -2,6 +2,8 @@ import type { ChartState } from "../../../ChartState";
 import type { CleanBar } from "../../../ChartTypes";
 import type { StudySnapshot } from "./StudySnapshotTypes";
 
+export type { StudySnapshot } from "./StudySnapshotTypes";
+
 function calculateEma(values: number[], length: number): number | undefined {
   if (values.length === 0) return undefined;
 
