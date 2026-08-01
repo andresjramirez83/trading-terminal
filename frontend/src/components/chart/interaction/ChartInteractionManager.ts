@@ -23,6 +23,7 @@ type ChartInteractionManagerOptions = ChartPointBuilder & {
   chart: IChartApi;
   focusSelection?: (selection: FocusSelection) => void;
   resetFocus?: () => void;
+  panPriceScale?: (deltaY: number) => void;
   setChartNavigationEnabled?: (enabled: boolean) => void;
 };
 
@@ -34,6 +35,7 @@ export class ChartInteractionManager {
   private readonly buildPointFromClick: ChartPointBuilder["buildPointFromClick"];
   private readonly buildPointFromPointerEvent: ChartPointBuilder["buildPointFromPointerEvent"];
   private readonly buildFallbackPointFromMouseEvent: ChartPointBuilder["buildFallbackPointFromMouseEvent"];
+  private readonly panPriceScale?: (deltaY: number) => void;
 
   private readonly clickListeners = new Set<(point: ChartPointerPoint) => void>();
   private readonly pointerDownListeners = new Set<(point: ChartPointerPoint) => void>();
@@ -52,6 +54,8 @@ export class ChartInteractionManager {
   private lastPointerPoint: ChartPointerPoint | null = null;
   private overlayRenderFrame: number | null = null;
   private focusGestureActive = false;
+  private chartPanGestureActive = false;
+  private lastChartPanClientY: number | null = null;
   private navigationSuppressed = false;
 
   private readonly handleClick: (param: MouseEventParams<Time>) => void;
@@ -71,6 +75,7 @@ export class ChartInteractionManager {
     this.buildPointFromPointerEvent = options.buildPointFromPointerEvent;
     this.buildFallbackPointFromMouseEvent =
       options.buildFallbackPointFromMouseEvent;
+    this.panPriceScale = options.panPriceScale;
 
     this.overlayCanvas = document.createElement("canvas");
     this.overlayCanvas.style.position = "absolute";
@@ -208,6 +213,11 @@ export class ChartInteractionManager {
         this.registry
           .getActiveTool()
           ?.onMouseDown?.(event, this.toolContext) === true;
+
+      if (!handled && nativeEvent.button === 0) {
+        this.chartPanGestureActive = true;
+        this.lastChartPanClientY = nativeEvent.clientY;
+      }
     }
 
     if (handled) {
@@ -236,6 +246,17 @@ export class ChartInteractionManager {
         this.registry
           .getActiveTool()
           ?.onMouseMove?.(event, this.toolContext) === true;
+
+      if (
+        !handled &&
+        this.chartPanGestureActive &&
+        this.lastChartPanClientY != null &&
+        (nativeEvent.buttons & 1) === 1
+      ) {
+        const deltaY = nativeEvent.clientY - this.lastChartPanClientY;
+        this.lastChartPanClientY = nativeEvent.clientY;
+        this.panPriceScale?.(deltaY);
+      }
     }
 
     if (handled) {
@@ -248,6 +269,9 @@ export class ChartInteractionManager {
   }
 
   private onPointerUp(nativeEvent: PointerEvent): void {
+    this.chartPanGestureActive = false;
+    this.lastChartPanClientY = null;
+
     const point =
       this.buildPointFromPointerEvent(nativeEvent) ??
       this.lastPointerPoint ??
@@ -320,6 +344,11 @@ export class ChartInteractionManager {
         this.registry
           .getActiveTool()
           ?.onDoubleClick?.(event, this.toolContext) === true;
+    }
+
+    if (!handled) {
+      handled =
+        this.focusBoxTool.onDoubleClick?.(event, this.toolContext) === true;
     }
 
     if (handled) {

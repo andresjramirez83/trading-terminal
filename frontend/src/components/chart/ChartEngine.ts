@@ -416,10 +416,7 @@ export class ChartEngine {
     // Keep the chart fast: this autoscale provider only scans the current
     // in-memory 500 bars and the small FX analysis store. No DOM work, no
     // recalculation of algorithms, and no series creation happens here.
-    (this.series.candles as unknown as {
-      applyOptions?: (options: Record<string, unknown>) => void;
-    }).applyOptions?.({
-      autoscaleInfoProvider: (baseImplementation: () => {
+    const autoScaleInfoProvider = (baseImplementation: () => {
         priceRange?: { minValue: number; maxValue: number } | null;
         margins?: unknown;
       } | null) => {
@@ -434,8 +431,22 @@ export class ChartEngine {
           ...(base ?? {}),
           priceRange,
         };
-      },
-    });
+      };
+
+    // Every visible price series must use the same shifted range. Otherwise
+    // VWAP or an EMA could keep the scale anchored while the candles move.
+    for (const priceSeries of [
+      this.series.candles,
+      this.series.vwap,
+      this.series.ema9,
+      this.series.ema20,
+    ]) {
+      (priceSeries as unknown as {
+        applyOptions?: (options: Record<string, unknown>) => void;
+      }).applyOptions?.({
+        autoscaleInfoProvider: autoScaleInfoProvider,
+      });
+    }
 
     this.handleVisibleRangeChange = () => {
       this.scheduleSessionBandsRender();
@@ -477,6 +488,7 @@ export class ChartEngine {
         this.buildFallbackPointFromMouseEvent(event),
       focusSelection: (selection) => this.focusSelection(selection),
       resetFocus: () => this.resetFocus(),
+      panPriceScale: (deltaY) => this.panPriceScale(deltaY),
       setChartNavigationEnabled: (enabled) =>
         this.setChartNavigationEnabled(enabled),
     });
@@ -1036,8 +1048,25 @@ export class ChartEngine {
 
   resetFocus(): void {
     this.autoScaleManager.clearFocusedPriceRange();
+    this.autoScaleManager.clearVerticalPan();
+    this.chart.priceScale("right").applyOptions({ autoScale: true });
     this.refreshCandleAutoscale();
     this.chart.timeScale().fitContent();
+  }
+
+  private panPriceScale(deltaY: number): void {
+    if (
+      !this.autoScaleManager.panVertically(
+        deltaY,
+        this.container.clientHeight,
+      )
+    ) {
+      return;
+    }
+
+    this.chart.priceScale("right").applyOptions({ autoScale: true });
+    this.series.candles.setData(this.buildCandleSeriesData());
+    this.studyRenderer.scheduleOverlayRender();
   }
 
   private refreshCandleAutoscale(): void {
@@ -1069,6 +1098,10 @@ setMarketContext(symbol?: string, timeframe?: string): void {
 
   this.symbol = nextSymbol;
   this.timeframe = nextTimeframe;
+
+  this.autoScaleManager.clearFocusedPriceRange();
+  this.autoScaleManager.clearVerticalPan();
+  this.chart.priceScale("right").applyOptions({ autoScale: true });
 
   this.positionOverlayEngine.setSymbol(symbol);
   this.analysisStore.setWorkspace(symbol, timeframe);

@@ -91,6 +91,7 @@ function mergeRanges(
 export class ChartAutoScaleManager {
   private mode: ChartAutoScaleMode = "price";
   private focusedPriceRange: PriceRange | null = null;
+  private verticalPanRatio = 0;
 
   setMode(mode: ChartAutoScaleMode): void {
     this.mode = mode;
@@ -135,20 +136,58 @@ export class ChartAutoScaleManager {
     return this.focusedPriceRange != null;
   }
 
+  panVertically(deltaY: number, chartHeight: number): boolean {
+    if (
+      !Number.isFinite(deltaY) ||
+      !Number.isFinite(chartHeight) ||
+      chartHeight <= 0 ||
+      deltaY === 0
+    ) {
+      return false;
+    }
+
+    // Only about two thirds of the chart height is used by the candle price
+    // scale because the remaining space is reserved by the scale margins.
+    const usableHeight = Math.max(1, chartHeight * 0.67);
+    const nextRatio = this.verticalPanRatio + deltaY / usableHeight;
+    this.verticalPanRatio = Math.max(-3, Math.min(3, nextRatio));
+    return true;
+  }
+
+  clearVerticalPan(): void {
+    this.verticalPanRatio = 0;
+  }
+
+  private applyVerticalPan(range: PriceRange): PriceRange {
+    const paddedRange = padRange(range);
+
+    if (this.verticalPanRatio === 0) {
+      return paddedRange;
+    }
+
+    const span = paddedRange.maxValue - paddedRange.minValue;
+    const offset = span * this.verticalPanRatio;
+
+    return {
+      minValue: paddedRange.minValue + offset,
+      maxValue: paddedRange.maxValue + offset,
+    };
+  }
+
   buildPriceScaleRange(input: BuildPriceScaleRangeInput): PriceRange | null {
     if (this.focusedPriceRange) {
       const focusedRange = mergeRanges(
         this.focusedPriceRange,
         input.analysisRange,
       );
-      return focusedRange ? padRange(focusedRange) : null;
+      return focusedRange ? this.applyVerticalPan(focusedRange) : null;
     }
 
     const mode = input.mode ?? this.mode;
 
     if (mode !== "price") {
       const mergedRange = mergeRanges(input.baseRange, input.analysisRange);
-      return mergedRange ? padRange(mergedRange) : null;
+      return mergedRange ? this.applyVerticalPan(mergedRange) : null;
     }
 
     const recentBars = input.bars.slice(-650);
@@ -156,10 +195,10 @@ export class ChartAutoScaleManager {
 
     if (!recentRange) {
       const mergedRange = mergeRanges(input.baseRange, input.analysisRange);
-      return mergedRange ? padRange(mergedRange) : null;
+      return mergedRange ? this.applyVerticalPan(mergedRange) : null;
     }
 
     const mergedRange = mergeRanges(recentRange, input.analysisRange);
-    return mergedRange ? padRange(mergedRange) : null;
+    return mergedRange ? this.applyVerticalPan(mergedRange) : null;
   }
 }
