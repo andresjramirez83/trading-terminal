@@ -388,7 +388,11 @@ class OvernightRunnerScanner(ScannerBase):
                 snapshot=latest_snapshot,
                 max_symbols=max_symbols,
                 fallback_from="live",
-                fallback_reason="No live bars/session rows were available for any scanned symbol",
+                fallback_reason=(
+                    "Market is closed and no live rows passed the active filters"
+                    if is_us_equity_session_closed()
+                    else "No live bars/session rows were available for any scanned symbol"
+                ),
                 debug_counts=debug_counts,
                 debug_examples=debug_examples,
                 snapshot_dates=latest_saved,
@@ -1087,10 +1091,34 @@ class OvernightRunnerScanner(ScannerBase):
 
 
 def should_use_saved_ah_fallback(rows: List[Dict[str, Any]], debug_counts: Dict[str, int]) -> bool:
+    if rows:
+        return False
+
+    # Outside the 04:00-20:00 ET extended-hours window, recent bars can still
+    # be built from the last completed session. Those stale rows may all fail
+    # today's live filters (especially gap), but that must not leave the
+    # scanner empty when a valid saved after-hours snapshot exists.
+    if is_us_equity_session_closed():
+        return True
+
     scanned = int(debug_counts.get("scanned", 0))
     row_none = int(debug_counts.get("row_none", 0))
     rows_built = int(debug_counts.get("rows_built", 0))
-    return not rows and scanned > 0 and rows_built == 0 and row_none >= scanned
+    return scanned > 0 and rows_built == 0 and row_none >= scanned
+
+
+def is_us_equity_session_closed(now_utc: Optional[datetime] = None) -> bool:
+    """Return True outside the normal U.S. weekday extended-hours session.
+
+    The scanner treats 04:00-20:00 America/New_York as live. Holidays are also
+    safely handled by the existing no-bars fallback path.
+    """
+    current = now_utc or datetime.now(timezone.utc)
+    eastern = current.astimezone(ET)
+    if eastern.weekday() >= 5:
+        return True
+    total_minutes = eastern.hour * 60 + eastern.minute
+    return total_minutes < 240 or total_minutes >= 1200
 
 
 def build_saved_ah_fallback_result(
@@ -1966,7 +1994,9 @@ def choose_workflow(now_utc: Optional[datetime] = None) -> str:
     current = now_utc or datetime.now(timezone.utc)
     pacific = current.astimezone(PT)
     total_minutes = pacific.hour * 60 + pacific.minute
-    return "combined" if total_minutes < 450 else "live"
+    if pacific.weekday() >= 5:
+        return "combined"
+    return "combined" if total_minutes < 450 or total_minutes >= 1020 else "live"
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
