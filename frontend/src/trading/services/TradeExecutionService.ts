@@ -127,6 +127,61 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
   );
 }
 
+function rawOrderReplaces(order: unknown): string {
+  if (!order || typeof order !== "object") return "";
+  const record = order as Record<string, unknown>;
+  return String(record.replaces ?? "").trim();
+}
+
+function mergeReplacementOrder(
+  current: unknown,
+  replacement: unknown,
+  replacedOrderId: string,
+): { order: unknown; changed: boolean } {
+  if (!current || typeof current !== "object") {
+    return { order: current, changed: false };
+  }
+
+  const record = current as Record<string, unknown>;
+  const currentId = rawOrderId(record);
+  const replacementId = rawOrderId(replacement);
+  const replacesId = rawOrderReplaces(replacement);
+
+  if (
+    currentId &&
+    (currentId === replacedOrderId || currentId === replacesId)
+  ) {
+    const next = {
+      ...record,
+      ...(replacement as Record<string, unknown>),
+    };
+
+    // Alpaca can omit bracket legs from the immediate PATCH response. Retain
+    // the existing legs until the next nested broker snapshot supplies them.
+    if (
+      !Array.isArray(next.legs) &&
+      Array.isArray(record.legs)
+    ) {
+      next.legs = record.legs;
+    }
+
+    if (replacementId) next.id = replacementId;
+    return { order: next, changed: true };
+  }
+
+  const legs = Array.isArray(record.legs) ? record.legs : [];
+  let changed = false;
+  const nextLegs = legs.map((leg) => {
+    const result = mergeReplacementOrder(leg, replacement, replacedOrderId);
+    changed ||= result.changed;
+    return result.order;
+  });
+
+  return changed
+    ? { order: { ...record, legs: nextLegs }, changed: true }
+    : { order: current, changed: false };
+}
+
 export class TradeExecutionService {
   private mode: AlpacaMode;
   private snapshot: TradeExecutionSnapshot;
@@ -656,6 +711,30 @@ export class TradeExecutionService {
             ? roundToTick(patch.stop_price)
             : undefined,
       }, this.mode);
+
+      // PATCH /orders is a replacement operation in Alpaca. The confirmed
+      // order normally has a new id (and `replaces` points to the old id).
+      // Reconcile it immediately so chart overlays and Open Orders never keep
+      // reading the stale parent/leg while the next poll is pending.
+      let replacementApplied = false;
+      const nextRawOpenOrders = this.snapshot.rawOpenOrders.map((order) => {
+        const result = mergeReplacementOrder(order, updated, orderId);
+        replacementApplied ||= result.changed;
+        return result.order;
+      });
+
+      if (!replacementApplied && updated && typeof updated === "object") {
+        nextRawOpenOrders.unshift(updated);
+      }
+
+      const activeRawOrders = nextRawOpenOrders.filter(
+        (order) => !TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
+      );
+
+      this.setSnapshot({
+        rawOpenOrders: activeRawOrders,
+        openOrders: activeRawOrders.map(normalizeOpenOrder),
+      });
 
       this.setSnapshot({
         status: "success",
