@@ -6,7 +6,7 @@ import type { ChartDrawing } from "./DrawingTypes";
 const STORAGE_PREFIX = "chart.drawings.v1";
 const MARKET_STRUCTURE_STORAGE_PREFIX = "chart.market-structure.v1";
 const SHARED_SCOPE = "shared";
-const REMOTE_POLL_MS = 3_000;
+const REMOTE_POLL_MS = 1_500;
 const REMOTE_SAVE_DELAY_MS = 120;
 
 type DrawingScope = "timeframe" | "shared";
@@ -413,7 +413,9 @@ export class DrawingStore {
     if (this.remoteInitialized) {
       this.remoteQueue.push(...expandRemoteMutations(mutation));
       this.compactRemoteQueue();
-      this.scheduleRemoteSave();
+      this.scheduleRemoteSave(
+        mutation.kind === "remove" || mutation.kind === "clear",
+      );
     } else {
       this.pendingBeforeInitialLoad.push(mutation);
     }
@@ -723,7 +725,7 @@ export class DrawingStore {
     this.remoteQueue = compacted;
   }
 
-  private scheduleRemoteSave(): void {
+  private scheduleRemoteSave(immediate = false): void {
     if (
       this.destroyed ||
       !this.remoteInitialized ||
@@ -740,7 +742,7 @@ export class DrawingStore {
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this.persistRemote();
-    }, REMOTE_SAVE_DELAY_MS);
+    }, immediate ? 0 : REMOTE_SAVE_DELAY_MS);
   }
 
   private async persistRemote(): Promise<void> {

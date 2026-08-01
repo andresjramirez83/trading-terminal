@@ -18,7 +18,7 @@ export type FxAnalysisHit = {
 
 const STORAGE_PREFIX = "chart.fxAnalysis.v1";
 const REMOTE_SCOPE = "analysis";
-const REMOTE_POLL_MS = 3_000;
+const REMOTE_POLL_MS = 1_500;
 const REMOTE_SAVE_DELAY_MS = 120;
 
 type RemoteAnalysisDocument = {
@@ -398,7 +398,9 @@ export class AnalysisStore {
     if (this.remoteInitialized) {
       this.remoteQueue.push(mutation);
       this.compactRemoteQueue();
-      this.scheduleRemoteSave();
+      this.scheduleRemoteSave(
+        mutation.kind === "remove" || mutation.kind === "clear",
+      );
     } else {
       this.pendingBeforeInitialLoad.push(mutation);
     }
@@ -611,7 +613,7 @@ export class AnalysisStore {
     this.remoteQueue = compacted;
   }
 
-  private scheduleRemoteSave(): void {
+  private scheduleRemoteSave(immediate = false): void {
     if (
       !this.remoteInitialized ||
       this.remoteQueue.length === 0 ||
@@ -625,7 +627,7 @@ export class AnalysisStore {
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this.persistRemote();
-    }, REMOTE_SAVE_DELAY_MS);
+    }, immediate ? 0 : REMOTE_SAVE_DELAY_MS);
   }
 
   private async persistRemote(): Promise<void> {

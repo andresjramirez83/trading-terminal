@@ -175,6 +175,11 @@ export class DrawingRenderer {
 
     this.removeLine(drawing.id);
     this.removeHandles(drawing.id);
+    // SVG-backed drawings must replace their previous DOM elements on every
+    // render. Without this, each redraw leaves an older rectangle underneath
+    // the new one; deleting the drawing then removes only the newest copy and
+    // leaves a visible ghost on the chart.
+    this.removeBox(drawing.id);
 
     if (drawing.type === "rectangle" || drawing.type === "priceRange") {
       this.renderBox(drawing, selectedDrawingId);
