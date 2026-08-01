@@ -277,6 +277,8 @@ export class ChartEngine {
   private positionOverlayRenderer: PositionOverlayRenderer;
   private unsubscribePositionOverlay: (() => void) | null = null;
   private unsubscribeAnalysisStore: (() => void) | null = null;
+  private fxAutoScaleRangeKey = "none";
+  private forceNextFxAutoScale = false;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -399,6 +401,8 @@ export class ChartEngine {
     this.studyRenderer = new StudyRenderer(this.chart, this.container, this.series.candles);
     this.unsubscribeAnalysisStore = this.analysisStore.subscribe(() => {
       this.renderFxAnalysis();
+      this.refreshFxAutoScaleIfNeeded(this.forceNextFxAutoScale);
+      this.forceNextFxAutoScale = false;
     });
     this.positionOverlayEngine = new PositionOverlayEngine();
     this.positionOverlayRenderer = new PositionOverlayRenderer(
@@ -1075,7 +1079,24 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     return this.autoScaleManager.buildPriceScaleRange({
       baseRange,
       bars: this.bars,
+      analysisRange: this.analysisStore.getAutoScalePriceRange(
+        this.fxAnalysisSettings,
+      ),
     });
+  }
+
+  private refreshFxAutoScaleIfNeeded(force = false): void {
+    const range = this.analysisStore.getAutoScalePriceRange(
+      this.fxAnalysisSettings,
+    );
+    const nextKey = range
+      ? `${range.minValue}:${range.maxValue}`
+      : "none";
+
+    if (!force && nextKey === this.fxAutoScaleRangeKey) return;
+
+    this.fxAutoScaleRangeKey = nextKey;
+    this.chart.priceScale("right").applyOptions({ autoScale: true });
   }
 
   fitFxAnalysisLevels(): void {
@@ -1244,6 +1265,10 @@ setMarketContext(symbol?: string, timeframe?: string): void {
       tool === "demandZone" ||
       this.fxAnalysisSettings[tool]?.saveWithSymbol === true;
 
+    // The new FX level may be outside the candle-only price range. Force one
+    // lightweight price-scale calculation so the selected level is visible
+    // immediately without changing the horizontal time range.
+    this.forceNextFxAutoScale = true;
     this.analysisStore.addResult(result, saved);
     this.renderFxAnalysis();
   }
@@ -1251,6 +1276,7 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   setFxAnalysisSettings(settings: FxAnalysisSettings): void {
     this.fxAnalysisSettings = settings;
     this.renderFxAnalysis();
+    this.refreshFxAutoScaleIfNeeded();
   }
 
   clearFxAnalysis(): void {

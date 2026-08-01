@@ -10,6 +10,7 @@ type PriceRange = {
 type BuildPriceScaleRangeInput = {
   baseRange: PriceRange | null;
   bars: CleanBar[];
+  analysisRange?: PriceRange | null;
   mode?: ChartAutoScaleMode;
 };
 
@@ -74,6 +75,19 @@ function padRange(range: PriceRange): PriceRange {
   };
 }
 
+function mergeRanges(
+  first: PriceRange | null,
+  second: PriceRange | null | undefined,
+): PriceRange | null {
+  if (!first) return second ?? null;
+  if (!second) return first;
+
+  return {
+    minValue: Math.min(first.minValue, second.minValue),
+    maxValue: Math.max(first.maxValue, second.maxValue),
+  };
+}
+
 export class ChartAutoScaleManager {
   private mode: ChartAutoScaleMode = "price";
   private focusedPriceRange: PriceRange | null = null;
@@ -123,22 +137,29 @@ export class ChartAutoScaleManager {
 
   buildPriceScaleRange(input: BuildPriceScaleRangeInput): PriceRange | null {
     if (this.focusedPriceRange) {
-      return padRange(this.focusedPriceRange);
+      const focusedRange = mergeRanges(
+        this.focusedPriceRange,
+        input.analysisRange,
+      );
+      return focusedRange ? padRange(focusedRange) : null;
     }
 
     const mode = input.mode ?? this.mode;
 
     if (mode !== "price") {
-      return input.baseRange ? padRange(input.baseRange) : input.baseRange;
+      const mergedRange = mergeRanges(input.baseRange, input.analysisRange);
+      return mergedRange ? padRange(mergedRange) : null;
     }
 
     const recentBars = input.bars.slice(-650);
     const recentRange = buildRangeFromBars(recentBars);
 
     if (!recentRange) {
-      return input.baseRange ? padRange(input.baseRange) : input.baseRange;
+      const mergedRange = mergeRanges(input.baseRange, input.analysisRange);
+      return mergedRange ? padRange(mergedRange) : null;
     }
 
-    return padRange(recentRange);
+    const mergedRange = mergeRanges(recentRange, input.analysisRange);
+    return mergedRange ? padRange(mergedRange) : null;
   }
 }
