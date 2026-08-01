@@ -364,7 +364,10 @@ export class PositionOverlayManager {
       if (accepted) {
         this.pendingPrices[level] = {
           price,
-          expiresAt: Date.now() + 8_000,
+          // Alpaca replaces an order asynchronously and may return one or two
+          // stale open-order snapshots before the replacement is visible.
+          // Keep the confirmed replacement price on screen during that window.
+          expiresAt: Date.now() + 30_000,
         };
       }
       return accepted;

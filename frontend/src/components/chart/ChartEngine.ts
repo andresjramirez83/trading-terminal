@@ -726,8 +726,21 @@ export class ChartEngine {
 
   setChartNavigationEnabled(enabled: boolean): void {
     this.chart.applyOptions({
-      handleScroll: enabled,
-      handleScale: enabled,
+      handleScroll: enabled
+        ? {
+            mouseWheel: true,
+            pressedMouseMove: false,
+            horzTouchDrag: true,
+            vertTouchDrag: true,
+          }
+        : false,
+      handleScale: enabled
+        ? {
+            axisPressedMouseMove: false,
+            mouseWheel: true,
+            pinch: true,
+          }
+        : false,
     });
   }
 

@@ -214,9 +214,13 @@ export class ChartInteractionManager {
           .getActiveTool()
           ?.onMouseDown?.(event, this.toolContext) === true;
 
-      if (!handled && nativeEvent.button === 0) {
+      if (!handled && nativeEvent.button === 1) {
         this.chartPanGestureActive = true;
         this.lastChartPanClientY = nativeEvent.clientY;
+        this.setNavigationSuppressed(true);
+        this.container.setPointerCapture?.(nativeEvent.pointerId);
+        this.container.style.cursor = "ns-resize";
+        handled = true;
       }
     }
 
@@ -251,11 +255,12 @@ export class ChartInteractionManager {
         !handled &&
         this.chartPanGestureActive &&
         this.lastChartPanClientY != null &&
-        (nativeEvent.buttons & 1) === 1
+        (nativeEvent.buttons & 4) === 4
       ) {
         const deltaY = nativeEvent.clientY - this.lastChartPanClientY;
         this.lastChartPanClientY = nativeEvent.clientY;
         this.panPriceScale?.(deltaY);
+        handled = true;
       }
     }
 
@@ -269,8 +274,17 @@ export class ChartInteractionManager {
   }
 
   private onPointerUp(nativeEvent: PointerEvent): void {
+    const wasChartPanGesture = this.chartPanGestureActive;
     this.chartPanGestureActive = false;
     this.lastChartPanClientY = null;
+
+    if (wasChartPanGesture) {
+      this.container.releasePointerCapture?.(nativeEvent.pointerId);
+      this.setNavigationSuppressed(false);
+      this.container.style.cursor = "";
+      this.blockNativeEvent(nativeEvent);
+      return;
+    }
 
     const point =
       this.buildPointFromPointerEvent(nativeEvent) ??
