@@ -75,6 +75,7 @@ const WatchlistContext = createContext<WatchlistContextValue | null>(null);
 
 const WATCHLIST_STORAGE_KEY = "trading.workstation.watchlists.v1";
 const ACTIVE_WATCHLIST_STORAGE_KEY = "trading.workstation.activeWatchlist.v1";
+const MANUAL_WATCHLIST_POLL_MS = 2_000;
 
 type ManualWatchlistApiResponse = {
   symbol?: string;
@@ -612,19 +613,35 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     if (!backendSyncReady || typeof window === "undefined") return;
 
     let cancelled = false;
+    let refreshInFlight = false;
 
     const refreshManualWatchlist = async () => {
+      if (cancelled || refreshInFlight) return;
+      refreshInFlight = true;
+
       try {
         await manualMutationQueueRef.current.catch(() => undefined);
         const snapshot = await fetchManualWatchlist();
 
         if (!cancelled) {
-          setWatchlists((current) =>
-            setManualSymbols(current, snapshot.symbols)
-          );
+          setWatchlists((current) => {
+            const currentSymbols = getManualSymbols(current);
+            const nextSymbols = uniqueSymbolStrings(snapshot.symbols);
+            const unchanged =
+              currentSymbols.length === nextSymbols.length &&
+              currentSymbols.every(
+                (symbol, index) => symbol === nextSymbols[index]
+              );
+
+            return unchanged
+              ? current
+              : setManualSymbols(current, nextSymbols);
+          });
         }
       } catch (error) {
         console.warn("[WatchlistContext] manual watchlist refresh failed", error);
+      } finally {
+        refreshInFlight = false;
       }
     };
 
@@ -640,9 +657,16 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    const pollTimer = window.setInterval(
+      () => void refreshManualWatchlist(),
+      MANUAL_WATCHLIST_POLL_MS
+    );
+
+    void refreshManualWatchlist();
 
     return () => {
       cancelled = true;
+      window.clearInterval(pollTimer);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };

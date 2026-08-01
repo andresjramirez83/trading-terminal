@@ -1237,7 +1237,12 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     const result = buildFxAnalysisResult(tool, bar, this.bars, this.fxAnalysisSettings);
     if (!result) return;
 
-    const saved = this.fxAnalysisSettings[tool]?.saveWithSymbol === true;
+    // Demand zones are chart objects, not temporary previews. Always persist
+    // them so the AnalysisStore can send them to the shared backend even when
+    // an older browser has saveWithSymbol disabled in local preferences.
+    const saved =
+      tool === "demandZone" ||
+      this.fxAnalysisSettings[tool]?.saveWithSymbol === true;
 
     this.analysisStore.addResult(result, saved);
     this.renderFxAnalysis();
