@@ -346,6 +346,7 @@ export default function ScannerPanel({
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   const lastPushedWatchlistRef = useRef<string[]>([]);
+  const scannerLoadRequestRef = useRef(0);
 
   const selectedDefinition = useMemo(
     () => definitions.find((item) => item.id === selectedScannerId) ?? null,
@@ -626,6 +627,9 @@ export default function ScannerPanel({
   }
 
   async function loadScanner(options?: { forceRefresh?: boolean }) {
+    const requestId = ++scannerLoadRequestRef.current;
+    const requestedScannerId = selectedScannerId;
+
     try {
       setLoading(true);
       setError("");
@@ -635,20 +639,20 @@ export default function ScannerPanel({
         ? await refreshScannerCache(scannerRequestParams() as any)
         : await fetchScannerCache();
 
+      if (requestId !== scannerLoadRequestRef.current) return;
+
       setCacheStatus(cacheResponse);
 
-      const cachedRows =
-        (cacheResponse.data as ScannerResponse | null)?.rows ?? [];
-      const cacheIsEmpty = !cacheResponse.data || cachedRows.length === 0;
+      const responseData = cacheResponse.data as ScannerResponse | null;
+      const responseScannerId = responseData?.scanner_id;
 
-      if (cacheResponse.data && !cacheIsEmpty) {
-        setData(cacheResponse.data as ScannerResponse);
-      } else if (!cacheResponse.last_error && options?.forceRefresh) {
-        // Only run a heavy scanner refresh when the user explicitly presses refresh.
-        // Page switches should read the backend cache only to avoid freezing charts.
-        const seeded = await refreshScannerCache(scannerRequestParams() as any);
-        setCacheStatus(seeded);
-        if (seeded.data) setData(seeded.data as ScannerResponse);
+      // The backend cache is shared and is normally populated by the automatic
+      // overnight runner. Never show those rows under a different module name.
+      if (
+        responseData &&
+        (!responseScannerId || responseScannerId === requestedScannerId)
+      ) {
+        setData(responseData);
       }
 
       const activeError = cacheResponse.last_error;
@@ -715,7 +719,9 @@ export default function ScannerPanel({
   }
 
   useEffect(() => {
-    loadScanner();
+    // Selecting a module must execute that module. Reading the shared cache here
+    // would otherwise keep showing the automatic overnight-runner results.
+    loadScanner({ forceRefresh: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isWorkspace, selectedScannerId, workflow]);
 
