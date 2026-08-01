@@ -676,6 +676,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       },
       onDragStateChange: (dragging) => {
         container.style.cursor = dragging ? "ns-resize" : "";
+        container.style.touchAction = dragging ? "none" : "";
       },
     });
     positionOverlayRef.current = positionOverlay;
@@ -742,6 +743,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       container.setPointerCapture?.(event.pointerId);
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
     };
 
     const handleOverlayPointerMove = (event: PointerEvent) => {
@@ -754,6 +756,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       positionOverlay.moveDrag(getLocalY(event));
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
     };
 
     const handleOverlayPointerUp = (event: PointerEvent) => {
@@ -762,6 +765,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       container.releasePointerCapture?.(event.pointerId);
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
       void positionOverlay.endDrag();
     };
 
@@ -772,6 +776,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       positionOverlay.cancelDrag();
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
     };
 
     container.addEventListener("pointerdown", handleOverlayPointerDown, true);
@@ -839,6 +844,31 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           Number(order.limitPrice) > 0,
       );
 
+      const rawWorkingOrder = (() => {
+        const visit = (orders: unknown[]): Record<string, unknown> | null => {
+          for (const value of orders) {
+            if (!value || typeof value !== "object") continue;
+            const order = value as Record<string, unknown>;
+            if (String(order.id ?? "") === workingOrder?.id) return order;
+            const legs = Array.isArray(order.legs) ? order.legs : [];
+            const nested = visit(legs);
+            if (nested) return nested;
+          }
+          return null;
+        };
+        return visit(snapshot.rawOpenOrders);
+      })();
+
+      const workingLegs = Array.isArray(rawWorkingOrder?.legs)
+        ? (rawWorkingOrder.legs as Array<Record<string, unknown>>)
+        : [];
+      const stopLeg = workingLegs.find((leg) => Number(leg.stop_price) > 0);
+      const targetLeg = workingLegs.find(
+        (leg) =>
+          String(leg.type ?? "").toLowerCase() === "limit" &&
+          Number(leg.limit_price) > 0,
+      );
+
       positionOverlayRef.current?.updateWorkingOrder(
         workingOrder
           ? {
@@ -847,6 +877,8 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
               entry: Number(workingOrder.limitPrice),
               stop: Number(workingOrder.stopPrice ?? 0),
               target: Number(workingOrder.targetPrice ?? 0),
+              stopOrderId: stopLeg ? String(stopLeg.id ?? "") || null : null,
+              targetOrderId: targetLeg ? String(targetLeg.id ?? "") || null : null,
             }
           : null,
       );

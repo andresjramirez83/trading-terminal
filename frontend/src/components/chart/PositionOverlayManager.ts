@@ -64,6 +64,11 @@ type ActiveDrag = {
   previewPrice: number;
 };
 
+type PendingPrice = {
+  price: number;
+  expiresAt: number;
+};
+
 const ENTRY_COLOR = "#60a5fa";
 const LIVE_STOP_COLOR = "#ef4444";
 const LOCAL_STOP_COLOR = "#f59e0b";
@@ -135,6 +140,7 @@ export class PositionOverlayManager {
   private animationFrame: number | null = null;
   private activeDrag: ActiveDrag | null = null;
   private committing = false;
+  private pendingPrices: Partial<Record<DraggablePositionOverlayLevel, PendingPrice>> = {};
 
   private snapshot: PositionOverlaySnapshot = {
     symbol: "",
@@ -183,12 +189,10 @@ export class PositionOverlayManager {
   update(protection: PositionProtectionState | null): void {
     const next = buildSnapshot(protection);
 
+    this.applyPendingPrices(next);
+
     if (this.activeDrag) {
-      if (this.activeDrag.level === "stop") {
-        next.stop = this.activeDrag.previewPrice;
-      } else {
-        next.target = this.activeDrag.previewPrice;
-      }
+      next[this.activeDrag.level] = this.activeDrag.previewPrice;
     }
 
     this.snapshot = next;
@@ -209,6 +213,8 @@ export class PositionOverlayManager {
     entry: number;
     stop: number;
     target: number;
+    stopOrderId?: string | null;
+    targetOrderId?: string | null;
   } | null): void {
     if (!order || safePrice(order.entry) <= 0) {
       this.update(null);
@@ -221,13 +227,15 @@ export class PositionOverlayManager {
       entry: safePrice(order.entry),
       stop: safePrice(order.stop),
       target: safePrice(order.target),
-      stopIsLive: false,
-      targetIsLive: false,
-      stopOrderId: null,
-      targetOrderId: null,
+      stopIsLive: Boolean(order.stopOrderId),
+      targetIsLive: Boolean(order.targetOrderId),
+      stopOrderId: order.stopOrderId ?? null,
+      targetOrderId: order.targetOrderId ?? null,
       entryIsLive: true,
       entryOrderId: order.id,
     };
+
+    this.applyPendingPrices(next);
 
     if (this.activeDrag) {
       next[this.activeDrag.level] = this.activeDrag.previewPrice;
@@ -243,12 +251,17 @@ export class PositionOverlayManager {
     const candidates: Array<{
       level: DraggablePositionOverlayLevel;
       price: number;
-    }> = this.snapshot.entryIsLive
-      ? [{ level: "entry", price: this.snapshot.entry }]
-      : [
-          { level: "stop", price: this.snapshot.stop },
-          { level: "target", price: this.snapshot.target },
-        ];
+    }> = [
+      ...(this.snapshot.entryIsLive
+        ? [{ level: "entry" as const, price: this.snapshot.entry }]
+        : []),
+      ...(this.snapshot.stopOrderId || !this.snapshot.entryIsLive
+        ? [{ level: "stop" as const, price: this.snapshot.stop }]
+        : []),
+      ...(this.snapshot.targetOrderId || !this.snapshot.entryIsLive
+        ? [{ level: "target" as const, price: this.snapshot.target }]
+        : []),
+    ];
 
     let best:
       | {
@@ -348,6 +361,12 @@ export class PositionOverlayManager {
       const accepted = result !== false;
 
       this.restorePrice(level, accepted ? price : drag.originalPrice);
+      if (accepted) {
+        this.pendingPrices[level] = {
+          price,
+          expiresAt: Date.now() + 8_000,
+        };
+      }
       return accepted;
     } catch (error) {
       console.error("[PositionOverlayManager] drag commit failed", error);
@@ -408,6 +427,23 @@ export class PositionOverlayManager {
     price: number,
   ): void {
     this.snapshot = { ...this.snapshot, [level]: price };
+  }
+
+  private applyPendingPrices(snapshot: PositionOverlaySnapshot): void {
+    const now = Date.now();
+
+    for (const level of ["entry", "stop", "target"] as const) {
+      const pending = this.pendingPrices[level];
+      if (!pending) continue;
+
+      if (Math.abs(snapshot[level] - pending.price) < 0.000001) {
+        delete this.pendingPrices[level];
+      } else if (now < pending.expiresAt) {
+        snapshot[level] = pending.price;
+      } else {
+        delete this.pendingPrices[level];
+      }
+    }
   }
 
   private render(): void {
