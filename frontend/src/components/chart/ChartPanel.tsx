@@ -614,6 +614,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           return false;
         }
 
+        const updatedOrderRecord =
+          updatedOrder && typeof updatedOrder === "object"
+            ? (updatedOrder as Record<string, unknown>)
+            : null;
+        const confirmedOrderId = String(
+          updatedOrderRecord?.id ?? change.orderId,
+        ).trim();
+
         const safeSymbol = change.symbol.trim().toUpperCase();
         const selectedTrade = tradeEngine.getSelectedTrade();
 
@@ -639,6 +647,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             new Set([
               ...(liveTrade.links.alpacaOrderIds ?? []),
               change.orderId,
+              confirmedOrderId,
             ]),
           );
 
@@ -653,7 +662,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           const latestTrade = tradeEngine.getTrade(liveTrade.id) ?? liveTrade;
 
           tradeEngine.updateTrade(liveTrade.id, {
-            status: "managing",
+            ...(change.level === "entry" ? {} : { status: "managing" as const }),
             links: {
               ...latestTrade.links,
               alpacaOrderIds: nextOrderIds,
