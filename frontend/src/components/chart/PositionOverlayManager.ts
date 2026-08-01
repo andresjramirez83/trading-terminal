@@ -46,6 +46,7 @@ export type PositionOverlayManagerOptions = {
     dragging: boolean,
     level: DraggablePositionOverlayLevel | null,
   ) => void;
+  onCancelOrder?: (orderId: string) => void | boolean | Promise<void | boolean>;
 };
 
 type OverlayLineDefinition = {
@@ -123,12 +124,14 @@ export class PositionOverlayManager {
   private readonly hitTolerancePx: number;
   private readonly onCommit?: PositionOverlayManagerOptions["onCommit"];
   private readonly onDragStateChange?: PositionOverlayManagerOptions["onDragStateChange"];
+  private readonly onCancelOrder?: PositionOverlayManagerOptions["onCancelOrder"];
 
   private entryLine: IPriceLine | null = null;
   private stopLine: IPriceLine | null = null;
   private targetLine: IPriceLine | null = null;
   private rewardShade: HTMLDivElement | null = null;
   private riskShade: HTMLDivElement | null = null;
+  private orderControls: HTMLDivElement | null = null;
   private animationFrame: number | null = null;
   private activeDrag: ActiveDrag | null = null;
   private committing = false;
@@ -152,13 +155,15 @@ export class PositionOverlayManager {
     options: PositionOverlayManagerOptions = {},
   ) {
     this.priceSeries = priceSeries;
-    this.hitTolerancePx = Math.max(4, options.hitTolerancePx ?? 8);
+    this.hitTolerancePx = Math.max(8, options.hitTolerancePx ?? 14);
     this.onCommit = options.onCommit;
     this.onDragStateChange = options.onDragStateChange;
+    this.onCancelOrder = options.onCancelOrder;
 
     if (options.container) {
       this.rewardShade = this.createShade(options.container, "rgba(34,197,94,.14)");
       this.riskShade = this.createShade(options.container, "rgba(239,68,68,.14)");
+      this.orderControls = this.createOrderControls(options.container);
       this.startShadeLoop();
     }
   }
@@ -378,8 +383,10 @@ export class PositionOverlayManager {
     this.animationFrame = null;
     this.rewardShade?.remove();
     this.riskShade?.remove();
+    this.orderControls?.remove();
     this.rewardShade = null;
     this.riskShade = null;
+    this.orderControls = null;
 
     this.snapshot = {
       symbol: "",
@@ -565,6 +572,7 @@ export class PositionOverlayManager {
 
     this.placeShade(this.rewardShade, this.snapshot.entry, this.snapshot.target);
     this.placeShade(this.riskShade, this.snapshot.entry, this.snapshot.stop);
+    this.placeOrderControls();
   }
 
   private placeShade(shade: HTMLDivElement | null, first: number, second: number): void {
@@ -588,5 +596,79 @@ export class PositionOverlayManager {
   private hideShades(): void {
     if (this.rewardShade) this.rewardShade.style.display = "none";
     if (this.riskShade) this.riskShade.style.display = "none";
+    if (this.orderControls) this.orderControls.style.display = "none";
+  }
+
+  private createOrderControls(container: HTMLDivElement): HTMLDivElement {
+    const controls = document.createElement("div");
+    controls.dataset.positionOrderControls = "true";
+    controls.style.position = "absolute";
+    controls.style.right = "70px";
+    controls.style.zIndex = "12";
+    controls.style.display = "none";
+    controls.style.alignItems = "center";
+    controls.style.gap = "4px";
+    controls.style.transform = "translateY(-50%)";
+    controls.style.pointerEvents = "auto";
+
+    const drag = document.createElement("button");
+    drag.type = "button";
+    drag.textContent = "↕ Drag order";
+    drag.title = "Drag to change the working order price";
+    drag.style.cssText = "height:24px;padding:0 8px;border:1px solid #facc15;border-radius:4px;background:#29220a;color:#fde047;font:600 11px Inter,system-ui;cursor:ns-resize";
+    drag.addEventListener("pointerdown", (event) => {
+      if (!this.snapshot.entryIsLive || this.committing) return;
+      const y = this.priceSeries.priceToCoordinate(this.snapshot.entry);
+      if (y == null || !this.beginDrag(y)) return;
+      (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.title = "Cancel this working order";
+    cancel.style.cssText = "height:24px;padding:0 8px;border:1px solid #ef4444;border-radius:4px;background:#301315;color:#fca5a5;font:700 11px Inter,system-ui;cursor:pointer";
+    cancel.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    cancel.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const orderId = this.snapshot.entryOrderId;
+      if (!this.snapshot.entryIsLive || !orderId || !this.onCancelOrder) return;
+      cancel.disabled = true;
+      cancel.textContent = "Canceling…";
+      try {
+        const result = await this.onCancelOrder(orderId);
+        if (result !== false) this.clear();
+      } finally {
+        cancel.disabled = false;
+        cancel.textContent = "Cancel";
+      }
+    });
+
+    controls.append(drag, cancel);
+    container.appendChild(controls);
+    return controls;
+  }
+
+  private placeOrderControls(): void {
+    const controls = this.orderControls;
+    if (!controls || !this.snapshot.entryIsLive || !this.snapshot.entryOrderId) {
+      if (controls) controls.style.display = "none";
+      return;
+    }
+
+    const y = this.priceSeries.priceToCoordinate(this.snapshot.entry);
+    if (y == null) {
+      controls.style.display = "none";
+      return;
+    }
+
+    controls.style.top = `${y}px`;
+    controls.style.display = "flex";
   }
 }

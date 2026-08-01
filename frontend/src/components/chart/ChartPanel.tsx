@@ -668,6 +668,12 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         executionService.queueRefresh();
         return true;
       },
+      onCancelOrder: async (orderId) => {
+        const canceled = await executionService.cancelOrder(orderId);
+        if (!canceled) return false;
+        executionService.queueRefresh();
+        return true;
+      },
       onDragStateChange: (dragging) => {
         container.style.cursor = dragging ? "ns-resize" : "";
       },
@@ -723,6 +729,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
     const handleOverlayPointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest("[data-position-order-controls='true']")
+      ) return;
       if (drawingToolRef.current !== "cursor") return;
       if (fxAnalysisToolRef.current !== "none") return;
 
