@@ -17,4 +17,4 @@ if MARKET_DATA_PROVIDER != "alpaca":
     )
 
 APCA_API_KEY_ID_LIVE = os.getenv("APCA_API_KEY_ID_LIVE", "").strip()
-APCA_API_SECRET_KEY_LIVE = os.getenv("APCA_API_SECRET_KEY_LIVE", "").strip().getenv("ALPACA_SECRET_KEY", "")
+APCA_API_SECRET_KEY_LIVE = os.getenv("APCA_API_SECRET_KEY_LIVE", "").strip()

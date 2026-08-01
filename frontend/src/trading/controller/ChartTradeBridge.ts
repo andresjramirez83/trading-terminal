@@ -10,6 +10,7 @@ import type {
   LongPositionDrawing,
 } from "../../components/chart/DrawingTypes";
 import { TradeEngine } from "../engine/TradeEngine";
+import { getSharedExecutionModeRuntime } from "../execution/router/ExecutionModeRuntime";
 
 function isLongPosition(drawing: ChartDrawing): drawing is LongPositionDrawing {
   return drawing.type === "longPosition";
@@ -265,7 +266,7 @@ export class ChartTradeBridge {
       timeframe: workspace.timeframe,
       direction: "long",
       source: "manual",
-      mode: "paper",
+      mode: getSharedExecutionModeRuntime().getMode(),
       status: "draft",
       entry,
       stop,
@@ -356,7 +357,7 @@ export class ChartTradeBridge {
       timeframe: workspace.timeframe,
       direction: "long",
       source: "manual",
-      mode: "paper",
+      mode: getSharedExecutionModeRuntime().getMode(),
       status: "draft",
       entry,
       stop,

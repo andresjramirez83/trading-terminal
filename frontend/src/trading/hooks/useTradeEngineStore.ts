@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getSharedTradeEngine } from "../engine/TradeEngineRuntime";
 import type { TradeDirection, TradeObject } from "../engine/TradeTypes";
 import { getSharedExecutionGateway } from "../execution/ExecutionGateway";
+import type { ExecutionMode } from "../execution/router/ExecutionModeRuntime";
 import type { TradeExecutionSnapshot } from "../services/execution/TradeExecutionTypes";
 import { calculateQuickOrderEstimate } from "../../components/chart/right-panel/workspaces/trading/OrderCalculator";
 import { getSharedPositionProtectionEngine } from "../position/PositionProtectionEngine";
@@ -217,6 +218,9 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
 
   const [executionSnapshot, setExecutionSnapshot] =
     useState<TradeExecutionSnapshot>(() => executionService.getSnapshot());
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>(() =>
+    executionService.getMode(),
+  );
 
   const [quickOrder, setQuickOrder] = useState<QuickOrderState>({
     symbol: safeSymbol,
@@ -304,7 +308,10 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   }, [safeSymbol, tradeEngine]);
 
   useEffect(() => {
-    const unsubscribe = executionService.subscribe(setExecutionSnapshot);
+    const unsubscribe = executionService.subscribe((snapshot) => {
+      setExecutionSnapshot(snapshot);
+      setExecutionMode(executionService.getMode());
+    });
     executionService.startPolling(8000);
 
     return () => {
@@ -390,7 +397,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
             symbol: safeSymbol,
             direction: nextPlan.side as TradeDirection,
             source: "manual",
-            mode: "paper",
+            mode: executionMode,
             status: "draft",
             entry: nullableNumber(nextPlan.entry),
             stop: nullableNumber(nextPlan.stop),
@@ -433,7 +440,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         return nextPlan;
       });
     },
-    [safeSymbol, tradeEngine],
+    [executionMode, safeSymbol, tradeEngine],
   );
 
   const updateQuickOrder = useCallback(
@@ -687,7 +694,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         symbol: safeSymbol,
         direction: tradePlan.side as TradeDirection,
         source: "manual",
-        mode: "paper",
+        mode: executionMode,
         status: "draft",
         entry: nullableNumber(tradePlan.entry),
         stop: nullableNumber(tradePlan.stop),
@@ -768,6 +775,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     executionService.queueRefresh();
   }, [
     currentPrice,
+    executionMode,
     executionService,
     safeSymbol,
     tradeEngine,
@@ -852,6 +860,17 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   const refreshTradingData = useCallback(() => {
     executionService.queueRefresh();
   }, [executionService]);
+
+  const switchTradingMode = useCallback(
+    async (mode: "paper" | "live") => {
+      if (mode === executionService.getMode()) return;
+
+      await executionService.switchMode(mode);
+      setExecutionMode(mode);
+      await executionService.refreshAll();
+    },
+    [executionService],
+  );
 
   const recordExitOrder = useCallback(
     (order: unknown) => {
@@ -989,6 +1008,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   return useMemo(
     () => ({
       account: executionSnapshot.account,
+      executionMode,
+      switchTradingMode,
 
       tradePlan: { ...tradePlan, symbol: safeSymbol },
       tradePlanStats,
@@ -1045,6 +1066,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       executionSnapshot.refreshCount,
       executionSnapshot.status,
       executionSnapshot.updatedAt,
+      executionMode,
       fillOpenOrder,
       flattenAllPositions,
       journalTrades,
@@ -1059,6 +1081,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       submitTradePlan,
       syncPlanToOrder,
       syncPlanToPosition,
+      switchTradingMode,
       tradePlan,
       tradePlanStats,
       updateCurrentPosition,

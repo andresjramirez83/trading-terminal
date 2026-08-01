@@ -41,7 +41,7 @@ import {
 import type { TradeEngine } from "../../trading/engine/TradeEngine";
 import { getSharedTradeEngine } from "../../trading/engine/TradeEngineRuntime";
 import { TradeController } from "../../trading/controller/TradeController";
-import { getSharedTradeExecutionService } from "../../trading/services/TradeExecutionService";
+import { getSharedExecutionGateway } from "../../trading/execution/ExecutionGateway";
 import { getSharedPositionProtectionEngine } from "../../trading/position/PositionProtectionEngine";
 import {
   PositionOverlayManager,
@@ -592,7 +592,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     drawingEngineRef.current = drawingEngine;
     tradeEngineRef.current = tradeEngine;
 
-    const executionService = getSharedTradeExecutionService("paper");
+    const executionService = getSharedExecutionGateway();
     const positionOverlay = new PositionOverlayManager(engine.series.candles, {
       onCommit: async (change: PositionOverlayCommit) => {
         if (!change.isLive || !change.orderId) {
@@ -802,7 +802,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   }, []);
 
   useEffect(() => {
-    const executionService = getSharedTradeExecutionService("paper");
+    const executionService = getSharedExecutionGateway();
     const protectionEngine = getSharedPositionProtectionEngine();
 
     const applySnapshot = (

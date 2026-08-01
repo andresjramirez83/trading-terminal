@@ -48,6 +48,18 @@ export default function ScannerPage() {
   const navigate = useNavigate();
   const [symbol, setSymbol] = useState(() => loadSharedActiveSymbol());
 
+  const handleBackToChart = useCallback(() => {
+    // ChartEngine owns browser-level listeners and rendering resources. A clean
+    // page transition guarantees they are initialized again after the scanner
+    // workspace has been open for an extended period.
+    if (typeof window !== "undefined") {
+      window.location.assign("/chart");
+      return;
+    }
+
+    navigate("/chart", { replace: true });
+  }, [navigate]);
+
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
       if (event.key !== SHARED_ACTIVE_SYMBOL_STORAGE_KEY || !event.newValue) return;
@@ -126,7 +138,8 @@ export default function ScannerPage() {
           </div>
 
           <button
-            onClick={() => navigate("/")}
+            type="button"
+            onClick={handleBackToChart}
             style={{
               padding: "10px 14px",
               borderRadius: 8,

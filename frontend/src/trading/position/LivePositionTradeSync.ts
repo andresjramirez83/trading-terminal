@@ -9,10 +9,9 @@ import type {
   TradeObject,
   TradeStatus,
 } from "../engine/TradeTypes";
-import {
-  getSharedTradeExecutionService,
-  type TradeExecutionSnapshot,
-} from "../services/TradeExecutionService";
+import { getSharedExecutionGateway } from "../execution/ExecutionGateway";
+import type { TradeExecutionSnapshot } from "../services/TradeExecutionService";
+import { getSharedExecutionModeRuntime } from "../execution/router/ExecutionModeRuntime";
 import {
   getSharedPositionProtectionEngine,
   type PositionProtectionState,
@@ -208,7 +207,7 @@ export class LivePositionTradeSync {
   attach(): void {
     if (this.unsubscribeExecution) return;
 
-    const executionService = getSharedTradeExecutionService("paper");
+    const executionService = getSharedExecutionGateway();
 
     this.unsubscribeExecution = executionService.subscribe((snapshot) => {
       this.applySnapshot(snapshot);
@@ -440,7 +439,7 @@ export class LivePositionTradeSync {
       timeframe: workspace.timeframe,
       direction: livePosition.side,
       source: "manual",
-      mode: "paper",
+      mode: getSharedExecutionModeRuntime().getMode(),
       status: "managing",
       entry: positiveNumber(livePosition.entry),
       stop: positiveNumber(protection.stopPrice),

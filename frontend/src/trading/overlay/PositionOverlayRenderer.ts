@@ -97,7 +97,7 @@ export class PositionOverlayRenderer {
       lineWidth: 2 as const,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
-      title: `ENTRY ${price(state.entryPrice)}`,
+      title: `${state.kind === "order" ? "ORDER" : "ENTRY"} ${price(state.entryPrice)}`,
     };
 
     if (this.entryLine) {
@@ -165,6 +165,25 @@ export class PositionOverlayRenderer {
   }
 
   private renderCard(state: PositionOverlayState): void {
+    if (state.kind === "order") {
+      const sideLabel = state.side === "long" ? "BUY" : "SELL";
+
+      this.card.style.display = "block";
+      this.card.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px">
+          <strong style="font-size:12px;letter-spacing:.08em;color:#f8fafc">${state.symbol} ${sideLabel} ORDER</strong>
+          <span style="font-size:10px;text-transform:uppercase;color:#facc15">${state.status}</span>
+        </div>
+        <div style="font-size:18px;font-weight:800;color:#facc15">${price(state.entryPrice)}</div>
+        <div style="height:1px;background:rgba(148,163,184,.18);margin:8px 0"></div>
+        <div style="display:grid;grid-template-columns:auto auto;justify-content:space-between;gap:4px 14px;font-size:11px;color:#cbd5e1">
+          <span>Shares</span><strong>${state.quantity.toLocaleString()}</strong>
+          <span>Status</span><strong>Working</strong>
+        </div>
+      `;
+      return;
+    }
+
     const positive = state.unrealizedPnL >= 0;
     const pnlColor = positive ? "#86efac" : "#fca5a5";
     const sideLabel = state.side === "long" ? "LONG" : "SHORT";

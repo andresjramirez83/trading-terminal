@@ -9,6 +9,7 @@ export type PositionOverlayTarget = {
 };
 
 export type PositionOverlayState = {
+  kind: "position" | "order";
   tradeId: string | null;
   symbol: string;
   side: TradeDirection;
@@ -29,6 +30,7 @@ export type PositionOverlayState = {
 };
 
 export const EMPTY_POSITION_OVERLAY: PositionOverlayState = {
+  kind: "position",
   tradeId: null,
   symbol: "",
   side: "long",

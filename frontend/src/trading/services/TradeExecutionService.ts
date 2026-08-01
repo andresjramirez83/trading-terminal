@@ -377,6 +377,8 @@ export class TradeExecutionService {
 
     try {
       const placedOrder = await placeAlpacaOrder(payload);
+      const placedOrderId = rawOrderId(placedOrder);
+      const optimisticOrder = normalizeOpenOrder(placedOrder);
 
       this.setSnapshot({
         status: "success",
@@ -385,6 +387,18 @@ export class TradeExecutionService {
         connectionStatus: "connected",
         lastError: null,
         lastMessage: "Order submitted to Alpaca.",
+        openOrders: [
+          optimisticOrder,
+          ...this.snapshot.openOrders.filter(
+            (item) => !placedOrderId || item.id !== placedOrderId,
+          ),
+        ],
+        rawOpenOrders: [
+          placedOrder,
+          ...this.snapshot.rawOpenOrders.filter(
+            (item) => !placedOrderId || rawOrderId(item) !== placedOrderId,
+          ),
+        ],
       });
 
       this.queueRefresh();
@@ -822,16 +836,19 @@ export class TradeExecutionService {
   }
 }
 
-let sharedTradeExecutionService: TradeExecutionService | null = null;
+const sharedTradeExecutionServices: Partial<
+  Record<AlpacaMode, TradeExecutionService>
+> = {};
 
 export function getSharedTradeExecutionService(
   mode: AlpacaMode = "paper",
 ): TradeExecutionService {
-  if (!sharedTradeExecutionService) {
-    sharedTradeExecutionService = new TradeExecutionService(mode);
-  } else {
-    sharedTradeExecutionService.setMode(mode);
+  let service = sharedTradeExecutionServices[mode];
+
+  if (!service) {
+    service = new TradeExecutionService(mode);
+    sharedTradeExecutionServices[mode] = service;
   }
 
-  return sharedTradeExecutionService;
+  return service;
 }

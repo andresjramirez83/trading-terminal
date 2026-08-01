@@ -2,10 +2,8 @@
 
 import { getSharedTradeEngine } from "../engine/TradeEngineRuntime";
 import type { TradeObject } from "../engine/TradeTypes";
-import {
-  getSharedTradeExecutionService,
-  type TradeExecutionSnapshot,
-} from "../services/TradeExecutionService";
+import { getSharedExecutionGateway } from "../execution/ExecutionGateway";
+import type { TradeExecutionSnapshot } from "../services/TradeExecutionService";
 import {
   EMPTY_POSITION_OVERLAY,
   type PositionOverlayState,
@@ -61,7 +59,7 @@ export class PositionOverlayEngine {
 
   constructor() {
     const tradeEngine = getSharedTradeEngine();
-    const executionService = getSharedTradeExecutionService("paper");
+    const executionService = getSharedExecutionGateway();
 
     this.snapshot = executionService.getSnapshot();
 
@@ -127,6 +125,46 @@ export class PositionOverlayEngine {
       ) ?? null;
 
     if (!position) {
+      const order =
+        this.snapshot.openOrders.find(
+          (item) => cleanSymbol(item.symbol) === this.symbol,
+        ) ?? null;
+
+      if (order) {
+        const trade = findActiveTrade(this.symbol);
+        const entryPrice =
+          safeNumber(order.limitPrice) ||
+          safeNumber(trade?.entry) ||
+          this.currentPrice;
+        const stopPrice =
+          safeNumber(order.stopPrice) || safeNumber(trade?.stop);
+        const targetPrice =
+          safeNumber(order.targetPrice) ||
+          safeNumber(trade?.targets[0]?.price);
+
+        this.publish({
+          kind: "order",
+          tradeId: trade?.id ?? null,
+          symbol: this.symbol,
+          side: order.side === "sell" ? "short" : "long",
+          status: trade?.status ?? "accepted",
+          visible: entryPrice > 0,
+          entryPrice,
+          stopPrice,
+          targets:
+            targetPrice > 0
+              ? [{ id: `${order.id}-target`, price: targetPrice, label: "Target" }]
+              : [],
+          quantity: Math.max(0, safeNumber(order.shares)),
+          currentPrice: this.currentPrice || entryPrice,
+          unrealizedPnL: 0,
+          percentPnL: 0,
+          riskPerShare: 0,
+          currentR: 0,
+        });
+        return;
+      }
+
       this.publish({
         ...EMPTY_POSITION_OVERLAY,
         symbol: this.symbol,
@@ -151,6 +189,7 @@ export class PositionOverlayEngine {
         : Math.max(0, stopPrice - entryPrice);
 
     this.publish({
+      kind: "position",
       tradeId: trade?.id ?? null,
       symbol: this.symbol,
       side,

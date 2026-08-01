@@ -85,6 +85,22 @@ export default function TradingWorkspacePanel({
   const hasError = Boolean(store.executionError);
   const actionLabel = getActionLabel(store.executionAction);
   const connectionLabel = getConnectionLabel(store.connectionStatus);
+  const isLiveMode = store.executionMode === "live";
+
+  const handleModeChange = async (mode: "paper" | "live") => {
+    if (mode === store.executionMode || busy) return;
+
+    if (
+      mode === "live" &&
+      !window.confirm(
+        "Switch to LIVE trading? Orders will be sent to your real Alpaca account.",
+      )
+    ) {
+      return;
+    }
+
+    await store.switchTradingMode(mode);
+  };
 
   const selectedTradeOrderIds = new Set(
     store.selectedTrade?.links.alpacaOrderIds ?? [],
@@ -121,6 +137,43 @@ export default function TradingWorkspacePanel({
       </div>
 
       <section style={styles.statusCard}>
+        <div style={styles.modeSelector}>
+          {(["paper", "live"] as const).map((mode) => {
+            const active = store.executionMode === mode;
+            const live = mode === "live";
+
+            return (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => void handleModeChange(mode)}
+                disabled={busy}
+                style={{
+                  ...styles.modeButton,
+                  color: active
+                    ? live
+                      ? "#fecaca"
+                      : "#bfdbfe"
+                    : "#94a3b8",
+                  borderColor: active
+                    ? live
+                      ? "rgba(248,113,113,.55)"
+                      : "rgba(96,165,250,.55)"
+                    : "rgba(148,163,184,.16)",
+                  background: active
+                    ? live
+                      ? "rgba(127,29,29,.28)"
+                      : "rgba(37,99,235,.22)"
+                    : "rgba(15,23,42,.6)",
+                  opacity: busy ? 0.55 : 1,
+                }}
+              >
+                {mode.toUpperCase()}
+              </button>
+            );
+          })}
+        </div>
+
         <div style={styles.statusTop}>
           <div>
             <div style={styles.statusLabel}>Execution Hub</div>
@@ -166,7 +219,9 @@ export default function TradingWorkspacePanel({
               : hasError
                 ? "ERROR"
                 : connected
-                  ? "PAPER"
+                  ? isLiveMode
+                    ? "LIVE"
+                    : "PAPER"
                   : connectionLabel.toUpperCase()}
           </div>
         </div>
@@ -358,6 +413,20 @@ const styles: Record<string, CSSProperties> = {
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
+  },
+  modeSelector: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 8,
+    marginBottom: 12,
+  },
+  modeButton: {
+    border: "1px solid",
+    borderRadius: 10,
+    padding: "8px 10px",
+    fontSize: 11,
+    fontWeight: 950,
+    cursor: "pointer",
   },
   statusLabel: {
     fontSize: 10,
