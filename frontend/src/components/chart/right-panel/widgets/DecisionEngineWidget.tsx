@@ -9,13 +9,86 @@ function getToneColor(tone: "good" | "warn" | "bad" | "neutral"): string {
 }
 
 export default function DecisionEngineWidget() {
-  const { state } = useDecisionCenter();
+  const { state, status, error, evaluatedAt, isEvaluating } = useDecisionCenter();
 
   const decision = state.ai;
+  const statusLabel = error
+    ? "Intelligence Error"
+    : isEvaluating
+      ? "Evaluating"
+      : status === "ready"
+        ? "Live Intelligence"
+        : "Chart Analysis";
+  const statusColor = error
+    ? "#ef4444"
+    : isEvaluating
+      ? "#f59e0b"
+      : status === "ready"
+        ? "#38bdf8"
+        : "#64748b";
 
   return (
     <PanelCard title="Decision Engine">
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            fontSize: 10,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              color: statusColor,
+              fontWeight: 850,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+          >
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 999,
+                background: statusColor,
+                boxShadow: `0 0 8px ${statusColor}88`,
+              }}
+            />
+            {statusLabel}
+          </div>
+
+          {evaluatedAt ? (
+            <div style={{ color: "#64748b", fontVariantNumeric: "tabular-nums" }}>
+              {new Date(evaluatedAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}
+            </div>
+          ) : null}
+        </div>
+
+        {error ? (
+          <div
+            style={{
+              padding: 9,
+              borderRadius: 9,
+              background: "rgba(239,68,68,0.08)",
+              border: "1px solid rgba(239,68,68,0.3)",
+              color: "#fca5a5",
+              fontSize: 11,
+              lineHeight: 1.4,
+            }}
+          >
+            {error}
+          </div>
+        ) : null}
+
         <div
           style={{
             textAlign: "center",

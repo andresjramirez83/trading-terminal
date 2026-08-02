@@ -63,6 +63,10 @@ import type {
   MarketSession,
 } from "../types/MarketContextTypes";
 import { MarketNarrativeEngine } from "../../narrative/MarketNarrativeEngine";
+import { MarketIntelligenceEngine } from "../../../components/chart/analysis/market-objects/MarketIntelligenceEngine";
+import type { MarketIntelligenceResult } from "../../../components/chart/analysis/market-objects/MarketIntelligenceEngine";
+import { marketObjectResultToMemoryEvents } from "../integration/MarketObjectMemoryAdapter";
+import { buildMarketObjectDecisionAdjustment } from "../integration/MarketObjectDecisionAdapter";
 import {
   IntelligenceRegistry,
   type IntelligenceRegistration,
@@ -89,6 +93,7 @@ export interface DefaultIntelligencePipeline {
   master: MasterIntelligenceEngine;
   contextEngine: MarketContextEngine;
   eventEngine: MarketEventEngine;
+  marketObjectEngine: MarketIntelligenceEngine;
   memoryEngines: ReadonlyMap<string, MarketMemoryEngine>;
   decisionEngine: TradingDecisionEngine;
   narrativeEngine: MarketNarrativeEngine;
@@ -305,9 +310,17 @@ function createMemoryComponent(
       }
 
       const newEventsRaw = runtime.shared.get("market-events:latest");
-      const newEvents = Array.isArray(newEventsRaw)
+      const marketEvents = Array.isArray(newEventsRaw)
         ? (newEventsRaw as MarketEvent[]).map(toMemoryEvent)
         : [];
+
+      const marketObjectResult = runtime.shared.get("market-objects:result") as
+        | MarketIntelligenceResult
+        | undefined;
+      const marketObjectEvents = marketObjectResult
+        ? marketObjectResultToMemoryEvents(marketObjectResult)
+        : [];
+      const newEvents = [...marketEvents, ...marketObjectEvents];
 
       const result: MarketMemoryEngineResult = engine.evaluate({
         events: newEvents,
@@ -340,6 +353,7 @@ function createMemoryComponent(
           marketMemoryRegime: result.regime.current,
           marketMemoryStoryHeadline: result.story.headline,
           marketEventTimelineCount: timeline?.events.length ?? 0,
+          marketObjectMemoryEventCount: marketObjectEvents.length,
         },
       };
     },
@@ -380,6 +394,7 @@ export async function createDefaultIntelligencePipeline(
   });
 
   const eventEngine = new MarketEventEngine();
+  const marketObjectEngine = new MarketIntelligenceEngine();
   const memoryEngines = new Map<string, MarketMemoryEngine>();
   const memoryComponent = createMemoryComponent(memoryEngines, options);
   const decisionEngine = new TradingDecisionEngine();
@@ -404,13 +419,27 @@ export async function createDefaultIntelligencePipeline(
   const decisionComponent = {
     id: "trading-decision-engine",
     evaluate(runtime: IntelligenceRegistryRuntime) {
+      const marketObjectResult = runtime.shared.get("market-objects:result") as
+        | MarketIntelligenceResult
+        | undefined;
+      const marketObjectAdjustment = buildMarketObjectDecisionAdjustment(
+        marketObjectResult,
+        runtime.context.preferredDirection,
+      );
+
       const decision = decisionEngine.evaluate({
         context: requireContext(runtime),
         preferredDirection: runtime.context.preferredDirection,
         minimumConfidence: runtime.context.minimumConfidence,
         minimumTradeScore: runtime.context.minimumTradeScore,
+        marketObjectAdjustment,
         metadata: runtime.context.metadata as Record<string, unknown>,
       });
+
+      runtime.shared.set(
+        "market-objects:decision-adjustment",
+        marketObjectAdjustment,
+      );
 
       return {
         decision,
@@ -418,6 +447,54 @@ export async function createDefaultIntelligencePipeline(
         reasons: decision.reasons,
         metrics: decision.metrics,
         tags: decision.tags,
+        metadata: {
+          marketObjectDirection: marketObjectAdjustment.direction,
+          marketObjectScoreAdjustment:
+            marketObjectAdjustment.scoreAdjustment,
+          marketObjectConvictionAdjustment:
+            marketObjectAdjustment.convictionAdjustment,
+          marketObjectBlocked: marketObjectAdjustment.blocked,
+        },
+      };
+    },
+  };
+
+  const marketObjectComponent = {
+    id: "market-object-intelligence-engine",
+    evaluate(runtime: IntelligenceRegistryRuntime) {
+      const input = runtime.context.input;
+      const result = marketObjectEngine.evaluate({
+        symbol: input.symbol,
+        timeframe: input.timeframe,
+        bar: {
+            time: input.bar.time as import("lightweight-charts").UTCTimestamp,
+          open: input.bar.open,
+          high: input.bar.high,
+          low: input.bar.low,
+          close: input.bar.close,
+          volume: input.bar.volume,
+        },
+        barIndex: input.barIndex ?? input.bar.barIndex,
+      });
+
+      runtime.shared.set("market-objects:result", result);
+      runtime.shared.set("market-objects:snapshot", result.snapshot);
+      runtime.shared.set("market-objects:evaluations", result.evaluations);
+
+      return {
+        marketObjects: result,
+        tags: [
+          "market-objects",
+          `market-objects:${result.snapshot.objects.length}`,
+          `market-object-interactions:${result.evaluations.reduce(
+            (total, evaluation) => total + evaluation.interactions.length,
+            0,
+          )}`,
+        ],
+        metadata: {
+          marketObjectCount: result.snapshot.objects.length,
+          marketObjectEvaluationCount: result.evaluations.length,
+        },
       };
     },
   };
@@ -449,12 +526,30 @@ export async function createDefaultIntelligencePipeline(
       },
     },
     {
+      id: marketObjectComponent.id,
+      kind: "service",
+      component: marketObjectComponent,
+      required: false,
+      priority: 225,
+      dependencies: [contextComponent.id, eventEngine.id],
+      metadata: {
+        displayName: "Market Object Intelligence Engine",
+        description:
+          "Evaluates active market objects against the current chart bar and records interactions.",
+        version: "1.0.0",
+      },
+    },
+    {
       id: memoryComponent.id,
       kind: "memory-engine",
       component: memoryComponent,
       required: true,
       priority: 250,
-      dependencies: [contextComponent.id, eventEngine.id],
+      dependencies: [
+        contextComponent.id,
+        eventEngine.id,
+        marketObjectComponent.id,
+      ],
       metadata: {
         displayName: "Market Memory Engine",
         description:
@@ -471,6 +566,7 @@ export async function createDefaultIntelligencePipeline(
       dependencies: [
         contextComponent.id,
         eventEngine.id,
+        marketObjectComponent.id,
         memoryComponent.id,
       ],
       metadata: {
@@ -488,6 +584,7 @@ export async function createDefaultIntelligencePipeline(
       dependencies: [
         contextComponent.id,
         eventEngine.id,
+        marketObjectComponent.id,
         memoryComponent.id,
         decisionComponent.id,
       ],
@@ -506,6 +603,7 @@ export async function createDefaultIntelligencePipeline(
       dependencies: [
         contextComponent.id,
         eventEngine.id,
+        marketObjectComponent.id,
         memoryComponent.id,
         decisionComponent.id,
         narrativeEngine.id,
@@ -533,6 +631,7 @@ export async function createDefaultIntelligencePipeline(
     master,
     contextEngine,
     eventEngine,
+    marketObjectEngine,
     memoryEngines,
     decisionEngine,
     narrativeEngine,
@@ -563,4 +662,3 @@ export async function createDefaultIntelligencePipeline(
     },
   };
 }
-

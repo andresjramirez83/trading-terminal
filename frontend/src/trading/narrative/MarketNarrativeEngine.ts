@@ -17,6 +17,7 @@ import type {
 } from "../intelligence/types/MarketContextTypes";
 import type { TradingDecisionResult } from "../intelligence/evaluators/TradingDecisionEngine";
 import type { IntelligenceRegistryRuntime } from "../intelligence/core/IntelligenceRegistry";
+import type { MarketObjectDecisionAdjustment } from "../intelligence/integration/MarketObjectDecisionAdapter";
 import type {
   IntelligenceNarrative,
   IntelligenceObjective,
@@ -44,6 +45,7 @@ export interface MarketNarrativeInput {
   entryIsLate?: boolean;
   extensionRisk?: number;
   previousNarrative?: IntelligenceNarrative | null;
+  marketObjectAdjustment?: MarketObjectDecisionAdjustment | null;
 }
 
 export interface MarketNarrativeContribution {
@@ -436,6 +438,49 @@ function resolveInvalidation(context: MarketContextSnapshot, decision: TradingDe
   return "The neutral thesis ends when price accepts outside balance with structure, momentum, and participation aligned.";
 }
 
+function marketObjectStory(
+  adjustment: MarketObjectDecisionAdjustment | null | undefined,
+): string {
+  if (!adjustment || adjustment.factors.length === 0) return "";
+
+  if (adjustment.blocked) {
+    const labels = adjustment.factors
+      .filter((factor) => factor.blocking)
+      .slice(0, 2)
+      .map((factor) => factor.label);
+    return sentence(
+      labels.length
+        ? `The active thesis is blocked by ${labels.join(" and ")}`
+        : "An active market object has invalidated the current thesis",
+    );
+  }
+
+  const aligned = adjustment.factors
+    .filter(
+      (factor) =>
+        !factor.blocking &&
+        adjustment.direction !== "neutral" &&
+        factor.direction === adjustment.direction,
+    )
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 2)
+    .map((factor) => factor.label);
+
+  if (aligned.length > 0) {
+    return sentence(
+      `${titleCase(adjustment.direction)} market-object confluence is supported by ${aligned.join(" and ")}`,
+    );
+  }
+
+  if (adjustment.shouldWait) {
+    return sentence(
+      "Nearby market objects conflict with the active thesis, so confirmation is still required",
+    );
+  }
+
+  return "";
+}
+
 function extractRuntimeInputs(runtime: IntelligenceRegistryRuntime): MarketNarrativeInput {
   let context: MarketContextSnapshot | undefined;
   let decision: TradingDecisionResult | undefined;
@@ -445,6 +490,9 @@ function extractRuntimeInputs(runtime: IntelligenceRegistryRuntime): MarketNarra
   let entryIsChasing = false;
   let entryIsLate = false;
   let extensionRisk = 0;
+  const marketObjectAdjustment = runtime.shared.get(
+    "market-objects:decision-adjustment",
+  ) as MarketObjectDecisionAdjustment | undefined;
 
   for (const value of runtime.shared.values()) {
     if (!value || typeof value !== "object") continue;
@@ -477,7 +525,17 @@ function extractRuntimeInputs(runtime: IntelligenceRegistryRuntime): MarketNarra
     throw new Error("MarketNarrativeEngine requires both a MarketContextSnapshot and TradingDecisionResult. Register it after the context and decision engines.");
   }
 
-  return { context, decision, probabilities, objectives, triggers, entryIsChasing, entryIsLate, extensionRisk };
+  return {
+    context,
+    decision,
+    probabilities,
+    objectives,
+    triggers,
+    entryIsChasing,
+    entryIsLate,
+    extensionRisk,
+    marketObjectAdjustment,
+  };
 }
 
 export class MarketNarrativeEngine {
@@ -513,7 +571,7 @@ export class MarketNarrativeEngine {
     const nextBullTrigger = triggers.find((item) => item.direction === "bullish" && item.status !== "invalidated" && item.status !== "expired") ?? null;
     const nextBearTrigger = triggers.find((item) => item.direction === "bearish" && item.status !== "invalidated" && item.status !== "expired") ?? null;
     const extensionRisk = Math.max(0, input.extensionRisk ?? 0);
-    const story = buildStory(
+    const baseStory = buildStory(
       input.context,
       input.decision,
       phase,
@@ -523,6 +581,8 @@ export class MarketNarrativeEngine {
       extensionRisk,
       this.maxStorySentences,
     );
+    const objectStory = marketObjectStory(input.marketObjectAdjustment);
+    const story = objectStory ? `${baseStory} ${objectStory}` : baseStory;
 
     const positive = selectEvidence(input.decision, "positive", 8);
     const negative = selectEvidence(input.decision, "negative", 8);
@@ -573,12 +633,22 @@ export class MarketNarrativeEngine {
         `character:${character}`,
         `dominant:${input.decision.direction}`,
         `quality:${quality}`,
+        ...(input.marketObjectAdjustment?.factors.length
+          ? [
+              "market-object-aware",
+              `market-object-direction:${input.marketObjectAdjustment.direction}`,
+            ]
+          : []),
       ]),
       metadata: {
         narrativeEngineId: this.id,
         narrativeGeneratedAt: generatedAt,
         narrativeRegime: input.context.regime.regime as MarketRegime,
         narrativeObjectiveId: currentObjective?.id ?? null,
+        marketObjectFactorCount:
+          input.marketObjectAdjustment?.factors.length ?? 0,
+        marketObjectBlocked:
+          input.marketObjectAdjustment?.blocked ?? false,
       },
     };
   }

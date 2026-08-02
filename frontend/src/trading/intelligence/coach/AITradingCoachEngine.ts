@@ -17,6 +17,7 @@ import type {
 } from "../types/MarketContextTypes";
 import type { TradingDecisionResult } from "../evaluators/TradingDecisionEngine";
 import type { IntelligenceRegistryRuntime } from "../core/IntelligenceRegistry";
+import type { MarketObjectDecisionAdjustment } from "../integration/MarketObjectDecisionAdapter";
 import type {
   CoachMessage,
   IntelligenceAccountInput,
@@ -49,6 +50,7 @@ export interface AITradingCoachInput {
   position?: IntelligencePositionInput | null;
   tradePlan?: IntelligenceTradePlanInput | null;
   previousCoach?: IntelligenceCoachAssessment | null;
+  marketObjectAdjustment?: MarketObjectDecisionAdjustment | null;
 }
 
 export interface AITradingCoachContribution {
@@ -272,6 +274,77 @@ function addMarketMessages(
       confidence: decision.confidence,
       dismissible: true,
       evidenceIds: negativeIds,
+    });
+  }
+}
+
+function addMarketObjectMessages(
+  drafts: MessageDraft[],
+  input: AITradingCoachInput,
+): void {
+  const adjustment = input.marketObjectAdjustment;
+  if (!adjustment || adjustment.factors.length === 0) return;
+
+  if (adjustment.blocked) {
+    const labels = adjustment.factors
+      .filter((factor) => factor.blocking)
+      .slice(0, 2)
+      .map((factor) => factor.label);
+    drafts.push({
+      key: "market-object-invalidated",
+      level: "critical",
+      category: "risk",
+      title: "Market Object Invalidated",
+      message: labels.length
+        ? `${labels.join(" and ")} no longer support the active thesis.`
+        : "A key market object has invalidated the active thesis.",
+      action: "Do not enter until a new thesis and invalidation level are defined.",
+      priority: 98,
+      confidence: 0.9,
+      dismissible: false,
+      evidenceIds: adjustment.blockingObjectIds,
+    });
+    return;
+  }
+
+  if (adjustment.shouldWait) {
+    drafts.push({
+      key: "market-object-conflict",
+      level: "warning",
+      category: "patience",
+      title: "Confluence Is Mixed",
+      message: "Nearby market objects conflict with the active directional thesis.",
+      action: "Wait for price to confirm which object is controlling the auction.",
+      priority: 88,
+      confidence: 0.78,
+      dismissible: true,
+      evidenceIds: adjustment.opposingObjectIds,
+    });
+    return;
+  }
+
+  const aligned = adjustment.factors
+    .filter(
+      (factor) =>
+        !factor.blocking &&
+        adjustment.direction !== "neutral" &&
+        factor.direction === adjustment.direction,
+    )
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 2);
+
+  if (aligned.length > 0) {
+    drafts.push({
+      key: "market-object-confluence",
+      level: "positive",
+      category: "market-reading",
+      title: "Market Objects Aligned",
+      message: `${aligned.map((factor) => factor.label).join(" and ")} support the ${adjustment.direction} thesis.`,
+      action: "Use the planned trigger and keep risk defined at thesis invalidation.",
+      priority: 74,
+      confidence: Math.max(...aligned.map((factor) => factor.confidence)),
+      dismissible: true,
+      evidenceIds: aligned.map((factor) => factor.objectId),
     });
   }
 }
@@ -617,6 +690,9 @@ function extractRuntimeInput(runtime: IntelligenceRegistryRuntime): AITradingCoa
   let narrative = runtime.report?.narrative;
   let risk = runtime.report?.risk;
   let entry = runtime.report?.entry;
+  const marketObjectAdjustment = runtime.shared.get(
+    "market-objects:decision-adjustment",
+  ) as MarketObjectDecisionAdjustment | undefined;
 
   for (const value of runtime.shared.values()) {
     context ??= extractContribution<MarketContextSnapshot>(value, "context");
@@ -643,6 +719,7 @@ function extractRuntimeInput(runtime: IntelligenceRegistryRuntime): AITradingCoa
     position: runtime.context.position,
     tradePlan: runtime.context.tradePlan,
     previousCoach: runtime.context.previousReport?.coach ?? null,
+    marketObjectAdjustment,
   };
 }
 
@@ -676,6 +753,7 @@ export class AITradingCoachEngine {
     addPositionMessages(drafts, input);
     addEntryMessages(drafts, input);
     addMarketMessages(drafts, input);
+    addMarketObjectMessages(drafts, input);
 
     const messages = drafts
       .map((draft) => makeMessage(draft, generatedAt))
@@ -764,6 +842,9 @@ export class AITradingCoachEngine {
         `coach-process:${Math.round(process / 10) * 10}`,
         ...(coach.shouldInterrupt ? ["coach-interrupt"] : []),
         ...(coach.shouldWarn ? ["coach-warning"] : []),
+        ...(input.marketObjectAdjustment?.factors.length
+          ? ["market-object-aware"]
+          : []),
       ]),
       warnings: messages
         .filter((message) => message.level === "critical")
@@ -774,6 +855,10 @@ export class AITradingCoachEngine {
         coachMessageCount: messages.length,
         coachPrimaryMessageId: messages[0]?.id ?? null,
         coachImmediateAction: action,
+        marketObjectFactorCount:
+          input.marketObjectAdjustment?.factors.length ?? 0,
+        marketObjectBlocked:
+          input.marketObjectAdjustment?.blocked ?? false,
       },
     };
   }

@@ -8,6 +8,7 @@ import type {
   MarketContextReason,
   MarketContextResult,
 } from "../types/MarketContextTypes";
+import type { MarketObjectDecisionAdjustment } from "../integration/MarketObjectDecisionAdapter";
 
 export type TradingDecisionAction =
   | "strong-long"
@@ -32,6 +33,7 @@ export interface TradingDecisionInput {
   requireEntryApproval?: boolean;
   longOnly?: boolean;
   shortOnly?: boolean;
+  marketObjectAdjustment?: MarketObjectDecisionAdjustment;
   metadata?: Record<string, unknown>;
 }
 
@@ -375,6 +377,7 @@ export class TradingDecisionEngine {
 
   evaluate(input: TradingDecisionInput): TradingDecisionResult {
     const context = input.context;
+    const marketObjects = input.marketObjectAdjustment;
     const components = context.components ?? [];
     const factors = createFactors(components, this.weights);
     const conflicts = createConflicts(components);
@@ -470,14 +473,16 @@ export class TradingDecisionEngine {
       Math.min(15, supporting.length * 2.5) -
       conflicts.filter((item) => item.severity === "high").length * 12 -
       conflicts.filter((item) => item.severity === "medium").length * 6 -
-      blocking.length * 8,
+      blocking.length * 8 +
+      (marketObjects?.scoreAdjustment ?? 0),
     );
 
     const convictionScore = clamp(
       directionalStrength * confidence +
       supporting.length * 3 -
       opposing.length * 4 -
-      conflicts.length * 3,
+      conflicts.length * 3 +
+      (marketObjects?.convictionAdjustment ?? 0),
     );
 
     const risk = collectRiskSummary(components, conflicts);
@@ -492,7 +497,10 @@ export class TradingDecisionEngine {
     const riskApproved = !input.requireRiskApproval || (!!riskComponent && normalizeScore(riskComponent) >= 55);
     const entryApproved = !input.requireEntryApproval || (!!entryComponent && normalizeScore(entryComponent) >= 55);
     const directionAllowed = direction === "neutral" || ((!input.longOnly || direction === "bullish") && (!input.shortOnly || direction === "bearish"));
-    const hardBlock = conflicts.some((item) => item.severity === "high") || risk.level === "extreme";
+    const hardBlock =
+      conflicts.some((item) => item.severity === "high") ||
+      risk.level === "extreme" ||
+      (marketObjects?.blocked ?? false);
 
     const canTrade =
       direction !== "neutral" &&
@@ -509,12 +517,14 @@ export class TradingDecisionEngine {
       confidence < minimumConfidence ||
       tradeScore < minimumTradeScore ||
       conflicts.some((item) => item.severity === "medium") ||
-      blocking.length > 0;
+      blocking.length > 0 ||
+      (marketObjects?.shouldWait ?? false);
 
     const grade = gradeFromScore(tradeScore);
 
     const structureInvalidated =
-      structure?.status === "invalidated";
+      structure?.status === "invalidated" ||
+      (marketObjects?.blocked ?? false);
     const extremeRisk =
       risk.level === "extreme" ||
       (riskComponent?.status === "invalidated");
@@ -576,9 +586,18 @@ export class TradingDecisionEngine {
       risk,
       factors,
       conflicts,
-      supportingComponents: supporting.map((item) => item.id),
-      opposingComponents: opposing.map((item) => item.id),
-      blockingComponents: blocking.map((item) => item.id),
+      supportingComponents: [
+        ...supporting.map((item) => item.id),
+        ...(marketObjects?.supportingObjectIds ?? []),
+      ],
+      opposingComponents: [
+        ...opposing.map((item) => item.id),
+        ...(marketObjects?.opposingObjectIds ?? []),
+      ],
+      blockingComponents: [
+        ...blocking.map((item) => item.id),
+        ...(marketObjects?.blockingObjectIds ?? []),
+      ],
       evidence: components.flatMap((item) => item.evidence ?? []),
       reasons: components.flatMap((item) => item.reasons ?? []),
       metrics: components.flatMap((item) => item.metrics ?? []),
@@ -593,6 +612,7 @@ export class TradingDecisionEngine {
         structureDirection !== "neutral"
           ? "direction-from-market-structure"
           : "direction-from-context-vote",
+        ...(marketObjects?.tags ?? []),
       ].filter(Boolean),
       canTrade,
       shouldWait,

@@ -3,17 +3,14 @@
 import {
   createContext,
   useContext,
-  useEffect,
   useMemo,
-  useRef,
-  useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 
 import type { ChartState } from "../ChartState";
 import type { MarketIntelligenceReport } from "../../../trading/intelligence/core/IntelligenceTypes";
-import { evaluateTradingIntelligence } from "../../../trading/intelligence/core/TradingIntelligenceRuntime";
-import { buildMarketIntelligenceRequestFromChartState } from "../../../trading/intelligence/integration/ChartStateIntelligenceAdapter";
+import { getSharedMarketIntelligenceStore } from "../../../trading/intelligence/integration/MarketIntelligenceStore";
 import type { MarketMemorySnapshot } from "../../../trading/memory/MarketMemoryTypes";
 import type { MarketMemoryEngineResult } from "../../../trading/memory/MarketMemoryEngine";
 import type { MarketStory } from "../../../trading/memory/MarketStoryBuilder";
@@ -51,13 +48,6 @@ type DecisionCenterProviderProps = {
   children: ReactNode;
   chartState?: ChartState | null;
 };
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return typeof error === "string"
-    ? error
-    : "Unable to evaluate trading intelligence.";
-}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object");
@@ -169,91 +159,39 @@ export function DecisionCenterProvider({
   children,
   chartState,
 }: DecisionCenterProviderProps) {
-  const [intelligence, setIntelligence] =
-    useState<DecisionCenterIntelligenceState>(EMPTY_INTELLIGENCE);
+  const store = getSharedMarketIntelligenceStore();
+  const snapshot = useSyncExternalStore(
+    (listener) => store.subscribe(listener),
+    () => store.getSnapshot(),
+    () => store.getSnapshot(),
+  );
 
-  const latestReportRef = useRef<MarketIntelligenceReport | null>(null);
-  const evaluationVersionRef = useRef(0);
-
-  useEffect(() => {
-    const version = ++evaluationVersionRef.current;
-
-    if (!chartState || (!chartState.lastBar && chartState.bars.length === 0)) {
-      latestReportRef.current = null;
-      setIntelligence(EMPTY_INTELLIGENCE);
-      return;
+  const intelligence = useMemo<DecisionCenterIntelligenceState>(() => {
+    const report = snapshot.report;
+    if (!report) {
+      return {
+        ...EMPTY_INTELLIGENCE,
+        status: snapshot.status,
+        error: snapshot.error,
+        evaluatedAt: snapshot.evaluatedAt,
+        isEvaluating: snapshot.status === "evaluating",
+      };
     }
 
-    let cancelled = false;
+    const memoryResult = readMemoryResult(report);
 
-    setIntelligence((current) => ({
-      ...current,
-      status: "evaluating",
-      error: null,
-      isEvaluating: true,
-    }));
-
-    const evaluate = async (): Promise<void> => {
-      try {
-        const request = buildMarketIntelligenceRequestFromChartState(
-          chartState,
-          {
-            source: "decision-center",
-            consumer: "decision-center",
-            previousReport: latestReportRef.current,
-            includeCoach: true,
-            includeNarrative: true,
-            metadata: {
-              surface: "chart-right-panel",
-            },
-          },
-        );
-
-        const result = await evaluateTradingIntelligence(request);
-
-        if (cancelled || version !== evaluationVersionRef.current) {
-          return;
-        }
-
-        const report = result.report;
-        const previousReport = latestReportRef.current;
-        const memoryResult = readMemoryResult(report);
-        const memory = readMemorySnapshot(report, memoryResult);
-        const marketStory = readMarketStory(report, memoryResult);
-
-        latestReportRef.current = report;
-
-        setIntelligence({
-          report,
-          previousReport,
-          memory,
-          memoryResult,
-          marketStory,
-          status: "ready",
-          error: null,
-          evaluatedAt: Date.now(),
-          isEvaluating: false,
-        });
-      } catch (error) {
-        if (cancelled || version !== evaluationVersionRef.current) {
-          return;
-        }
-
-        setIntelligence((current) => ({
-          ...current,
-          status: "error",
-          error: errorMessage(error),
-          isEvaluating: false,
-        }));
-      }
+    return {
+      report,
+      previousReport: snapshot.previousReport,
+      memory: readMemorySnapshot(report, memoryResult),
+      memoryResult,
+      marketStory: readMarketStory(report, memoryResult),
+      status: snapshot.status,
+      error: snapshot.error,
+      evaluatedAt: snapshot.evaluatedAt,
+      isEvaluating: snapshot.status === "evaluating",
     };
-
-    void evaluate();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [chartState]);
+  }, [snapshot]);
 
   /**
    * One shared Decision Center view model.

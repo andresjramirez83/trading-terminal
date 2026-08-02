@@ -27,6 +27,8 @@ import ChartViewport from "./ChartViewport";
 import LeftDrawingBar from "./LeftDrawingBar";
 import RightInfoPanel from "./RightInfoPanel";
 import { DrawingEngine } from "./DrawingEngine";
+import { MarketObjectDrawingBridge } from "./analysis/market-objects/MarketObjectDrawingBridge";
+import { ChartIntelligenceBridge } from "../../trading/intelligence/integration/ChartIntelligenceBridge";
 import { TrendlineTool } from "./interaction/tools/TrendlineTool";
 import { HorizontalLineTool } from "./interaction/tools/HorizontalLineTool";
 import { RectangleTool } from "./interaction/tools/RectangleTool";
@@ -238,6 +240,8 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<ChartEngine | null>(null);
   const drawingEngineRef = useRef<DrawingEngine | null>(null);
+  const marketObjectDrawingBridgeRef = useRef<MarketObjectDrawingBridge | null>(null);
+  const chartIntelligenceBridgeRef = useRef<ChartIntelligenceBridge | null>(null);
   const tradeEngineRef = useRef<TradeEngine | null>(null);
   const tradeControllerRef = useRef<TradeController | null>(null);
   const positionOverlayRef = useRef<PositionOverlayManager | null>(null);
@@ -325,6 +329,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     const nextState = engine.getState();
 
     setChartState(nextState);
+    chartIntelligenceBridgeRef.current?.update(nextState, reason);
   }
 
   function handleSymbolChange(nextSymbol: string) {
@@ -557,6 +562,17 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       },
       engine.getContainer(),
     );
+    const marketObjectDrawingBridge = new MarketObjectDrawingBridge(
+      drawingEngine,
+      { symbol, timeframe },
+    );
+    marketObjectDrawingBridge.start();
+    const chartIntelligenceBridge = new ChartIntelligenceBridge({
+      mode: marketDataMode === "replay" ? "replay" : "live",
+      onError: (error) => {
+        console.error("Chart intelligence evaluation failed", error);
+      },
+    });
     const tradeEngine = getSharedTradeEngine({ symbol, timeframe });
 
     engine.setStudyVisibility(studyVisibility);
@@ -590,6 +606,8 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
     engineRef.current = engine;
     drawingEngineRef.current = drawingEngine;
+    marketObjectDrawingBridgeRef.current = marketObjectDrawingBridge;
+    chartIntelligenceBridgeRef.current = chartIntelligenceBridge;
     tradeEngineRef.current = tradeEngine;
 
     const executionService = getSharedExecutionGateway();
@@ -865,9 +883,15 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       container.style.cursor = "";
       tradeController.detach();
       tradeControllerRef.current = null;
+      chartIntelligenceBridge.destroy();
+      if (chartIntelligenceBridgeRef.current === chartIntelligenceBridge) {
+        chartIntelligenceBridgeRef.current = null;
+      }
       tradeEngineRef.current = null;
       positionOverlay.destroy();
       positionOverlayRef.current = null;
+      marketObjectDrawingBridge.destroy();
+      marketObjectDrawingBridgeRef.current = null;
       drawingEngine.destroy();
       drawingEngineRef.current = null;
       engine.destroy();
@@ -1167,6 +1191,12 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   }, [rightPanelCollapsed]);
 
   useEffect(() => {
+    chartIntelligenceBridgeRef.current?.setMode(
+      marketDataMode === "replay" ? "replay" : "live",
+    );
+  }, [marketDataMode]);
+
+  useEffect(() => {
     return replayRuntime.subscribe((snapshot) => {
       setReplaySnapshot(snapshot);
 
@@ -1212,6 +1242,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
         setCrosshairInfo(null);
         setChartState(null);
+        chartIntelligenceBridgeRef.current?.reset();
         replayIndexRef.current = -1;
         engine.setMarketContext(symbol, timeframe);
         tradeEngineRef.current?.setWorkspace({ symbol, timeframe });
@@ -1238,6 +1269,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           engine.setBars(snapshot.visibleBars);
           replayIndexRef.current = snapshot.currentIndex;
           drawingEngineRef.current?.setWorkspace(symbol, timeframe);
+          marketObjectDrawingBridgeRef.current?.setWorkspace({ symbol, timeframe });
           tradeEngineRef.current?.setWorkspace({ symbol, timeframe });
           commitChartState(engine, "replay-loaded");
           engine.setStudyVisibility(studyVisibility);
@@ -1261,6 +1293,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         engine.setMarketContext(symbol, timeframe);
         engine.setBars(bars);
         drawingEngineRef.current?.setWorkspace(symbol, timeframe);
+        marketObjectDrawingBridgeRef.current?.setWorkspace({ symbol, timeframe });
         tradeEngineRef.current?.setWorkspace({ symbol, timeframe });
         commitChartState(engine, "historical-bars-loaded");
         engine.setStudyVisibility(studyVisibility);
