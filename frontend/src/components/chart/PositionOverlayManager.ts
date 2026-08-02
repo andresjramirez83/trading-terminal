@@ -659,7 +659,6 @@ export class PositionOverlayManager {
       if (!this.snapshot.entryIsLive || this.committing) return;
       const y = this.priceSeries.priceToCoordinate(this.snapshot.entry);
       if (y == null || !this.beginDrag(y)) return;
-      (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
       event.preventDefault();
       event.stopPropagation();
     });
