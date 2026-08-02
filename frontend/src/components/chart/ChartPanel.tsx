@@ -741,6 +741,32 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     const isChartPointerEvent = (event: PointerEvent): boolean =>
       event.target instanceof Node && container.contains(event.target);
 
+    let overlayMoveFrame: number | null = null;
+    let pendingOverlayY: number | null = null;
+
+    const flushOverlayMove = () => {
+      overlayMoveFrame = null;
+      if (pendingOverlayY == null || !positionOverlay.isDragging()) return;
+      const y = pendingOverlayY;
+      pendingOverlayY = null;
+      positionOverlay.moveDrag(y);
+    };
+
+    const queueOverlayMove = (y: number) => {
+      pendingOverlayY = y;
+      if (overlayMoveFrame != null) return;
+      overlayMoveFrame = window.requestAnimationFrame(flushOverlayMove);
+    };
+
+    const finishOverlayMove = (event: PointerEvent) => {
+      if (overlayMoveFrame != null) {
+        window.cancelAnimationFrame(overlayMoveFrame);
+        overlayMoveFrame = null;
+      }
+      pendingOverlayY = getLocalY(event);
+      flushOverlayMove();
+    };
+
     const handleOverlayPointerDown = (event: PointerEvent) => {
       if (!isChartPointerEvent(event)) return;
       if (event.button !== 0) return;
@@ -768,7 +794,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         return;
       }
 
-      positionOverlay.moveDrag(getLocalY(event));
+      queueOverlayMove(getLocalY(event));
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
@@ -777,7 +803,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     const handleOverlayPointerUp = (event: PointerEvent) => {
       if (!positionOverlay.isDragging()) return;
 
-      container.releasePointerCapture?.(event.pointerId);
+      finishOverlayMove(event);
+      if (container.hasPointerCapture?.(event.pointerId)) {
+        container.releasePointerCapture(event.pointerId);
+      }
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
@@ -787,7 +816,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     const handleOverlayPointerCancel = (event: PointerEvent) => {
       if (!positionOverlay.isDragging()) return;
 
-      container.releasePointerCapture?.(event.pointerId);
+      if (overlayMoveFrame != null) {
+        window.cancelAnimationFrame(overlayMoveFrame);
+        overlayMoveFrame = null;
+      }
+      pendingOverlayY = null;
+      if (container.hasPointerCapture?.(event.pointerId)) {
+        container.releasePointerCapture(event.pointerId);
+      }
       positionOverlay.cancelDrag();
       event.preventDefault();
       event.stopPropagation();
@@ -823,6 +859,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       window.removeEventListener("pointermove", handleOverlayPointerMove, true);
       window.removeEventListener("pointerup", handleOverlayPointerUp, true);
       window.removeEventListener("pointercancel", handleOverlayPointerCancel, true);
+      if (overlayMoveFrame != null) {
+        window.cancelAnimationFrame(overlayMoveFrame);
+      }
       container.style.cursor = "";
       tradeController.detach();
       tradeControllerRef.current = null;
