@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -255,11 +256,134 @@ class AlpacaService:
         if not payload:
             raise RuntimeError("No order update fields were provided")
 
-        return self._request(
-            "PATCH",
-            f"/v2/orders/{order_id}",
-            json=payload,
+        try:
+            return self._request(
+                "PATCH",
+                f"/v2/orders/{order_id}",
+                json=payload,
+            )
+        except RuntimeError as exc:
+            # Alpaca keeps orders submitted outside a trading session in
+            # ``accepted`` status and refuses PATCH replacements until they
+            # become ``new``.  Waiting is not enough here: on a weekend that
+            # state can last until the next session.  For an entirely unfilled
+            # accepted order, cancel it and recreate the same broker order with
+            # the requested fields.  The returned replacement has a new ID;
+            # the frontend already reconciles that ID into its shared snapshot.
+            message = str(exc).lower()
+            if "cannot replace order in accepted status" not in message:
+                raise
+            return self._recreate_accepted_order(order_id, payload)
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    def _recreate_accepted_order(
+        self,
+        order_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        original = self.get_order(order_id, nested=True)
+        status = str(original.get("status") or "").strip().lower()
+        filled_qty = self._positive_number(original.get("filled_qty")) or 0.0
+
+        if status != "accepted":
+            # The broker state changed between PATCH and GET. Retry once using
+            # the same original ID; Alpaca will either replace it or return the
+            # current, meaningful error to the caller.
+            return self._request("PATCH", f"/v2/orders/{order_id}", json=updates)
+        if filled_qty > 0:
+            raise RuntimeError(
+                "Cannot safely recreate an accepted order that is partially filled"
+            )
+
+        qty = self._positive_number(updates.get("qty"))
+        if qty is None:
+            qty = self._positive_number(original.get("qty"))
+        notional = None if qty is not None else self._positive_number(original.get("notional"))
+
+        symbol = str(original.get("symbol") or "").strip().upper()
+        side = str(original.get("side") or "").strip().lower()
+        order_type = str(original.get("type") or "").strip().lower()
+        time_in_force = str(
+            updates.get("time_in_force") or original.get("time_in_force") or "day"
+        ).strip().lower()
+        if not symbol or side not in {"buy", "sell"} or not order_type:
+            raise RuntimeError("Accepted order is missing fields required for safe recreation")
+        if qty is None and notional is None:
+            raise RuntimeError("Accepted order has no quantity or notional to recreate")
+
+        limit_price = self._positive_number(
+            updates.get("limit_price", original.get("limit_price"))
         )
+        stop_price = self._positive_number(
+            updates.get("stop_price", original.get("stop_price"))
+        )
+
+        take_profit: Optional[Dict[str, Any]] = None
+        stop_loss: Optional[Dict[str, Any]] = None
+        for leg in original.get("legs") or []:
+            if not isinstance(leg, dict):
+                continue
+            leg_type = str(leg.get("type") or "").strip().lower()
+            leg_limit = self._positive_number(leg.get("limit_price"))
+            leg_stop = self._positive_number(leg.get("stop_price"))
+            if leg_type == "limit" and leg_limit is not None:
+                take_profit = {"limit_price": leg_limit}
+            elif leg_type in {"stop", "stop_limit"} and leg_stop is not None:
+                stop_loss = {"stop_price": leg_stop}
+                if leg_type == "stop_limit" and leg_limit is not None:
+                    stop_loss["limit_price"] = leg_limit
+
+        order_class = str(original.get("order_class") or "").strip().lower() or None
+        if order_class == "simple":
+            order_class = None
+
+        self.cancel_order(order_id)
+
+        # Do not submit a duplicate while Alpaca still considers the original
+        # active. Cancellation normally settles immediately, but allow a short
+        # broker propagation window.
+        canceled = False
+        for _ in range(10):
+            current = self.get_order(order_id, nested=False)
+            current_status = str(current.get("status") or "").strip().lower()
+            if current_status in {"canceled", "cancelled", "expired", "rejected"}:
+                canceled = True
+                break
+            if current_status in {"filled", "partially_filled"}:
+                raise RuntimeError(
+                    "Order filled while its accepted-price update was being applied"
+                )
+            time.sleep(0.2)
+        if not canceled:
+            raise RuntimeError("Timed out waiting for accepted order cancellation")
+
+        recreated = self.place_order(
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            time_in_force=time_in_force,
+            qty=qty,
+            notional=notional,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            extended_hours=bool(original.get("extended_hours")),
+            position_intent=str(original.get("position_intent") or "").strip() or None,
+            order_class=order_class,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+        )
+        if isinstance(recreated, dict):
+            # Alpaca's recreate response has no `replaces` link because this is
+            # cancel + submit. Supply it so all clients can reconcile identity.
+            recreated.setdefault("replaces", order_id)
+        return recreated
 
     def cancel_order(self, order_id: str) -> None:
         self._request("DELETE", f"/v2/orders/{order_id}")
