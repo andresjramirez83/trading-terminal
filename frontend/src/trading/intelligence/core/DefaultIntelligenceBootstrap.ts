@@ -463,6 +463,28 @@ export async function createDefaultIntelligencePipeline(
     id: "market-object-intelligence-engine",
     evaluate(runtime: IntelligenceRegistryRuntime) {
       const input = runtime.context.input;
+      const previousBarValue = input.metadata?.previousBar;
+      const previousBar =
+        previousBarValue && typeof previousBarValue === "object"
+          ? (previousBarValue as Record<string, unknown>)
+          : null;
+      const previousBarTime = previousBar?.time;
+      const previousBarOpen = previousBar?.open;
+      const previousBarHigh = previousBar?.high;
+      const previousBarLow = previousBar?.low;
+      const previousBarClose = previousBar?.close;
+      const previousBarVolume = previousBar?.volume;
+      const hasPreviousBar =
+        typeof previousBarTime === "number" &&
+        Number.isFinite(previousBarTime) &&
+        typeof previousBarOpen === "number" &&
+        Number.isFinite(previousBarOpen) &&
+        typeof previousBarHigh === "number" &&
+        Number.isFinite(previousBarHigh) &&
+        typeof previousBarLow === "number" &&
+        Number.isFinite(previousBarLow) &&
+        typeof previousBarClose === "number" &&
+        Number.isFinite(previousBarClose);
       const result = marketObjectEngine.evaluate({
         symbol: input.symbol,
         timeframe: input.timeframe,
@@ -474,6 +496,20 @@ export async function createDefaultIntelligencePipeline(
           close: input.bar.close,
           volume: input.bar.volume,
         },
+        previousBar: hasPreviousBar
+          ? {
+              time: previousBarTime as import("lightweight-charts").Time,
+              open: previousBarOpen as number,
+              high: previousBarHigh as number,
+              low: previousBarLow as number,
+              close: previousBarClose as number,
+              volume:
+                typeof previousBarVolume === "number" &&
+                Number.isFinite(previousBarVolume)
+                  ? previousBarVolume
+                  : undefined,
+            }
+          : undefined,
         barIndex: input.barIndex ?? input.bar.barIndex,
       });
 

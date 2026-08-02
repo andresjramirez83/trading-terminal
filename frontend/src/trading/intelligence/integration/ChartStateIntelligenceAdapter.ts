@@ -373,6 +373,16 @@ export function buildMarketIntelligenceRequestFromChartState(
           barCount: chartState.bars.length,
           adapter: "ChartStateIntelligenceAdapter",
           ...options.metadata,
+          previousBar: priorBar
+            ? {
+                time: toEpochMilliseconds(priorBar.time),
+                open: priorBar.open,
+                high: priorBar.high,
+                low: priorBar.low,
+                close: priorBar.close,
+                volume: priorBar.volume,
+              }
+            : undefined,
         },
       },
 
