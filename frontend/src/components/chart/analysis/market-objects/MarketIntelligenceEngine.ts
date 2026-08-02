@@ -280,6 +280,16 @@ export class MarketIntelligenceEngine {
         this.record(object.id, "approachUpdated", update, interactions);
       }
 
+      // A confirmed close across a line is the highest-priority interaction
+      // for this candle. Do not also record touched/entered/rejected, because
+      // those lower-priority events can become the status shown by the widget.
+      const closeCrossing = closeCrossingType(object, update);
+      if (object.geometry.kind === "line" && closeCrossing) {
+        this.record(object.id, closeCrossing, update, interactions);
+        evaluations.push({ objectId: object.id, proximity, interactions });
+        continue;
+      }
+
       const touched = candleTouches(bounds, update.bar);
       const wasInside = previousProximity?.isInside ?? false;
       if (touched && !wasInside) {
@@ -300,7 +310,6 @@ export class MarketIntelligenceEngine {
         this.record(object.id, "leftObject", update, interactions);
       }
 
-      const closeCrossing = closeCrossingType(object, update);
       if (closeCrossing) {
         this.record(object.id, closeCrossing, update, interactions);
       }
