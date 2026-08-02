@@ -51,6 +51,8 @@ import type {
 } from "./ChartTypes";
 import { PositionOverlayEngine } from "../../trading/overlay/PositionOverlayEngine";
 import { PositionOverlayRenderer } from "../../trading/overlay/PositionOverlayRenderer";
+import { marketObjectRegistry } from "./analysis/market-objects/MarketObjectRegistry";
+import type { MarketObject } from "./analysis/market-objects/MarketObjectTypes";
 
 function volumeColor(bar: CleanBar): string {
   return bar.close >= bar.open
@@ -401,6 +403,7 @@ export class ChartEngine {
     this.studyRenderer = new StudyRenderer(this.chart, this.container, this.series.candles);
     this.unsubscribeAnalysisStore = this.analysisStore.subscribe(() => {
       this.renderFxAnalysis();
+      this.synchronizeFxAnalysisMarketObjects();
       this.refreshFxAutoScaleIfNeeded(this.forceNextFxAutoScale);
       this.forceNextFxAutoScale = false;
     });
@@ -1281,6 +1284,103 @@ setMarketContext(symbol?: string, timeframe?: string): void {
       this.fxAnalysisSettings,
       this.analysisStore.getSelectedId(),
     );
+  }
+
+  private synchronizeFxAnalysisMarketObjects(): void {
+    const symbol = String(this.symbol ?? "SPY").trim().toUpperCase();
+    const timeframe = String(this.timeframe ?? "5m").trim();
+    const demandResults = this.analysisStore
+      .getSaved()
+      .filter((result) => result.tool === "demandZone" && result.zone);
+    const activeIds = new Set(
+      demandResults.map((result) => `market_object_analysis_${result.id}`),
+    );
+
+    const existingObjects = marketObjectRegistry.find({
+      symbol,
+      timeframe,
+      source: "engine",
+      type: "demandZone",
+    });
+
+    for (const object of existingObjects) {
+      if (
+        object.metadata?.synchronizedFromFxAnalysis === true &&
+        !activeIds.has(object.id)
+      ) {
+        marketObjectRegistry.remove(object.id);
+      }
+    }
+
+    for (const result of demandResults) {
+      const zone = result.zone;
+      if (!zone) continue;
+
+      const id = `market_object_analysis_${result.id}`;
+      const existing = marketObjectRegistry.get(id);
+      const timestamp = Date.now();
+      const object: MarketObject = {
+        id,
+        type: "demandZone",
+        source: "engine",
+        bias: "bullish",
+        symbol,
+        timeframe,
+        status: existing?.status ?? "registered",
+        lifecycleStage: existing?.lifecycleStage ?? "fresh",
+        active: true,
+        geometry: {
+          kind: "zone",
+          zone: {
+            low: Math.min(zone.low, zone.high),
+            high: Math.max(zone.low, zone.high),
+            startTime: result.anchorTime,
+            extendRight: zone.extendRight ?? true,
+          },
+        },
+        scoring: existing?.scoring ?? {
+          quality: 50,
+          health: 100,
+          confidence: 50,
+          confidenceBand: "moderate",
+          priority: "normal",
+        },
+        awareness: existing?.awareness ?? {
+          enabled: true,
+          mode: "percent",
+          threshold: 0.25,
+        },
+        memory: existing?.memory ?? {
+          touchCount: 0,
+          rejectionCount: 0,
+          successfulRetestCount: 0,
+          failedRetestCount: 0,
+          interactions: [],
+        },
+        relationshipIds: existing?.relationshipIds ?? [],
+        evidence: existing?.evidence ?? [],
+        createdAt: existing?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+        createdTime: existing?.createdTime ?? result.anchorTime,
+        updatedTime: result.anchorTime,
+        presentation: {
+          label: zone.title || "Demand Zone",
+          color: zone.borderColor,
+          fillColor: zone.fillColor,
+          lineWidth: 2,
+          visible: true,
+          showLabel: true,
+        },
+        metadata: {
+          ...(existing?.metadata ?? {}),
+          analysisResultId: result.id,
+          analysisZoneId: zone.id,
+          synchronizedFromFxAnalysis: true,
+        },
+      };
+
+      marketObjectRegistry.upsert(object);
+    }
   }
 
 

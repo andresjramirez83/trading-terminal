@@ -467,7 +467,7 @@ export async function createDefaultIntelligencePipeline(
         symbol: input.symbol,
         timeframe: input.timeframe,
         bar: {
-            time: input.bar.time as import("lightweight-charts").UTCTimestamp,
+          time: input.bar.time as import("lightweight-charts").Time,
           open: input.bar.open,
           high: input.bar.high,
           low: input.bar.low,
