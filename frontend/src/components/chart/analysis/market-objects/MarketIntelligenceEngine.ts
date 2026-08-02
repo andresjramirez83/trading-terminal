@@ -66,7 +66,14 @@ function clamp(value: number, low: number, high: number): number {
 }
 
 function numericTime(time: Time): number | null {
-  if (typeof time === "number") return time;
+  if (typeof time === "number") {
+    if (!Number.isFinite(time)) return null;
+
+    // Lightweight Charts uses Unix seconds, while persisted drawings may
+    // contain JavaScript timestamps in milliseconds. Normalize both sides of
+    // the line projection to seconds before calculating its slope.
+    return Math.abs(time) >= 100_000_000_000 ? time / 1000 : time;
+  }
   if (typeof time === "string") {
     const value = Date.parse(time);
     return Number.isFinite(value) ? value / 1000 : null;
