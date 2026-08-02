@@ -191,6 +191,27 @@ function rejectionType(
   return null;
 }
 
+function closeCrossingType(
+  object: MarketObject,
+  update: MarketIntelligenceUpdate,
+): MarketObjectInteractionType | null {
+  const previousBar = update.previousBar;
+  if (!previousBar) return null;
+
+  const previousBounds = boundsAtTime(object, previousBar.time);
+  const currentBounds = boundsAtTime(object, update.bar.time);
+  if (!previousBounds || !currentBounds) return null;
+
+  const wasAtOrBelow = previousBar.close <= previousBounds.high;
+  const wasAtOrAbove = previousBar.close >= previousBounds.low;
+  const isAbove = update.bar.close > currentBounds.high;
+  const isBelow = update.bar.close < currentBounds.low;
+
+  if (wasAtOrBelow && isAbove) return "closedAbove";
+  if (wasAtOrAbove && isBelow) return "closedBelow";
+  return null;
+}
+
 export class MarketIntelligenceEngine {
   private readonly listeners = new Set<MarketIntelligenceListener>();
   private lastResult: MarketIntelligenceResult | null = null;
@@ -270,6 +291,11 @@ export class MarketIntelligenceEngine {
 
       if (!proximity.isInside && wasInside && !rejection) {
         this.record(object.id, "leftObject", update, interactions);
+      }
+
+      const closeCrossing = closeCrossingType(object, update);
+      if (closeCrossing) {
+        this.record(object.id, closeCrossing, update, interactions);
       }
 
       evaluations.push({ objectId: object.id, proximity, interactions });

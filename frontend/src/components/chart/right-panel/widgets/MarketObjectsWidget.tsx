@@ -54,6 +54,33 @@ function biasColor(object: MarketObject): string {
   return "#38bdf8";
 }
 
+function interactionStatus(object: MarketObject): {
+  label: string;
+  color: string;
+} {
+  const latest = object.memory.interactions[object.memory.interactions.length - 1];
+  if (!latest) return { label: object.bias, color: biasColor(object) };
+
+  const labels: Partial<Record<typeof latest.type, string>> = {
+    closedAbove: "Closed Above",
+    closedBelow: "Closed Below",
+    touched: "Touched",
+    entered: "At Line",
+    wickRejected: "Wick Rejected",
+    bodyRejected: "Body Rejected",
+    invalidated: "Invalidated",
+    leftObject: "Moved Away",
+  };
+
+  const label = labels[latest.type];
+  if (!label) return { label: object.bias, color: biasColor(object) };
+  if (latest.type === "closedAbove") return { label, color: "#22c55e" };
+  if (latest.type === "closedBelow" || latest.type === "invalidated") {
+    return { label, color: "#ef4444" };
+  }
+  return { label, color: "#f59e0b" };
+}
+
 function proximityText(object: MarketObject): string {
   const proximity = object.awareness.proximity;
   if (!proximity) return object.status;
@@ -206,6 +233,7 @@ function Summary({
 function ObjectRow({ object }: { object: MarketObject }) {
   const color = biasColor(object);
   const proximity = object.awareness.proximity;
+  const status = interactionStatus(object);
 
   return (
     <div
@@ -261,13 +289,13 @@ function ObjectRow({ object }: { object: MarketObject }) {
         <span
           style={{
             flexShrink: 0,
-            color,
+            color: status.color,
             fontSize: 10,
             fontWeight: 800,
             textTransform: "capitalize",
           }}
         >
-          {object.bias}
+          {status.label}
         </span>
       </div>
 
