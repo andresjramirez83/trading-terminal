@@ -219,6 +219,13 @@ function closeCrossingType(
   return null;
 }
 
+function hasConfirmedCloseCrossing(object: MarketObject): boolean {
+  return object.memory.interactions.some(
+    (interaction) =>
+      interaction.type === "closedAbove" || interaction.type === "closedBelow",
+  );
+}
+
 export class MarketIntelligenceEngine {
   private readonly listeners = new Set<MarketIntelligenceListener>();
   private lastResult: MarketIntelligenceResult | null = null;
@@ -258,6 +265,19 @@ export class MarketIntelligenceEngine {
         updatedBarIndex: update.barIndex ?? object.updatedBarIndex,
       });
 
+      // Once a trendline has a confirmed close crossing, keep that result as
+      // its visible status. A later touch/approach must not downgrade it. A
+      // genuine new close crossing is still recorded, allowing direction to
+      // change if price crosses the line again.
+      const closeCrossing = closeCrossingType(object, update);
+      if (object.geometry.kind === "line" && hasConfirmedCloseCrossing(object)) {
+        if (closeCrossing) {
+          this.record(object.id, closeCrossing, update, interactions);
+        }
+        evaluations.push({ objectId: object.id, proximity, interactions });
+        continue;
+      }
+
       const invalidation = invalidationType(object, bounds, update.bar);
       if (invalidation) {
         this.record(object.id, invalidation, update, interactions);
@@ -283,7 +303,6 @@ export class MarketIntelligenceEngine {
       // A confirmed close across a line is the highest-priority interaction
       // for this candle. Do not also record touched/entered/rejected, because
       // those lower-priority events can become the status shown by the widget.
-      const closeCrossing = closeCrossingType(object, update);
       if (object.geometry.kind === "line" && closeCrossing) {
         this.record(object.id, closeCrossing, update, interactions);
         evaluations.push({ objectId: object.id, proximity, interactions });
