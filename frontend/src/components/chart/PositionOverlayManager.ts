@@ -558,7 +558,7 @@ export class PositionOverlayManager {
       color: definition.color,
       lineWidth: definition.lineWidth,
       lineStyle: definition.lineStyle,
-      axisLabelVisible: true,
+      axisLabelVisible: false,
       title: definition.title,
     };
 
