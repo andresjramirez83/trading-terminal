@@ -158,11 +158,19 @@ function eventForBar(
   bar: CleanBar,
   barIndex: number,
   tolerance: number,
+  atr: number,
 ): LiquidityEvent | undefined {
   if (barIndex <= pool.lastTouchIndex) return undefined;
 
-  if (pool.side === "buy-side" && bar.high > pool.price + tolerance) {
-    const reclaimed = bar.close <= pool.price;
+  // A real sweep must move meaningfully through the pool and then close a
+  // meaningful distance back inside it. This filters tiny one-tick pokes.
+  const minimumPenetration = Math.max(tolerance, atr * 0.08);
+  const minimumReclaim = Math.max(tolerance * 0.5, atr * 0.04);
+
+  if (pool.side === "buy-side" && bar.high >= pool.price + minimumPenetration) {
+    const reclaimed = bar.close <= pool.price - minimumReclaim;
+    const broken = bar.close > pool.price;
+    if (!reclaimed && !broken) return undefined;
     return {
       type: reclaimed ? "sweep" : "break",
       side: pool.side,
@@ -175,8 +183,10 @@ function eventForBar(
     };
   }
 
-  if (pool.side === "sell-side" && bar.low < pool.price - tolerance) {
-    const reclaimed = bar.close >= pool.price;
+  if (pool.side === "sell-side" && bar.low <= pool.price - minimumPenetration) {
+    const reclaimed = bar.close >= pool.price + minimumReclaim;
+    const broken = bar.close < pool.price;
+    if (!reclaimed && !broken) return undefined;
     return {
       type: reclaimed ? "sweep" : "break",
       side: pool.side,
@@ -189,6 +199,22 @@ function eventForBar(
     };
   }
 
+  return undefined;
+}
+
+function firstEventForPool(
+  pool: LiquidityPool,
+  bars: readonly CleanBar[],
+  lastBarIndex: number,
+  tolerance: number,
+  atr: number,
+): LiquidityEvent | undefined {
+  // Liquidity is consumed by its first decisive breach. Never reuse the same
+  // pool to print LS labels on later candles.
+  for (let index = pool.lastTouchIndex + 1; index <= lastBarIndex; index += 1) {
+    const event = eventForBar(pool, bars[index], index, tolerance, atr);
+    if (event) return event;
+  }
   return undefined;
 }
 
@@ -207,6 +233,7 @@ export function analyzeLiquidity(
   }
 
   const tolerance = toleranceFor(bars);
+  const atr = averageTrueRange(bars);
   const candidates: Candidate[] = [];
   for (
     let index = PIVOT_STRENGTH;
@@ -226,24 +253,34 @@ export function analyzeLiquidity(
   addStructurePool(pools, "buy-side", structure.swingHigh, lastBarIndex, tolerance);
   addStructurePool(pools, "sell-side", structure.swingLow, lastBarIndex, tolerance);
 
-  let latestEvent: LiquidityEvent | undefined;
+  const firstEvents = pools
+    .map((pool) => firstEventForPool(pool, bars, lastBarIndex, tolerance, atr))
+    .filter((event): event is LiquidityEvent => Boolean(event));
+
   const eventStart = Math.max(0, lastBarIndex - EVENT_PERSISTENCE_BARS + 1);
-  for (let index = eventStart; index <= lastBarIndex; index += 1) {
-    for (const pool of pools) {
-      const event = eventForBar(pool, bars[index], index, tolerance);
-      if (event && (!latestEvent || event.barIndex >= latestEvent.barIndex)) {
-        latestEvent = event;
-      }
+  const latestEvent = firstEvents
+    .filter((event) => event.barIndex >= eventStart)
+    .sort((left, right) => right.barIndex - left.barIndex)[0];
+
+  // Nearby pools can describe the same liquidity. Keep only the strongest
+  // sweep for each candle and side so the chart never stacks duplicate LS tags.
+  const deduplicatedSweeps = new Map<string, LiquidityEvent>();
+  for (const event of firstEvents) {
+    if (event.type !== "sweep") continue;
+    const key = `${event.barIndex}:${event.side}`;
+    const existing = deduplicatedSweeps.get(key);
+    if (
+      !existing ||
+      event.touches > existing.touches ||
+      (event.touches === existing.touches &&
+        event.source === "structure" &&
+        existing.source !== "structure")
+    ) {
+      deduplicatedSweeps.set(key, event);
     }
   }
 
-  const sweepEvents: LiquidityEvent[] = [];
-  for (const pool of pools) {
-    for (let index = pool.lastTouchIndex + 1; index <= lastBarIndex; index += 1) {
-      const event = eventForBar(pool, bars[index], index, tolerance);
-      if (event?.type === "sweep") sweepEvents.push(event);
-    }
-  }
+  const sweepEvents = [...deduplicatedSweeps.values()];
 
   sweepEvents.sort((left, right) => left.barIndex - right.barIndex);
 
