@@ -1,6 +1,7 @@
 import DecisionEngineWidget from "../widgets/DecisionEngineWidget";
 import MarketStoryWidget from "../widgets/MarketStoryWidget";
 import MarketObjectsWidget from "../widgets/MarketObjectsWidget";
+import LiquidityWidget from "../widgets/LiquidityWidget";
 import TradeReadinessWidget from "../widgets/TradeReadinessWidget";
 import PerformanceIndicatorsWidget from "../widgets/PerformanceIndicatorsWidget";
 import StructureWidget from "../widgets/StructureWidget";
@@ -31,6 +32,8 @@ export default function ChartWorkspacePanel() {
       <MarketStoryWidget />
 
       <MarketObjectsWidget />
+
+      <LiquidityWidget />
 
       <TradeReadinessWidget />
 

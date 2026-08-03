@@ -12,6 +12,7 @@ import type { Time } from "lightweight-charts";
 
 import type { ChartState } from "../../../components/chart/ChartState";
 import type { CleanBar } from "../../../components/chart/ChartTypes";
+import { analyzeLiquidity } from "../../../components/chart/analysis/LiquiditySweepEngine";
 import type {
   IntelligenceConsumer,
   MarketIntelligenceReport,
@@ -250,6 +251,11 @@ export function buildMarketIntelligenceRequestFromChartState(
     averageVolume > 0
       ? lastBar.volume / averageVolume
       : undefined);
+  const liquidity = analyzeLiquidity(chartState.bars, {
+    swingHigh: chartState.structure.lastSwingHigh ?? chartState.structure.swingHigh,
+    swingLow: chartState.structure.lastSwingLow ?? chartState.structure.swingLow,
+  });
+  const liquidityEvent = liquidity.latestEvent;
 
   return {
     contextRequest: {
@@ -374,6 +380,55 @@ export function buildMarketIntelligenceRequestFromChartState(
           barTimes: chartState.bars.map((bar) => toEpochMilliseconds(bar.time)),
           adapter: "ChartStateIntelligenceAdapter",
           ...options.metadata,
+          liquidity: {
+            direction: liquidityEvent?.direction ?? "neutral",
+            confidence: liquidity.confidence,
+            sweptHigh:
+              liquidityEvent?.type === "sweep" &&
+              liquidityEvent.side === "buy-side",
+            sweptLow:
+              liquidityEvent?.type === "sweep" &&
+              liquidityEvent.side === "sell-side",
+            reclaimedHigh:
+              liquidityEvent?.type === "sweep" &&
+              liquidityEvent.side === "buy-side" &&
+              liquidityEvent.reclaimed,
+            reclaimedLow:
+              liquidityEvent?.type === "sweep" &&
+              liquidityEvent.side === "sell-side" &&
+              liquidityEvent.reclaimed,
+            buySideLiquidityTaken:
+              liquidityEvent?.type === "break" &&
+              liquidityEvent.side === "buy-side",
+            sellSideLiquidityTaken:
+              liquidityEvent?.type === "break" &&
+              liquidityEvent.side === "sell-side",
+            failedBreakout:
+              liquidityEvent?.type === "sweep" &&
+              liquidityEvent.side === "buy-side",
+            failedBreakdown:
+              liquidityEvent?.type === "sweep" &&
+              liquidityEvent.side === "sell-side",
+            restingLiquidityAbove: Boolean(liquidity.nearestAbove),
+            restingLiquidityBelow: Boolean(liquidity.nearestBelow),
+            equalHighs: liquidity.equalHighs,
+            equalLows: liquidity.equalLows,
+            nearestLiquidityAbove: liquidity.nearestAbove?.price,
+            nearestLiquidityBelow: liquidity.nearestBelow?.price,
+            buySideLiquidityDistance: liquidity.nearestAbove
+              ? liquidity.nearestAbove.price - lastPrice
+              : undefined,
+            sellSideLiquidityDistance: liquidity.nearestBelow
+              ? lastPrice - liquidity.nearestBelow.price
+              : undefined,
+            eventType: liquidityEvent?.type,
+            eventSide: liquidityEvent?.side,
+            eventPrice: liquidityEvent?.price,
+            eventTouches: liquidityEvent?.touches,
+            eventBarIndex: liquidityEvent?.barIndex,
+            eventSource: liquidityEvent?.source,
+            poolCount: liquidity.pools.length,
+          },
           previousBar: priorBar
             ? {
                 time: toEpochMilliseconds(priorBar.time),
