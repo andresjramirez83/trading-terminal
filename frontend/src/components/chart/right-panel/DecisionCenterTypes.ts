@@ -78,6 +78,7 @@ export interface DecisionCenterTrendStrength {
 
 export interface DecisionCenterBalance {
   score: number;
+  vwapZScore?: number;
   badge: string;
   subtitle: string;
   tone: StatusTone;

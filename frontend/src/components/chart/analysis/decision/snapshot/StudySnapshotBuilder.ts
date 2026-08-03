@@ -43,6 +43,26 @@ function calculateVwap(bars: CleanBar[]): { value?: number; slope: number } {
   };
 }
 
+function calculatePriceStandardDeviation(
+  bars: CleanBar[],
+  length = 20
+): number | undefined {
+  const prices = bars
+    .slice(-length)
+    .map((bar) => (bar.high + bar.low + bar.close) / 3)
+    .filter(Number.isFinite);
+
+  if (prices.length < 2) return undefined;
+
+  const mean = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+  const variance =
+    prices.reduce((sum, price) => sum + (price - mean) ** 2, 0) /
+    prices.length;
+
+  const standardDeviation = Math.sqrt(variance);
+  return standardDeviation > 0 ? standardDeviation : undefined;
+}
+
 function calculateAtr(bars: CleanBar[], length = 14): { value?: number; expanding: boolean } {
   if (bars.length < 2) return { value: undefined, expanding: false };
 
@@ -104,6 +124,7 @@ export function buildStudySnapshot(chartState?: ChartState | null): StudySnapsho
   const lastBar = chartState?.lastBar ?? bars[bars.length - 1];
   const closes = bars.map((bar) => bar.close);
   const vwap = calculateVwap(bars);
+  const priceStandardDeviation = calculatePriceStandardDeviation(bars);
   const atr = calculateAtr(bars);
   const volume = chartState?.volume?.current != null
     ? {
@@ -126,6 +147,7 @@ export function buildStudySnapshot(chartState?: ChartState | null): StudySnapsho
     vwap: {
       value: chartState?.vwap?.value ?? vwap.value ?? 0,
       slope: vwap.slope,
+      standardDeviation: priceStandardDeviation,
     },
 
     atr: {

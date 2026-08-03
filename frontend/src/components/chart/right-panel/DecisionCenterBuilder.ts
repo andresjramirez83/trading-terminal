@@ -325,13 +325,11 @@ function applyIntelligenceReport(
   report: MarketIntelligenceReport,
 ): DecisionCenterState {
   const trend = findComponent(report, ["trend"]);
-  const balance = findComponent(report, ["balance"]);
   const entry = findComponent(report, ["entry-quality", "entry"]);
   const risk = findComponent(report, ["risk"]);
   const structure = findComponent(report, ["market-structure", "structure"]);
 
   const trendScore = componentScore(trend, report.convictionScore);
-  const balanceScore = componentScore(balance, report.probabilities.balance);
   const entryScore = clampScore(report.entry.score, componentScore(entry, 50));
   const riskScore = clampScore(report.risk.score, componentScore(risk, 50));
   const structureScore = componentScore(structure, trendScore);
@@ -359,7 +357,6 @@ function applyIntelligenceReport(
   const direction = report.direction;
   const buyerScore = clampScore(report.decision.bullishScore, 50);
   const sellerScore = clampScore(report.decision.bearishScore, 50);
-  const equilibrium = clampScore(report.decision.neutralScore, balanceScore);
 
   const trendBadge =
     direction === "neutral"
@@ -462,13 +459,14 @@ function applyIntelligenceReport(
             : percent(report.probabilities.balance),
     },
     balance: {
-      score: balanceScore,
-      badge: balance?.status === "confirmed" ? "Confirmed" : "Developing",
-      subtitle: balance?.summary ?? "Balance conditions are unresolved.",
-      tone: toneFromScore(balanceScore),
+      score: base.balance.score,
+      vwapZScore: base.balance.vwapZScore,
+      badge: base.balance.badge,
+      subtitle: base.balance.subtitle,
+      tone: base.balance.tone,
       buyers: buyerScore,
       sellers: sellerScore,
-      equilibrium,
+      equilibrium: base.balance.equilibrium,
     },
     entryQuality: {
       score: entryScore,

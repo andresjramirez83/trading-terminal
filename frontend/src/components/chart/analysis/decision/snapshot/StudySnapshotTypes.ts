@@ -9,6 +9,7 @@ export interface EMASnapshot {
 export interface VWAPSnapshot {
   value?: number;
   slope?: number;
+  standardDeviation?: number;
 }
 
 export interface ATRSnapshot {

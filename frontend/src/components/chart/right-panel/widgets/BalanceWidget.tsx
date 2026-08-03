@@ -59,6 +59,11 @@ function MetricBar({ label, value }: { label: string; value: number }) {
 export default function BalanceWidget() {
   const { state } = useDecisionCenter();
   const balance = state.balance;
+  const zScore = balance.vwapZScore;
+  const formattedZScore =
+    zScore == null || !Number.isFinite(zScore)
+      ? "--"
+      : `${zScore >= 0 ? "+" : ""}${zScore.toFixed(2)}σ`;
 
   return (
     <PanelCard title="Balance">
@@ -73,11 +78,11 @@ export default function BalanceWidget() {
                 lineHeight: 1,
               }}
             >
-              {balance.score}
+              {formattedZScore}
             </div>
 
             <div style={{ marginTop: 4, fontSize: 12, color: "#cbd5e1" }}>
-              {balance.badge}
+              {balance.badge} · Score {balance.score}
             </div>
           </div>
 
