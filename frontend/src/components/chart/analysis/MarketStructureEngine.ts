@@ -767,15 +767,22 @@ function tryFinalizeBullishBreak(
 
   if (!reversedFromExtreme && !consolidatedAfterExtreme) return;
 
-  if (!pending.transitionOnly) {
-    addPoint(state, {
-      type: "HH",
-      index: highestWick.index,
-      price: highestWick.price,
-      confirmationIndex: pending.confirmationIndex,
-      breakType: pending.breakType,
-    });
-  }
+  /**
+   * Every completed bullish leg must leave a visible high. Previously a
+   * transition-only CHoCH updated confirmedHigh without adding the HH point.
+   * The next bullish BOS could then confirm and print an HL against that
+   * invisible high, leaving an orphan HL on the chart.
+   *
+   * The break classification remains CHoCH for a transition, but the completed
+   * leg's highest wick is still structural evidence and must be rendered.
+   */
+  addPoint(state, {
+    type: "HH",
+    index: highestWick.index,
+    price: highestWick.price,
+    confirmationIndex: pending.confirmationIndex,
+    breakType: pending.breakType,
+  });
 
   /**
    * Even a transition-only break must seed the new reference high. The next
@@ -834,15 +841,15 @@ function tryFinalizeBearishBreak(
 
   if (!reversedFromExtreme && !consolidatedAfterExtreme) return;
 
-  if (!pending.transitionOnly) {
-    addPoint(state, {
-      type: "LL",
-      index: lowestWick.index,
-      price: lowestWick.price,
-      confirmationIndex: pending.confirmationIndex,
-      breakType: pending.breakType,
-    });
-  }
+  /** Mirror the bullish invariant: a completed bearish transition leg must
+   * leave a visible LL so a later LH can never reference a hidden low. */
+  addPoint(state, {
+    type: "LL",
+    index: lowestWick.index,
+    price: lowestWick.price,
+    confirmationIndex: pending.confirmationIndex,
+    breakType: pending.breakType,
+  });
 
   /**
    * The transition low becomes the bearish reference level only. The next
