@@ -287,31 +287,31 @@ function getStructureConfirmationProfile(
   if (timeframeSeconds <= 90) {
     return {
       timeframeSeconds,
-      minimumBarsAfterExtreme: 2,
-      atrRetracementMultiplier: 0.38,
+      minimumBarsAfterExtreme: 3,
+      atrRetracementMultiplier: 0.65,
     };
   }
 
   if (timeframeSeconds <= 360) {
     return {
       timeframeSeconds,
-      minimumBarsAfterExtreme: 1,
-      atrRetracementMultiplier: 0.32,
+      minimumBarsAfterExtreme: 2,
+      atrRetracementMultiplier: 0.55,
     };
   }
 
   if (timeframeSeconds <= 1_200) {
     return {
       timeframeSeconds,
-      minimumBarsAfterExtreme: 1,
-      atrRetracementMultiplier: 0.28,
+      minimumBarsAfterExtreme: 2,
+      atrRetracementMultiplier: 0.45,
     };
   }
 
   return {
     timeframeSeconds,
     minimumBarsAfterExtreme: 1,
-    atrRetracementMultiplier: 0.25,
+    atrRetracementMultiplier: 0.40,
   };
 }
 
@@ -328,6 +328,69 @@ function meaningfulReversalDistance(
    * floor prevents extremely quiet symbols from confirming one-tick noise.
    */
   return Math.max(atr * atrMultiplier, price * 0.001);
+}
+
+function isConsolidatingAfterExtreme(
+  bars: CleanBar[],
+  extremeIndex: number,
+  currentIndex: number,
+  direction: "bullish" | "bearish",
+): boolean {
+  const startIndex = extremeIndex + 1;
+  const barCount = currentIndex - startIndex + 1;
+
+  // Two candles can simply be a pause. Require enough price action to form a
+  // recognizable range before declaring the directional leg complete.
+  if (barCount < 4) return false;
+
+  const atr = averageTrueRange(bars, extremeIndex, 14);
+  if (!(atr > 0)) return false;
+
+  const start = Math.max(startIndex, currentIndex - 7);
+  let rangeHigh = Number.NEGATIVE_INFINITY;
+  let rangeLow = Number.POSITIVE_INFINITY;
+
+  for (let index = start; index <= currentIndex; index += 1) {
+    rangeHigh = Math.max(rangeHigh, bars[index].high);
+    rangeLow = Math.min(rangeLow, bars[index].low);
+  }
+
+  const totalRange = rangeHigh - rangeLow;
+  const netProgress = Math.abs(
+    bars[currentIndex].close - bars[start].close,
+  );
+
+  // A tight box alone is consolidation, even when its candles do not touch
+  // one exact price enough times.
+  const compressedRange =
+    totalRange <= atr * 0.9 && netProgress <= atr * 0.35;
+
+  // Repeated tests of the same floor/ceiling also define consolidation. Use
+  // ATR tolerance so the rule works for both inexpensive and volatile stocks.
+  const touchTolerance = Math.max(atr * 0.18, Math.abs(bars[start].close) * 0.0005);
+  const levels: number[] = [];
+
+  for (let index = start; index <= currentIndex; index += 1) {
+    levels.push(direction === "bullish" ? bars[index].low : bars[index].high);
+  }
+
+  let maximumTouches = 0;
+  for (let candidateIndex = 0; candidateIndex < levels.length; candidateIndex += 1) {
+    let touches = 0;
+    for (let index = 0; index < levels.length; index += 1) {
+      if (Math.abs(levels[index] - levels[candidateIndex]) <= touchTolerance) {
+        touches += 1;
+      }
+    }
+    maximumTouches = Math.max(maximumTouches, touches);
+  }
+
+  const repeatedLevel =
+    maximumTouches >= 3 &&
+    totalRange <= atr * 1.35 &&
+    netProgress <= atr * 0.45;
+
+  return compressedRange || repeatedLevel;
 }
 
 function isFiniteBar(bar: CleanBar | undefined): bar is CleanBar {
@@ -539,112 +602,6 @@ function addPoint(
   });
 }
 
-function mergeNearbySameLegExtreme(
-  bars: CleanBar[],
-  state: StructureState,
-  pointType: "HH" | "LL",
-  extreme: StructureLevel,
-  confirmationIndex: number,
-): boolean {
-  let previousExtremeIndex = -1;
-  for (let index = state.points.length - 1; index >= 0; index -= 1) {
-    if (state.points[index].type === pointType) {
-      previousExtremeIndex = index;
-      break;
-    }
-  }
-
-  if (previousExtremeIndex < 0) return false;
-
-  const previousExtreme = state.points[previousExtremeIndex];
-  const profile = getStructureConfirmationProfile(bars);
-  const maximumNearbyBars =
-    profile.timeframeSeconds <= 90
-      ? 10
-      : profile.timeframeSeconds <= 360
-        ? 6
-        : 4;
-
-  const barsApart = extreme.index - previousExtreme.index;
-  if (barsApart <= 0 || barsApart > maximumNearbyBars) return false;
-
-  const atr = averageTrueRange(bars, extreme.index, 14);
-  const price = Math.max(0.000001, Math.abs(extreme.price));
-
-  /**
-   * Candle distance alone cannot define a leg. Two nearby extremes belong to
-   * separate legs when price made a meaningful opposing retracement between
-   * them. This preserves a real HH -> HL -> HH (and LL -> LH -> LL) sequence
-   * even when the two extremes occur inside the nearby-bar window.
-   */
-  const interimExtreme =
-    pointType === "HH"
-      ? findLowestLow(bars, previousExtreme.index, extreme.index)
-      : findHighestHigh(bars, previousExtreme.index, extreme.index);
-  const opposingRetracement =
-    pointType === "HH"
-      ? previousExtreme.price - interimExtreme.price
-      : interimExtreme.price - previousExtreme.price;
-  const separateLegRetracement = Math.max(atr * 0.75, price * 0.003);
-
-  if (opposingRetracement >= separateLegRetracement) return false;
-
-  const significantExtension = Math.max(atr * 0.45, price * 0.002);
-  const extension =
-    pointType === "HH"
-      ? extreme.price - previousExtreme.price
-      : previousExtreme.price - extreme.price;
-
-  /**
-   * A small nearby extension is part of the same directional leg. Keep the
-   * most extreme wick, remove the artificial pullback point created between
-   * the two extremes, and retain a single HH/LL label.
-   */
-  if (extension >= significantExtension) return false;
-
-  const interimType: MarketStructurePointType =
-    pointType === "HH" ? "HL" : "LH";
-
-  state.points = state.points.filter(
-    (point, index) =>
-      index === previousExtremeIndex ||
-      !(
-        point.type === interimType &&
-        point.index > previousExtreme.index &&
-        point.confirmationIndex <= confirmationIndex
-      ),
-  );
-
-  const mergedIndex = state.points.findIndex(
-    (point) => point.id === previousExtreme.id,
-  );
-  if (mergedIndex < 0) return false;
-
-  const keepNewExtreme =
-    pointType === "HH"
-      ? extreme.price > previousExtreme.price
-      : extreme.price < previousExtreme.price;
-
-  if (keepNewExtreme) {
-    const merged = state.points[mergedIndex];
-    state.points[mergedIndex] = {
-      ...merged,
-      index: extreme.index,
-      price: extreme.price,
-      confirmationIndex,
-      id: [
-        "auto-structure",
-        pointType,
-        extreme.index,
-        confirmationIndex,
-        String(extreme.price),
-      ].join("-"),
-    };
-  }
-
-  return true;
-}
-
 function armBullishBreak(
   bars: CleanBar[],
   state: StructureState,
@@ -788,33 +745,36 @@ function tryFinalizeBullishBreak(
   );
   const current = bars[currentIndex];
 
-  const wickRetracement = highestWick.price - current.low;
   const closeRetracement = highestWick.price - current.close;
+  const extremeBodyLow = bodyLow(bars[highestWick.index]);
 
+  /*
+   * A wick probing lower is not enough to end an advancing leg. The leg is
+   * complete only when a candle closes meaningfully away from the extreme
+   * and below the extreme candle's body. Until then, a later higher wick
+   * simply moves the single pending HH candidate.
+   */
   const reversedFromExtreme =
-    wickRetracement >= reversalDistance ||
-    closeRetracement >= reversalDistance;
+    closeRetracement >= reversalDistance &&
+    current.close < extremeBodyLow;
 
-  if (!reversedFromExtreme) return;
+  const consolidatedAfterExtreme = isConsolidatingAfterExtreme(
+    bars,
+    highestWick.index,
+    currentIndex,
+    "bullish",
+  );
+
+  if (!reversedFromExtreme && !consolidatedAfterExtreme) return;
 
   if (!pending.transitionOnly) {
-    const merged = mergeNearbySameLegExtreme(
-      bars,
-      state,
-      "HH",
-      highestWick,
-      pending.confirmationIndex,
-    );
-
-    if (!merged) {
-      addPoint(state, {
-        type: "HH",
-        index: highestWick.index,
-        price: highestWick.price,
-        confirmationIndex: pending.confirmationIndex,
-        breakType: pending.breakType,
-      });
-    }
+    addPoint(state, {
+      type: "HH",
+      index: highestWick.index,
+      price: highestWick.price,
+      confirmationIndex: pending.confirmationIndex,
+      breakType: pending.breakType,
+    });
   }
 
   /**
@@ -856,33 +816,32 @@ function tryFinalizeBearishBreak(
   );
   const current = bars[currentIndex];
 
-  const wickRetracement = current.high - lowestWick.price;
   const closeRetracement = current.close - lowestWick.price;
+  const extremeBodyHigh = bodyHigh(bars[lowestWick.index]);
 
+  /* Mirror of bullish finalization: require a meaningful close above the
+   * extreme candle body. A high wick alone cannot finish a falling leg. */
   const reversedFromExtreme =
-    wickRetracement >= reversalDistance ||
-    closeRetracement >= reversalDistance;
+    closeRetracement >= reversalDistance &&
+    current.close > extremeBodyHigh;
 
-  if (!reversedFromExtreme) return;
+  const consolidatedAfterExtreme = isConsolidatingAfterExtreme(
+    bars,
+    lowestWick.index,
+    currentIndex,
+    "bearish",
+  );
+
+  if (!reversedFromExtreme && !consolidatedAfterExtreme) return;
 
   if (!pending.transitionOnly) {
-    const merged = mergeNearbySameLegExtreme(
-      bars,
-      state,
-      "LL",
-      lowestWick,
-      pending.confirmationIndex,
-    );
-
-    if (!merged) {
-      addPoint(state, {
-        type: "LL",
-        index: lowestWick.index,
-        price: lowestWick.price,
-        confirmationIndex: pending.confirmationIndex,
-        breakType: pending.breakType,
-      });
-    }
+    addPoint(state, {
+      type: "LL",
+      index: lowestWick.index,
+      price: lowestWick.price,
+      confirmationIndex: pending.confirmationIndex,
+      breakType: pending.breakType,
+    });
   }
 
   /**
@@ -1254,6 +1213,7 @@ export function buildMarketStructure(
      */
     if (
       !state.pendingBullishBreak &&
+      !state.pendingBearishBreak &&
       close > bullishBreakLevel
     ) {
       armBullishBreak(bars, state, index);
@@ -1261,6 +1221,7 @@ export function buildMarketStructure(
     }
 
     if (
+      !state.pendingBullishBreak &&
       !state.pendingBearishBreak &&
       close < bearishBreakLevel
     ) {
