@@ -539,6 +539,93 @@ function addPoint(
   });
 }
 
+function mergeNearbySameLegExtreme(
+  bars: CleanBar[],
+  state: StructureState,
+  pointType: "HH" | "LL",
+  extreme: StructureLevel,
+  confirmationIndex: number,
+): boolean {
+  let previousExtremeIndex = -1;
+  for (let index = state.points.length - 1; index >= 0; index -= 1) {
+    if (state.points[index].type === pointType) {
+      previousExtremeIndex = index;
+      break;
+    }
+  }
+
+  if (previousExtremeIndex < 0) return false;
+
+  const previousExtreme = state.points[previousExtremeIndex];
+  const profile = getStructureConfirmationProfile(bars);
+  const maximumNearbyBars =
+    profile.timeframeSeconds <= 90
+      ? 10
+      : profile.timeframeSeconds <= 360
+        ? 6
+        : 4;
+
+  const barsApart = extreme.index - previousExtreme.index;
+  if (barsApart <= 0 || barsApart > maximumNearbyBars) return false;
+
+  const atr = averageTrueRange(bars, extreme.index, 14);
+  const price = Math.max(0.000001, Math.abs(extreme.price));
+  const significantExtension = Math.max(atr * 0.45, price * 0.002);
+  const extension =
+    pointType === "HH"
+      ? extreme.price - previousExtreme.price
+      : previousExtreme.price - extreme.price;
+
+  /**
+   * A small nearby extension is part of the same directional leg. Keep the
+   * most extreme wick, remove the artificial pullback point created between
+   * the two extremes, and retain a single HH/LL label.
+   */
+  if (extension >= significantExtension) return false;
+
+  const interimType: MarketStructurePointType =
+    pointType === "HH" ? "HL" : "LH";
+
+  state.points = state.points.filter(
+    (point, index) =>
+      index === previousExtremeIndex ||
+      !(
+        point.type === interimType &&
+        point.index > previousExtreme.index &&
+        point.confirmationIndex <= confirmationIndex
+      ),
+  );
+
+  const mergedIndex = state.points.findIndex(
+    (point) => point.id === previousExtreme.id,
+  );
+  if (mergedIndex < 0) return false;
+
+  const keepNewExtreme =
+    pointType === "HH"
+      ? extreme.price > previousExtreme.price
+      : extreme.price < previousExtreme.price;
+
+  if (keepNewExtreme) {
+    const merged = state.points[mergedIndex];
+    state.points[mergedIndex] = {
+      ...merged,
+      index: extreme.index,
+      price: extreme.price,
+      confirmationIndex,
+      id: [
+        "auto-structure",
+        pointType,
+        extreme.index,
+        confirmationIndex,
+        String(extreme.price),
+      ].join("-"),
+    };
+  }
+
+  return true;
+}
+
 function armBullishBreak(
   bars: CleanBar[],
   state: StructureState,
@@ -692,13 +779,23 @@ function tryFinalizeBullishBreak(
   if (!reversedFromExtreme) return;
 
   if (!pending.transitionOnly) {
-    addPoint(state, {
-      type: "HH",
-      index: highestWick.index,
-      price: highestWick.price,
-      confirmationIndex: pending.confirmationIndex,
-      breakType: pending.breakType,
-    });
+    const merged = mergeNearbySameLegExtreme(
+      bars,
+      state,
+      "HH",
+      highestWick,
+      pending.confirmationIndex,
+    );
+
+    if (!merged) {
+      addPoint(state, {
+        type: "HH",
+        index: highestWick.index,
+        price: highestWick.price,
+        confirmationIndex: pending.confirmationIndex,
+        breakType: pending.breakType,
+      });
+    }
   }
 
   /**
@@ -750,13 +847,23 @@ function tryFinalizeBearishBreak(
   if (!reversedFromExtreme) return;
 
   if (!pending.transitionOnly) {
-    addPoint(state, {
-      type: "LL",
-      index: lowestWick.index,
-      price: lowestWick.price,
-      confirmationIndex: pending.confirmationIndex,
-      breakType: pending.breakType,
-    });
+    const merged = mergeNearbySameLegExtreme(
+      bars,
+      state,
+      "LL",
+      lowestWick,
+      pending.confirmationIndex,
+    );
+
+    if (!merged) {
+      addPoint(state, {
+        type: "LL",
+        index: lowestWick.index,
+        price: lowestWick.price,
+        confirmationIndex: pending.confirmationIndex,
+        breakType: pending.breakType,
+      });
+    }
   }
 
   /**
