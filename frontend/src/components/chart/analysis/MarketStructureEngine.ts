@@ -570,6 +570,25 @@ function mergeNearbySameLegExtreme(
 
   const atr = averageTrueRange(bars, extreme.index, 14);
   const price = Math.max(0.000001, Math.abs(extreme.price));
+
+  /**
+   * Candle distance alone cannot define a leg. Two nearby extremes belong to
+   * separate legs when price made a meaningful opposing retracement between
+   * them. This preserves a real HH -> HL -> HH (and LL -> LH -> LL) sequence
+   * even when the two extremes occur inside the nearby-bar window.
+   */
+  const interimExtreme =
+    pointType === "HH"
+      ? findLowestLow(bars, previousExtreme.index, extreme.index)
+      : findHighestHigh(bars, previousExtreme.index, extreme.index);
+  const opposingRetracement =
+    pointType === "HH"
+      ? previousExtreme.price - interimExtreme.price
+      : interimExtreme.price - previousExtreme.price;
+  const separateLegRetracement = Math.max(atr * 0.75, price * 0.003);
+
+  if (opposingRetracement >= separateLegRetracement) return false;
+
   const significantExtension = Math.max(atr * 0.45, price * 0.002);
   const extension =
     pointType === "HH"
