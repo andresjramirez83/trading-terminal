@@ -371,6 +371,7 @@ export function buildMarketIntelligenceRequestFromChartState(
 
         metadata: {
           barCount: chartState.bars.length,
+          barTimes: chartState.bars.map((bar) => toEpochMilliseconds(bar.time)),
           adapter: "ChartStateIntelligenceAdapter",
           ...options.metadata,
           previousBar: priorBar

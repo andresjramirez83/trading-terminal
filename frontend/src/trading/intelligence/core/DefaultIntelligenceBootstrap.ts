@@ -474,6 +474,18 @@ export async function createDefaultIntelligencePipeline(
       const previousBarLow = previousBar?.low;
       const previousBarClose = previousBar?.close;
       const previousBarVolume = previousBar?.volume;
+      const barTimesValue = input.metadata?.barTimes;
+      const barTimes: readonly import("lightweight-charts").Time[] | undefined =
+        Array.isArray(barTimesValue)
+        ? barTimesValue
+            .filter(
+              (value): value is number =>
+                typeof value === "number" && Number.isFinite(value),
+            )
+            .map(
+              (value) => value as import("lightweight-charts").UTCTimestamp,
+            )
+        : undefined;
       const hasPreviousBar =
         typeof previousBarTime === "number" &&
         Number.isFinite(previousBarTime) &&
@@ -510,6 +522,7 @@ export async function createDefaultIntelligencePipeline(
                   : undefined,
             }
           : undefined,
+        barTimes,
         barIndex: input.barIndex ?? input.bar.barIndex,
       });
 

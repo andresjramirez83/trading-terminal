@@ -30,6 +30,7 @@ export type MarketIntelligenceUpdate = {
   timeframe: string;
   bar: MarketIntelligenceBar;
   previousBar?: MarketIntelligenceBar;
+  barTimes?: readonly Time[];
   barIndex?: number;
 };
 
@@ -83,7 +84,25 @@ function numericTime(time: Time): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-function linePriceAtTime(object: MarketObject, time: Time): number | null {
+function logicalIndex(times: readonly Time[], target: Time): number | null {
+  const targetTime = numericTime(target);
+  if (targetTime === null) return null;
+
+  for (let index = times.length - 1; index >= 0; index -= 1) {
+    const candidateTime = numericTime(times[index]);
+    if (candidateTime !== null && Math.abs(candidateTime - targetTime) < 0.5) {
+      return index;
+    }
+  }
+
+  return null;
+}
+
+function linePriceAtTime(
+  object: MarketObject,
+  time: Time,
+  barTimes?: readonly Time[],
+): number | null {
   if (object.geometry.kind !== "line") return null;
 
   const { start, end } = object.geometry.line;
@@ -98,11 +117,27 @@ function linePriceAtTime(object: MarketObject, time: Time): number | null {
   const duration = endTime - startTime;
   if (duration === 0) return end.price;
 
-  const progress = (currentTime - startTime) / duration;
+  // Lightweight Charts positions candles by logical bar index, compressing
+  // overnight/weekend gaps. Use the same logical spacing whenever chart bar
+  // times are available so intelligence evaluates the line visible on screen.
+  const startIndex = barTimes ? logicalIndex(barTimes, start.time) : null;
+  const endIndex = barTimes ? logicalIndex(barTimes, end.time) : null;
+  const currentIndex = barTimes ? logicalIndex(barTimes, time) : null;
+  const progress =
+    startIndex !== null &&
+    endIndex !== null &&
+    currentIndex !== null &&
+    endIndex !== startIndex
+      ? (currentIndex - startIndex) / (endIndex - startIndex)
+      : (currentTime - startTime) / duration;
   return start.price + (end.price - start.price) * progress;
 }
 
-function boundsAtTime(object: MarketObject, time: Time): PriceBounds | null {
+function boundsAtTime(
+  object: MarketObject,
+  time: Time,
+  barTimes?: readonly Time[],
+): PriceBounds | null {
   switch (object.geometry.kind) {
     case "zone":
       return {
@@ -115,7 +150,7 @@ function boundsAtTime(object: MarketObject, time: Time): PriceBounds | null {
         high: object.geometry.level.price,
       };
     case "line": {
-      const price = linePriceAtTime(object, time);
+      const price = linePriceAtTime(object, time, barTimes);
       return price === null ? null : { low: price, high: price };
     }
     case "event":
@@ -129,8 +164,9 @@ function calculateProximity(
   object: MarketObject,
   price: number,
   time: Time,
+  barTimes?: readonly Time[],
 ): MarketObjectProximity | null {
-  const bounds = boundsAtTime(object, time);
+  const bounds = boundsAtTime(object, time, barTimes);
   if (!bounds || !Number.isFinite(price)) return null;
 
   const isInside = price >= bounds.low && price <= bounds.high;
@@ -205,8 +241,8 @@ function closeCrossingType(
   const previousBar = update.previousBar;
   if (!previousBar) return null;
 
-  const previousBounds = boundsAtTime(object, previousBar.time);
-  const currentBounds = boundsAtTime(object, update.bar.time);
+  const previousBounds = boundsAtTime(object, previousBar.time, update.barTimes);
+  const currentBounds = boundsAtTime(object, update.bar.time, update.barTimes);
   if (!previousBounds || !currentBounds) return null;
 
   const wasAtOrBelow = previousBar.close <= previousBounds.high;
@@ -252,8 +288,13 @@ export class MarketIntelligenceEngine {
     const evaluations: MarketObjectEvaluation[] = [];
 
     for (const object of objects) {
-      const proximity = calculateProximity(object, update.bar.close, update.bar.time);
-      const bounds = boundsAtTime(object, update.bar.time);
+      const proximity = calculateProximity(
+        object,
+        update.bar.close,
+        update.bar.time,
+        update.barTimes,
+      );
+      const bounds = boundsAtTime(object, update.bar.time, update.barTimes);
       if (!proximity || !bounds) continue;
 
       const previousProximity = object.awareness.proximity;

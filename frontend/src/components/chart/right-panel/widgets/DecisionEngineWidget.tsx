@@ -12,6 +12,7 @@ export default function DecisionEngineWidget() {
   const { state, status, error, evaluatedAt, isEvaluating } = useDecisionCenter();
 
   const decision = state.ai;
+  const balanceVwapZScore = state.balance.vwapZScore ?? 0;
   const statusLabel = error
     ? "Intelligence Error"
     : isEvaluating
@@ -193,7 +194,11 @@ export default function DecisionEngineWidget() {
           }}
         >
           <MiniStat label="Trend" value={state.trendStrength.score} />
-          <MiniStat label="Balance" value={state.balance.score} />
+          <MiniStat
+            label="Balance"
+            value={`${balanceVwapZScore >= 0 ? "+" : ""}${balanceVwapZScore.toFixed(2)}σ`}
+            tone={state.balance.tone}
+          />
           <MiniStat label="Entry" value={state.entryQuality.score} />
           <MiniStat label="Risk" value={state.risk.score} />
         </div>
@@ -214,8 +219,19 @@ export default function DecisionEngineWidget() {
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
-  const tone = value >= 70 ? "good" : value >= 45 ? "warn" : "bad";
+function MiniStat({
+  label,
+  value,
+  tone: explicitTone,
+}: {
+  label: string;
+  value: number | string;
+  tone?: "good" | "warn" | "bad" | "neutral";
+}) {
+  const numericValue = typeof value === "number" ? value : 50;
+  const tone =
+    explicitTone ??
+    (numericValue >= 70 ? "good" : numericValue >= 45 ? "warn" : "bad");
 
   return (
     <div
