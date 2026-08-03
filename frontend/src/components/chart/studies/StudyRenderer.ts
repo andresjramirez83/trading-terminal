@@ -13,6 +13,8 @@ import {
   buildStructureStudyLines,
   type StructureStudyLine,
 } from "./StructureStudy";
+import { analyzeLiquidity, type LiquidityEvent } from "../analysis/LiquiditySweepEngine";
+import { buildMarketStructure } from "../analysis/MarketStructureEngine";
 
 function average(values: number[]): number {
   if (!values.length) return 0;
@@ -183,6 +185,37 @@ function createStructureLabelElement(
   return element;
 }
 
+function createLiquiditySweepLabelElement(
+  event: LiquidityEvent,
+  x: number,
+  y: number,
+): HTMLDivElement {
+  const element = document.createElement("div");
+  const isBuySide = event.side === "buy-side";
+  const color = isBuySide ? "#f97316" : "#22c55e";
+
+  element.title = `${isBuySide ? "Buy-side" : "Sell-side"} liquidity sweep at ${event.price.toFixed(2)}`;
+  element.textContent = "LS";
+  element.style.position = "absolute";
+  element.style.left = `${x}px`;
+  element.style.top = `${y}px`;
+  element.style.padding = "1px 4px";
+  element.style.borderRadius = "4px";
+  element.style.background = "rgba(2, 6, 23, 0.94)";
+  element.style.border = `1px solid ${color}`;
+  element.style.color = color;
+  element.style.fontSize = "9px";
+  element.style.fontWeight = "900";
+  element.style.lineHeight = "14px";
+  element.style.whiteSpace = "nowrap";
+  element.style.pointerEvents = "none";
+  element.style.transform = isBuySide
+    ? "translate(-50%, calc(-100% - 7px))"
+    : "translate(-50%, 7px)";
+
+  return element;
+}
+
 export class StudyRenderer {
   private readonly chart: IChartApi;
   private readonly series: StudyRendererSeries;
@@ -191,6 +224,7 @@ export class StudyRenderer {
   private renderFrame: number | null = null;
   private latestContext: StudyRenderContext | null = null;
   private structureLines: StructureStudyLine[] = [];
+  private liquiditySweepEvents: LiquidityEvent[] = [];
   private structureVisible = true;
 
   private lastResult: StudyRenderResult = {
@@ -235,6 +269,12 @@ export class StudyRenderer {
       ? buildStructureStudyLines(context.bars)
       : [];
 
+    const structure = buildMarketStructure(context.bars);
+    this.liquiditySweepEvents = analyzeLiquidity(context.bars, {
+      swingHigh: structure.swingHigh,
+      swingLow: structure.swingLow,
+    }).sweepEvents.slice(-80);
+
     this.scheduleOverlayRender();
 
     return this.lastResult;
@@ -276,6 +316,7 @@ export class StudyRenderer {
     this.overlay.remove();
     this.latestContext = null;
     this.structureLines = [];
+    this.liquiditySweepEvents = [];
   }
 
   private renderOverlay(): void {
@@ -316,6 +357,26 @@ export class StudyRenderer {
           createStructureLabelElement(line, pointX, y),
         );
       }
+    }
+
+    for (const event of this.liquiditySweepEvents) {
+      const bar = this.latestContext.bars[event.barIndex];
+      if (!bar) continue;
+
+      const x = timeScale.timeToCoordinate(bar.time as Time);
+      const markerPrice = event.side === "buy-side" ? bar.high : bar.low;
+      const y = this.series.priceToCoordinate(markerPrice);
+
+      if (
+        x == null ||
+        y == null ||
+        !Number.isFinite(x) ||
+        !Number.isFinite(y)
+      ) {
+        continue;
+      }
+
+      fragment.appendChild(createLiquiditySweepLabelElement(event, x, y));
     }
 
     for (const marker of this.lastResult.atrExpansionMarkers) {

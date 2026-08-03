@@ -25,6 +25,7 @@ export interface LiquidityEvent {
 
 export interface LiquidityAnalysis {
   pools: LiquidityPool[];
+  sweepEvents: LiquidityEvent[];
   latestEvent?: LiquidityEvent;
   nearestAbove?: LiquidityPool;
   nearestBelow?: LiquidityPool;
@@ -196,7 +197,13 @@ export function analyzeLiquidity(
   structure: LiquidityStructureLevels = {},
 ): LiquidityAnalysis {
   if (bars.length < PIVOT_STRENGTH * 2 + 3) {
-    return { pools: [], equalHighs: false, equalLows: false, confidence: 0 };
+    return {
+      pools: [],
+      sweepEvents: [],
+      equalHighs: false,
+      equalLows: false,
+      confidence: 0,
+    };
   }
 
   const tolerance = toleranceFor(bars);
@@ -230,6 +237,16 @@ export function analyzeLiquidity(
     }
   }
 
+  const sweepEvents: LiquidityEvent[] = [];
+  for (const pool of pools) {
+    for (let index = pool.lastTouchIndex + 1; index <= lastBarIndex; index += 1) {
+      const event = eventForBar(pool, bars[index], index, tolerance);
+      if (event?.type === "sweep") sweepEvents.push(event);
+    }
+  }
+
+  sweepEvents.sort((left, right) => left.barIndex - right.barIndex);
+
   const currentPrice = bars[lastBarIndex].close;
   const above = pools
     .filter((pool) => pool.price > currentPrice)
@@ -244,6 +261,7 @@ export function analyzeLiquidity(
 
   return {
     pools,
+    sweepEvents,
     latestEvent,
     nearestAbove: above[0],
     nearestBelow: below[0],
