@@ -54,11 +54,40 @@ function biasColor(object: MarketObject): string {
   return "#38bdf8";
 }
 
+function sameChartTime(left: MarketObject["updatedTime"], right: MarketObject["updatedTime"]): boolean {
+  if (left === undefined || right === undefined) return false;
+  if (typeof left === "object" || typeof right === "object") {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+  return left === right;
+}
+
 function interactionStatus(object: MarketObject): {
   label: string;
   color: string;
 } {
   const latest = object.memory.interactions[object.memory.interactions.length - 1];
+
+  if (object.geometry.kind === "line") {
+    const isCurrentCloseCross =
+      (latest?.type === "closedAbove" || latest?.type === "closedBelow") &&
+      sameChartTime(latest.time, object.updatedTime);
+
+    if (isCurrentCloseCross) {
+      return latest.type === "closedAbove"
+        ? { label: "Closed Above", color: "#22c55e" }
+        : { label: "Closed Below", color: "#ef4444" };
+    }
+
+    const side = object.awareness.proximity?.approachSide;
+    if (side === "above") {
+      return { label: "Holding Above", color: "#22c55e" };
+    }
+    if (side === "below") {
+      return { label: "Holding Below", color: "#ef4444" };
+    }
+  }
+
   if (!latest) return { label: object.bias, color: biasColor(object) };
 
   const labels: Partial<Record<typeof latest.type, string>> = {
