@@ -165,6 +165,14 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function bodyHigh(bar: CleanBar): number {
+  return Math.max(bar.open, bar.close);
+}
+
+function bodyLow(bar: CleanBar): number {
+  return Math.min(bar.open, bar.close);
+}
+
 function trueRange(current: CleanBar, previous?: CleanBar): number {
   if (!previous) return Math.max(0, current.high - current.low);
 
@@ -1020,7 +1028,8 @@ function calculateStrength(state: StructureState): number {
  * Automatic close-confirmed market structure.
  *
  * Bullish:
- * - A break is armed only when a candle CLOSES above the previous HH wick.
+ * - A break is armed when a candle CLOSES above the body high of the previous
+ *   HH candle. The wick still anchors the final HH price.
  * - The new HH is not automatically the confirming candle.
  * - The engine keeps following the leg and uses the highest subsequent wick.
  * - The HH is finalized only after price meaningfully reverses from the
@@ -1033,7 +1042,8 @@ function calculateStrength(state: StructureState): number {
  *   does not print HH/HL until a later bullish BOS confirms the sequence.
  *
  * Bearish:
- * - A break is armed only when a candle CLOSES below the previous LL wick.
+ * - A break is armed when a candle CLOSES below the body low of the previous
+ *   LL candle. The wick still anchors the final LL price.
  * - The engine keeps following the leg and uses the lowest subsequent wick.
  * - The LL is finalized only after price meaningfully reverses from the
  *   lowest wick using the same ATR-adjusted leg-confirmation threshold.
@@ -1107,6 +1117,10 @@ export function buildMarketStructure(
     );
 
     const close = bars[index].close;
+    const confirmedHighBar = bars[state.confirmedHigh.index];
+    const confirmedLowBar = bars[state.confirmedLow.index];
+    const bullishBreakLevel = bodyHigh(confirmedHighBar);
+    const bearishBreakLevel = bodyLow(confirmedLowBar);
 
     /**
      * Do not re-arm the same direction while its breakout leg is still being
@@ -1114,7 +1128,7 @@ export function buildMarketStructure(
      */
     if (
       !state.pendingBullishBreak &&
-      close > state.confirmedHigh.price
+      close > bullishBreakLevel
     ) {
       armBullishBreak(bars, state, index);
       continue;
@@ -1122,7 +1136,7 @@ export function buildMarketStructure(
 
     if (
       !state.pendingBearishBreak &&
-      close < state.confirmedLow.price
+      close < bearishBreakLevel
     ) {
       armBearishBreak(bars, state, index);
     }
