@@ -2,6 +2,7 @@ from app.scanners.overnight_runner import OvernightRunnerScanner
 from app.scanners.ifvg_htf_scanner import IFVGHTFScanner
 from app.scanners.gap_atr_runner import GapAtrRunnerScanner
 from app.scanners.hourly_sweep_runner import HourlySweepRunnerScanner
+from app.scanners.liquidity_reclaim_scanner import LiquidityReclaimScanner
 
 
 class ScannerRegistry:
@@ -11,6 +12,7 @@ class ScannerRegistry:
             IFVGHTFScanner(),
             GapAtrRunnerScanner(),
             HourlySweepRunnerScanner(),
+            LiquidityReclaimScanner(),
         ]
         self.scanners = {scanner.id: scanner for scanner in scanners}
 

@@ -327,10 +327,18 @@ export type ScannerCacheResponse = {
   interval_seconds?: number;
   filters?: Record<string, unknown>;
   data?: ScannerResponse | null;
+  all_data?: Record<string, unknown>;
+  scanner_errors?: Record<string, string>;
 };
 
-export async function fetchScannerCache(): Promise<ScannerCacheResponse> {
-  const res = await fetch(`${API_BASE}/scanner/cache`);
+export async function fetchScannerCache(
+  scannerId?: string,
+): Promise<ScannerCacheResponse> {
+  const qs = new URLSearchParams();
+  if (scannerId) qs.set("scanner_id", scannerId);
+  const res = await fetch(
+    `${API_BASE}/scanner/cache${qs.toString() ? `?${qs.toString()}` : ""}`,
+  );
   return parseJson<ScannerCacheResponse>(res);
 }
 

@@ -538,6 +538,9 @@ backend_alert_last_alert: Optional[Dict[str, Any]] = None
 # Runs scanner in the backend so pages can read cached results without hammering Alpaca.
 scanner_task: Optional[asyncio.Task] = None
 scanner_cache: Optional[Dict[str, Any]] = None
+scanner_caches: Dict[str, Dict[str, Any]] = {}
+scanner_cache_errors: Dict[str, str] = {}
+scanner_cache_last_runs: Dict[str, datetime] = {}
 scanner_last_run: Optional[datetime] = None
 scanner_last_error: Optional[str] = None
 scanner_last_status: str = "stopped"
@@ -2717,36 +2720,55 @@ async def run_background_scanner_loop() -> None:
 
             scanner_last_status = "scanning"
             await maybe_auto_save_afterhours_snapshot()
-            scanner = registry.get(SCANNER_ID)
-            if scanner is None:
-                raise RuntimeError(f"Unknown scanner_id: {SCANNER_ID}")
-
             market = get_market_data_provider()
-            result = await scanner.run(
-                market,
-                snapshot_store,
-                workflow=SCANNER_WORKFLOW,
-                max_symbols=SCANNER_MAX_SYMBOLS,
-                min_price=SCANNER_MIN_PRICE,
-                max_price=SCANNER_MAX_PRICE,
-                min_volume=SCANNER_MIN_VOLUME,
-                min_gap_pct=SCANNER_MIN_CHANGE_PCT,
-                min_pm_range_pct=SCANNER_MIN_PM_RANGE_PCT,
-                min_pm_dollar_volume=SCANNER_MIN_PM_DOLLAR_VOLUME,
-                min_compression_score=SCANNER_MIN_COMPRESSION_SCORE,
-                min_breakout_score=SCANNER_MIN_BREAKOUT_SCORE,
-                hours_back=SCANNER_HOURS_BACK,
-            )
+            async def run_registered_scanner(definition: Dict[str, Any]):
+                scanner_id = str(definition.get("id") or "")
+                scanner = registry.get(scanner_id)
+                if scanner is None:
+                    return scanner_id, None, f"Unknown scanner_id: {scanner_id}"
+                try:
+                    result = await scanner.run(
+                        market,
+                        snapshot_store,
+                        workflow=SCANNER_WORKFLOW,
+                        max_symbols=SCANNER_MAX_SYMBOLS,
+                        min_price=SCANNER_MIN_PRICE,
+                        max_price=SCANNER_MAX_PRICE,
+                        min_volume=SCANNER_MIN_VOLUME,
+                        min_gap_pct=SCANNER_MIN_CHANGE_PCT,
+                        min_pm_range_pct=SCANNER_MIN_PM_RANGE_PCT,
+                        min_pm_dollar_volume=SCANNER_MIN_PM_DOLLAR_VOLUME,
+                        min_compression_score=SCANNER_MIN_COMPRESSION_SCORE,
+                        min_breakout_score=SCANNER_MIN_BREAKOUT_SCORE,
+                        hours_back=SCANNER_HOURS_BACK,
+                    )
+                    return scanner_id, result, None
+                except Exception as exc:
+                    return scanner_id, None, str(exc)
 
-            scanner_cache = result
+            completed = await asyncio.gather(
+                *(run_registered_scanner(item) for item in registry.list())
+            )
+            completed_at = datetime.now(timezone.utc)
+            cycle_errors: List[str] = []
+            for scanner_id, result, error in completed:
+                if result is not None:
+                    scanner_caches[scanner_id] = result
+                    scanner_cache_last_runs[scanner_id] = completed_at
+                    scanner_cache_errors.pop(scanner_id, None)
+                elif error:
+                    scanner_cache_errors[scanner_id] = error
+                    cycle_errors.append(f"{scanner_id}: {error}")
+
+            scanner_cache = scanner_caches.get(SCANNER_ID)
             scanner_last_run = datetime.now(timezone.utc)
-            scanner_last_error = None
+            scanner_last_error = "; ".join(cycle_errors) if cycle_errors else None
             scanner_last_status = "running"
             scanner_run_count += 1
 
             print(
-                f"[scanner-loop] updated count={result.get('count')} "
-                f"session={result.get('session_mode')} run={scanner_run_count}",
+                f"[scanner-loop] updated scanners={len(scanner_caches)} "
+                f"errors={len(cycle_errors)} run={scanner_run_count}",
                 flush=True,
             )
 
@@ -2805,14 +2827,20 @@ async def stop_scanner_task() -> None:
             pass
 
 
-def scanner_cache_status() -> Dict[str, Any]:
+def scanner_cache_status(scanner_id: Optional[str] = None) -> Dict[str, Any]:
+    selected_id = (scanner_id or SCANNER_ID).strip() or SCANNER_ID
+    selected_data = scanner_caches.get(selected_id)
+    if selected_data is None and selected_id == SCANNER_ID:
+        selected_data = scanner_cache
+    selected_error = scanner_cache_errors.get(selected_id)
+    selected_last_run = scanner_cache_last_runs.get(selected_id)
     return {
-        "ok": scanner_last_error is None,
+        "ok": selected_error is None,
         "enabled": SCANNER_BACKGROUND_ENABLED,
         "running": bool(scanner_task and not scanner_task.done()),
         "status": scanner_last_status,
-        "last_run": scanner_last_run.isoformat() if scanner_last_run else None,
-        "last_error": scanner_last_error,
+        "last_run": selected_last_run.isoformat() if selected_last_run else (scanner_last_run.isoformat() if scanner_last_run else None),
+        "last_error": selected_error,
         "run_count": scanner_run_count,
         "interval_seconds": SCANNER_INTERVAL_SECONDS,
         "market_data_provider": os.getenv(
@@ -2820,7 +2848,7 @@ def scanner_cache_status() -> Dict[str, Any]:
             "alpaca",
         ),
         "filters": {
-            "scanner_id": SCANNER_ID,
+            "scanner_id": selected_id,
             "workflow": SCANNER_WORKFLOW,
             "max_symbols": SCANNER_MAX_SYMBOLS,
             "min_price": SCANNER_MIN_PRICE,
@@ -2833,7 +2861,9 @@ def scanner_cache_status() -> Dict[str, Any]:
             "min_breakout_score": SCANNER_MIN_BREAKOUT_SCORE,
             "hours_back": SCANNER_HOURS_BACK,
         },
-        "data": scanner_cache,
+        "data": selected_data,
+        "all_data": scanner_caches,
+        "scanner_errors": scanner_cache_errors,
     }
 
 
@@ -3694,8 +3724,8 @@ async def scanner_endpoint(
 
 
 @app.get("/scanner/cache")
-def scanner_cache_endpoint():
-    return scanner_cache_status()
+def scanner_cache_endpoint(scanner_id: Optional[str] = Query(None)):
+    return scanner_cache_status(scanner_id)
 
 
 @app.post("/scanner/cache/refresh")
@@ -3749,12 +3779,16 @@ async def scanner_cache_refresh(
             hours_back=hours_back,
         )
         scanner_cache = result
+        scanner_caches[scanner_id] = result
+        scanner_cache_last_runs[scanner_id] = datetime.now(timezone.utc)
+        scanner_cache_errors.pop(scanner_id, None)
         scanner_last_run = datetime.now(timezone.utc)
         scanner_last_error = None
         scanner_last_status = "running"
         scanner_run_count += 1
-        return scanner_cache_status()
+        return scanner_cache_status(scanner_id)
     except Exception as exc:
+        scanner_cache_errors[scanner_id] = str(exc)
         scanner_last_error = str(exc)
         scanner_last_status = "error"
         print("[scanner/cache/refresh] error:", exc, flush=True)

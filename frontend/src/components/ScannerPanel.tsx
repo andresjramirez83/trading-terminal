@@ -82,6 +82,11 @@ type ScannerRow = {
   has_saved_ah?: boolean;
   notes?: string[];
   source?: string;
+  setup_stage?: string;
+  direction?: "bullish" | "bearish";
+  liquidity_level?: number;
+  touch_count?: number;
+  trigger_level?: number;
 };
 
 type ScannerResponse = {
@@ -316,10 +321,10 @@ export default function ScannerPanel({
   const [alertSymbolsLoading, setAlertSymbolsLoading] = useState(false);
 
   const [autoRefresh, setAutoRefresh] = useState(() =>
-    readStoredBoolean(SCANNER_AUTO_REFRESH_STORAGE_KEY, false),
+    readStoredBoolean(SCANNER_AUTO_REFRESH_STORAGE_KEY, true),
   );
   const [refreshSeconds, setRefreshSeconds] = useState(() =>
-    readStoredNumber(SCANNER_REFRESH_SECONDS_STORAGE_KEY, 20, 5, 300),
+    readStoredNumber(SCANNER_REFRESH_SECONDS_STORAGE_KEY, 45, 5, 300),
   );
 
   const [workflow, setWorkflow] = useState<Workflow>("auto");
@@ -637,7 +642,7 @@ export default function ScannerPanel({
 
       const cacheResponse = options?.forceRefresh
         ? await refreshScannerCache(scannerRequestParams() as any)
-        : await fetchScannerCache();
+        : await fetchScannerCache(selectedScannerId);
 
       if (requestId !== scannerLoadRequestRef.current) return;
 
@@ -719,9 +724,9 @@ export default function ScannerPanel({
   }
 
   useEffect(() => {
-    // Selecting a module must execute that module. Reading the shared cache here
-    // would otherwise keep showing the automatic overnight-runner results.
-    loadScanner({ forceRefresh: true });
+    // Every module is refreshed by the backend. Selecting a module only reads
+    // that scanner's independent cache; it must never start the scan.
+    loadScanner();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isWorkspace, selectedScannerId, workflow]);
 
@@ -798,25 +803,49 @@ export default function ScannerPanel({
   }, [rows]);
 
   useEffect(() => {
-    const unique = rows
-      .map((row) => normalizeSymbol(row.symbol))
-      .filter((value): value is string => Boolean(value));
-
     const watchlistRows = rows
       .map((row) => buildWatchlistSymbol(row))
       .filter((item) => Boolean(item.symbol));
 
-    // Push empty lists too. This prevents stale/default symbols from staying in the
-    // scanner watchlist when the scanner legitimately has no rows.
-    if (!arraysEqual(lastPushedWatchlistRef.current, unique)) {
-      lastPushedWatchlistRef.current = unique;
-      replaceSymbols("scanner", watchlistRows, {
+    const cachedScannerEntries = Object.entries(
+      (cacheStatus?.all_data ?? {}) as Record<string, ScannerResponse>,
+    );
+    const combinedWatchlistRows = cachedScannerEntries.flatMap(
+      ([, response]) =>
+        dedupeScannerRows(response?.rows ?? [])
+          .map((row) => buildWatchlistSymbol(row))
+          .filter((item) => Boolean(item.symbol)),
+    );
+    const combinedSymbols = Array.from(
+      new Set(combinedWatchlistRows.map((item) => item.symbol)),
+    );
+
+    if (!arraysEqual(lastPushedWatchlistRef.current, combinedSymbols)) {
+      lastPushedWatchlistRef.current = combinedSymbols;
+      replaceSymbols("scanner", combinedWatchlistRows, {
         name: "Scanner Watchlist",
         type: "scanner",
-        description: "Combined symbols currently coming from scanner output.",
+        description: "Combined matches from every automatic scanner.",
+        allowEmpty: true,
       });
-      onWatchlistChange?.(unique);
+      onWatchlistChange?.(combinedSymbols);
     }
+
+    cachedScannerEntries.forEach(([scannerId, response]) => {
+      const scannerWatchlistRows = dedupeScannerRows(response?.rows ?? [])
+        .map((row) => buildWatchlistSymbol(row))
+        .filter((item) => Boolean(item.symbol));
+      const watchlistId = normalizeWatchlistId(scannerId);
+      if (!watchlistId || watchlistId === "scanner") return;
+      replaceSymbols(watchlistId, scannerWatchlistRows, {
+        name: response?.scanner_name ?? titleCaseWatchlistName(scannerId),
+        type: "scanner",
+        description:
+          response?.description ??
+          `Scanner-generated symbols for ${titleCaseWatchlistName(scannerId)}.`,
+        allowEmpty: true,
+      });
+    });
 
     const selectedScannerWatchlistId = normalizeWatchlistId(
       data?.scanner_id ?? selectedScannerId
@@ -831,6 +860,7 @@ export default function ScannerPanel({
           `Scanner-generated symbols for ${titleCaseWatchlistName(
             selectedScannerId
           )}.`,
+        allowEmpty: true,
       });
     }
 
@@ -868,6 +898,7 @@ export default function ScannerPanel({
     selectedScannerId,
     replaceSymbols,
     onWatchlistChange,
+    cacheStatus?.all_data,
   ]);
 
   function handleScannerSymbolSelect(symbol: string) {
@@ -1511,6 +1542,10 @@ export default function ScannerPanel({
                   ["alert", "Alert"],
                   ["symbol", "Symbol"],
                   ["runner_type", "Type"],
+                  ["setup_stage", "Stage"],
+                  ["liquidity_level", "Level"],
+                  ["touch_count", "Touches"],
+                  ["trigger_level", "Trigger"],
                   ["last_price", "Last"],
                   ["pm_gap_pct", "Change%"],
                   ["pm_range_pct", "Range%"],
@@ -1585,6 +1620,10 @@ export default function ScannerPanel({
                     <td style={cellLeft}>
                       {String(row.runner_type ?? row.source ?? "scanner")}
                     </td>
+                    <td style={cellLeft}>{row.setup_stage ?? "-"}</td>
+                    <td style={cellRight}>{formatMaybe(row.liquidity_level, 4)}</td>
+                    <td style={cellRight}>{row.touch_count ?? "-"}</td>
+                    <td style={cellRight}>{formatMaybe(row.trigger_level, 4)}</td>
                     <td style={cellRight}>
                       {formatMaybe(row.last_price ?? row.price)}
                     </td>
