@@ -9,7 +9,11 @@ import React, {
   type ReactNode,
 } from "react";
 
-import { API_BASE, fetchScannerDefinitions } from "../../services/api";
+import {
+  API_BASE,
+  fetchScannerCache,
+  fetchScannerDefinitions,
+} from "../../services/api";
 
 import { dailyPracticeUniverseEngine } from "../../trading/practice/DailyPracticeUniverseEngine";
 
@@ -79,6 +83,35 @@ const WatchlistContext = createContext<WatchlistContextValue | null>(null);
 const WATCHLIST_STORAGE_KEY = "trading.workstation.watchlists.v1";
 const ACTIVE_WATCHLIST_STORAGE_KEY = "trading.workstation.activeWatchlist.v1";
 const MANUAL_WATCHLIST_POLL_MS = 2_000;
+const SCANNER_WATCHLIST_POLL_MS = 45_000;
+
+type CachedScannerRow = {
+  symbol?: unknown;
+  score?: number;
+  ah_score?: number;
+  runner_score?: number;
+  pm_runner_score?: number;
+  compression_score?: number;
+  breakout_score?: number;
+  price?: number;
+  last_price?: number;
+  change_pct?: number;
+  gap_pct?: number;
+  pm_gap_pct?: number;
+  volume?: number;
+  ah_volume?: number;
+  pm_volume?: number;
+  runner_type?: string;
+  source?: string;
+  notes?: string[];
+};
+
+type CachedScannerResult = {
+  scanner_id?: string;
+  scanner_name?: string;
+  description?: string;
+  rows?: CachedScannerRow[];
+};
 
 type ManualWatchlistApiResponse = {
   symbol?: string;
@@ -459,8 +492,12 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
+    let refreshInFlight = false;
 
     async function loadScannerWatchlists() {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+
       try {
         const definitions = await fetchScannerDefinitions();
         if (cancelled) return;
@@ -473,25 +510,78 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
           }))
           .filter((definition) => definition.id && definition.name);
 
+        const cachedResults = await Promise.all(
+          normalizedDefinitions.map(async (definition) => {
+            try {
+              const cache = await fetchScannerCache(definition.id);
+              return [definition.id, cache.data as CachedScannerResult | null] as const;
+            } catch (error) {
+              console.warn(
+                `[WatchlistContext] scanner cache load failed for ${definition.id}`,
+                error
+              );
+              return [definition.id, null] as const;
+            }
+          })
+        );
+        if (cancelled) return;
+
+        const cachedById = new Map(cachedResults);
+
         setWatchlists((current) => {
           const manual =
             current.find((watchlist) => watchlist.id === "manual") ??
             DEFAULT_WATCHLISTS[0];
-          const currentById = new Map(
-            current.map((watchlist) => [watchlist.id, watchlist])
-          );
-
           return [
             manual,
-            ...normalizedDefinitions.map((definition) => ({
-              id: definition.id,
-              name: definition.name,
-              type: "scanner" as const,
-              description:
-                definition.description ??
-                `Scanner-generated symbols for ${definition.name}.`,
-              symbols: currentById.get(definition.id)?.symbols ?? [],
-            })),
+            ...normalizedDefinitions.map((definition) => {
+              const cached = cachedById.get(definition.id);
+              const rows = Array.isArray(cached?.rows) ? cached.rows : [];
+              const symbols = rows
+                .map((row) => {
+                  const symbol = normalizeSymbol(row.symbol);
+                  if (!symbol) return null;
+
+                  const rawScore = Number(
+                    row.score ??
+                      row.ah_score ??
+                      row.runner_score ??
+                      row.pm_runner_score ??
+                      row.compression_score ??
+                      row.breakout_score ??
+                      0
+                  );
+                  const score = Number.isFinite(rawScore)
+                    ? Math.max(0, Math.min(100, Math.round(rawScore)))
+                    : 0;
+
+                  return normalizeWatchlistSymbol({
+                    symbol,
+                    score,
+                    tone: score >= 70 ? "ready" : score <= 45 ? "weak" : "watch",
+                    setup: row.runner_type ?? row.source ?? definition.name,
+                    scanner: definition.name,
+                    note: row.notes?.join(" · ") ?? "",
+                    lastPrice: row.last_price ?? row.price,
+                    percentChange:
+                      row.pm_gap_pct ?? row.gap_pct ?? row.change_pct,
+                    volume: row.pm_volume ?? row.ah_volume ?? row.volume,
+                    source: row.source ?? row.runner_type ?? definition.id,
+                  });
+                })
+                .filter((item): item is WatchlistSymbol => item !== null);
+
+              return {
+                id: definition.id,
+                name: cached?.scanner_name ?? definition.name,
+                type: "scanner" as const,
+                description:
+                  cached?.description ??
+                  definition.description ??
+                  `Scanner-generated symbols for ${definition.name}.`,
+                symbols: uniqueWatchlistSymbols(symbols),
+              };
+            }),
           ];
         });
 
@@ -504,13 +594,20 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         });
       } catch (error) {
         console.warn("[WatchlistContext] scanner registry load failed", error);
+      } finally {
+        refreshInFlight = false;
       }
     }
 
     void loadScannerWatchlists();
+    const pollTimer = window.setInterval(
+      () => void loadScannerWatchlists(),
+      SCANNER_WATCHLIST_POLL_MS
+    );
 
     return () => {
       cancelled = true;
+      window.clearInterval(pollTimer);
     };
   }, []);
 
