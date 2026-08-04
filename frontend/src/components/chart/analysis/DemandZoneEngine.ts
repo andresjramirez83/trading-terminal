@@ -7,21 +7,29 @@ function formatPrice(price: number): string {
 
 function hexToRgba(hex: string, opacity: number): string {
   const clean = hex.replace("#", "");
-  const full = clean.length === 3
-    ? clean.split("").map((c) => c + c).join("")
-    : clean;
+  const full =
+    clean.length === 3
+      ? clean
+          .split("")
+          .map((character) => character + character)
+          .join("")
+      : clean;
 
   const value = Number.parseInt(full, 16);
-  if (!Number.isFinite(value)) return `rgba(34,197,94,${opacity})`;
+  if (!Number.isFinite(value)) {
+    return `rgba(34,197,94,${opacity})`;
+  }
 
-  const r = (value >> 16) & 255;
-  const g = (value >> 8) & 255;
-  const b = value & 255;
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
 
-  return `rgba(${r},${g},${b},${opacity})`;
+  return `rgba(${red},${green},${blue},${opacity})`;
 }
 
-export function buildDemandZone(input: FxAnalysisInput): FxAnalysisResult | null {
+export function buildDemandZone(
+  input: FxAnalysisInput,
+): FxAnalysisResult | null {
   const { bar, settings } = input;
   const toolSettings = settings.demandZone;
 
@@ -42,7 +50,10 @@ export function buildDemandZone(input: FxAnalysisInput): FxAnalysisResult | null
       id: `fx-demand-zone-${Number(bar.time)}`,
       low,
       high,
-      fillColor: hexToRgba(toolSettings.color, toolSettings.opacity),
+      fillColor: hexToRgba(
+        toolSettings.color,
+        toolSettings.opacity,
+      ),
       borderColor: toolSettings.color,
       title: `FX Demand ${formatPrice(low)} - ${formatPrice(high)}`,
       extendRight: true,
