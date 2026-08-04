@@ -27,8 +27,9 @@ class ScannerEngine:
         self.executor = ParallelScannerExecutor(concurrency=self.concurrency)
 
     async def get_universe(
-    *,
-    market: MarketDataProvider,
+        self,
+        *,
+        market: MarketDataProvider,
         limit: int = 1000,
         min_limit: Optional[int] = None,
     ) -> "OrderedDict[str, Dict[str, Any]]":
