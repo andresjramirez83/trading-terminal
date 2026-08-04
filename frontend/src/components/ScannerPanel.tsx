@@ -547,6 +547,24 @@ export default function ScannerPanel({
   }, []);
 
   useEffect(() => {
+    definitions.forEach((definition) => {
+      const watchlistId = normalizeWatchlistId(definition.id);
+      if (!watchlistId || watchlistId === "scanner") return;
+
+      replaceSymbols(watchlistId, [], {
+        name: definition.name || titleCaseWatchlistName(definition.id),
+        type: "scanner",
+        description:
+          definition.description ??
+          `Scanner-generated symbols for ${
+            definition.name || titleCaseWatchlistName(definition.id)
+          }.`,
+        allowEmpty: true,
+      });
+    });
+  }, [definitions, replaceSymbols]);
+
+  useEffect(() => {
     if (!isWorkspace) return;
     loadSnapshots(selectedScannerId);
     // eslint-disable-next-line react-hooks/exhaustive-deps

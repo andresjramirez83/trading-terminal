@@ -9,11 +9,7 @@ import React, {
   type ReactNode,
 } from "react";
 
-import {
-  API_BASE,
-  fetchSharedAlpacaState,
-  saveSharedAlpacaState,
-} from "../../services/api";
+import { API_BASE } from "../../services/api";
 
 import { dailyPracticeUniverseEngine } from "../../trading/practice/DailyPracticeUniverseEngine";
 
@@ -69,7 +65,14 @@ interface WatchlistContextValue {
     symbols: Array<string | WatchlistSymbol>,
     options?: ReplaceSymbolsOptions
   ): void;
+  syncScannerWatchlists(definitions: ScannerWatchlistDefinition[]): void;
 }
+
+type ScannerWatchlistDefinition = {
+  id: string;
+  name: string;
+  description?: string;
+};
 
 const WatchlistContext = createContext<WatchlistContextValue | null>(null);
 
@@ -156,24 +159,10 @@ const LEGACY_MANUAL_KEYS = [
 
 const DEFAULT_WATCHLISTS: Watchlist[] = [
   {
-    id: "scanner",
-    name: "Scanner Watchlist",
-    type: "scanner",
-    description: "Symbols currently coming from scanner output.",
-    symbols: [],
-  },
-  {
     id: "manual",
     name: "Manual Watchlist",
     type: "manual",
     description: "User selected symbols for active monitoring.",
-    symbols: [],
-  },
-  {
-    id: "momentum",
-    name: "Momentum",
-    type: "scanner",
-    description: "Scanner-generated momentum opportunities.",
     symbols: [],
   },
 ];
@@ -323,18 +312,11 @@ function normalizeWatchlist(input: Watchlist): Watchlist | null {
 }
 
 function ensureDefaults(watchlists: Watchlist[]): Watchlist[] {
-  const byId = new Map<string, Watchlist>();
+  const storedManual = watchlists
+    .map((item) => normalizeWatchlist(item))
+    .find((item) => item?.id === "manual");
 
-  for (const item of DEFAULT_WATCHLISTS) {
-    byId.set(item.id, item);
-  }
-
-  for (const item of watchlists) {
-    const normalized = normalizeWatchlist(item);
-    if (normalized) byId.set(normalized.id, normalized);
-  }
-
-  return Array.from(byId.values());
+  return [storedManual ?? DEFAULT_WATCHLISTS[0]];
 }
 
 function parseStoredWatchlists(raw: string | null): Watchlist[] {
@@ -547,14 +529,6 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     async function bootstrapBackendOnce() {
-      let shared: Record<string, unknown> | null = null;
-
-      try {
-        shared = (await fetchSharedAlpacaState()) as Record<string, unknown> | null;
-      } catch (error) {
-        console.warn("[WatchlistContext] shared state load failed", error);
-      }
-
       try {
         const backendManual = await fetchManualWatchlist();
         let authoritativeManual = backendManual.symbols;
@@ -576,24 +550,8 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
         if (cancelled) return;
 
-        const scannerSymbols = extractSymbolsFromUnknown(
-          shared?.watchlist ??
-            shared?.scannerWatchlist ??
-            shared?.scanner_symbols
-        );
-
         setWatchlists((current) => {
-          let next = current;
-
-          if (scannerSymbols.length > 0) {
-            next = replaceSymbolsInternal(next, "scanner", scannerSymbols, {
-              type: "scanner",
-              name: "Scanner Watchlist",
-              allowEmpty: false,
-            });
-          }
-
-          return setManualSymbols(next, authoritativeManual);
+          return setManualSymbols(current, authoritativeManual);
         });
 
         setBackendSyncReady(true);
@@ -671,35 +629,6 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [backendSyncReady]);
-
-  useEffect(() => {
-    if (!backendSyncReady || typeof window === "undefined") return;
-
-    const scanner = watchlists.find((item) => item.id === "scanner");
-    const scannerSymbols = (scanner?.symbols ?? []).map((item) => item.symbol);
-
-    const timeoutId = window.setTimeout(async () => {
-      try {
-        const existing = (await fetchSharedAlpacaState()) as Record<string, unknown> | null;
-        const sharedWithoutManual: Record<string, unknown> = {
-          ...(existing ?? {}),
-        };
-        delete sharedWithoutManual.manualWatchlist;
-
-        await saveSharedAlpacaState({
-          ...sharedWithoutManual,
-          watchlist: scannerSymbols,
-          updatedAt: Date.now(),
-        } as any);
-      } catch (error) {
-        console.warn("[WatchlistContext] scanner watchlist save failed", error);
-      }
-    }, 350);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [backendSyncReady, watchlists]);
 
   const activeWatchlist = useMemo(
     () =>
@@ -928,6 +857,49 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     [queueManualMutation, watchlists]
   );
 
+  const syncScannerWatchlists = useCallback(
+    (definitions: ScannerWatchlistDefinition[]) => {
+      const normalizedDefinitions = definitions
+        .map((definition) => ({
+          ...definition,
+          id: normalizeWatchlistId(definition.id),
+          name: definition.name.trim(),
+        }))
+        .filter((definition) => definition.id && definition.name);
+
+      setWatchlists((current) => {
+        const manual =
+          current.find((watchlist) => watchlist.id === "manual") ??
+          DEFAULT_WATCHLISTS[0];
+        const currentById = new Map(
+          current.map((watchlist) => [watchlist.id, watchlist])
+        );
+
+        return [
+          manual,
+          ...normalizedDefinitions.map((definition) => ({
+            id: definition.id,
+            name: definition.name,
+            type: "scanner" as const,
+            description:
+              definition.description ??
+              `Scanner-generated symbols for ${definition.name}.`,
+            symbols: currentById.get(definition.id)?.symbols ?? [],
+          })),
+        ];
+      });
+
+      setActiveWatchlistId((current) => {
+        const validIds = new Set([
+          "manual",
+          ...normalizedDefinitions.map((definition) => definition.id),
+        ]);
+        return validIds.has(current) ? current : "manual";
+      });
+    },
+    []
+  );
+
   const value = useMemo<WatchlistContextValue>(
     () => ({
       watchlists,
@@ -940,6 +912,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       addSymbol,
       removeSymbol,
       replaceSymbols,
+      syncScannerWatchlists,
     }),
     [
       watchlists,
@@ -952,6 +925,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       addSymbol,
       removeSymbol,
       replaceSymbols,
+      syncScannerWatchlists,
     ]
   );
 
@@ -984,7 +958,7 @@ function replaceSymbolsInternal(
   const existing = current.find((watchlist) => watchlist.id === normalizedId);
 
   if (!existing) {
-    if (unique.length === 0) return current;
+    if (unique.length === 0 && options.allowEmpty !== true) return current;
 
     return [
       ...current,
