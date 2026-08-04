@@ -987,6 +987,7 @@ export class ChartEngine {
 
   setStudyVisibility(visibility: StudyVisibility): void {
     this.studyRenderer.setStructureVisible(visibility.marketStructure);
+    this.studyRenderer.setDemandZonesVisible(visibility.demandZones);
     this.series.vwap.applyOptions({ visible: visibility.vwap });
     this.series.ema9.applyOptions({ visible: visibility.ema9 });
     this.series.ema20.applyOptions({ visible: visibility.ema20 });

@@ -3,6 +3,7 @@
 import type { LineData, Time } from "lightweight-charts";
 import type { CleanBar } from "../ChartTypes";
 import type { ChartSettings } from "../ChartSettingsTypes";
+import type { AutomaticDemandZone } from "../DemandZoneEngine";
 
 export type StudyMarkerDirection = "up" | "down";
 
@@ -30,4 +31,5 @@ export type StudyLineSeries = {
 
 export type StudyRenderResult = {
   atrExpansionMarkers: StudyMarkerPoint[];
+  demandZones: AutomaticDemandZone[];
 };

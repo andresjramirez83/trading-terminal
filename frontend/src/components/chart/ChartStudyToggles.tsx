@@ -12,6 +12,7 @@ const TOGGLES: { key: keyof StudyVisibility; label: string }[] = [
   { key: "ema20", label: "EMA 20" },
   { key: "volume", label: "Volume" },
   { key: "marketStructure", label: "Auto Market Structure" },
+  { key: "demandZones", label: "Auto Demand Zones" },
 ];
 
 export default function ChartStudyToggles({ visibility, onChange }: Props) {

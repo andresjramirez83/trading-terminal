@@ -15,6 +15,10 @@ import {
 } from "./StructureStudy";
 import { analyzeLiquidity, type LiquidityEvent } from "../analysis/LiquiditySweepEngine";
 import { buildMarketStructure } from "../analysis/MarketStructureEngine";
+import {
+  buildAutomaticDemandZones,
+  type AutomaticDemandZone,
+} from "../DemandZoneEngine";
 
 function average(values: number[]): number {
   if (!values.length) return 0;
@@ -216,6 +220,58 @@ function createLiquiditySweepLabelElement(
   return element;
 }
 
+function createDemandZoneElement(
+  zone: AutomaticDemandZone,
+  left: number,
+  right: number,
+  topY: number,
+  bottomY: number,
+): HTMLDivElement {
+  const element = document.createElement("div");
+  const continuation = zone.setup === "continuation";
+  const border = continuation ? "#22c55e" : "#38bdf8";
+  const fill = continuation
+    ? "rgba(34, 197, 94, 0.15)"
+    : "rgba(56, 189, 248, 0.13)";
+  const width = Math.max(8, right - left);
+  const height = Math.max(2, bottomY - topY);
+  const label = continuation ? "DZ" : "R-DZ";
+
+  element.title = [
+    continuation ? "Continuation demand zone" : "Reversal demand zone",
+    `${zone.bottom.toFixed(2)} - ${zone.top.toFixed(2)}`,
+    `FVG + close above ${zone.previousHigh.toFixed(2)}`,
+    zone.status.replace(/-/g, " "),
+  ].join(" | ");
+  element.style.position = "absolute";
+  element.style.left = `${left}px`;
+  element.style.top = `${topY}px`;
+  element.style.width = `${width}px`;
+  element.style.height = `${height}px`;
+  element.style.boxSizing = "border-box";
+  element.style.background = fill;
+  element.style.borderTop = `1px solid ${border}`;
+  element.style.borderBottom = `1px solid ${border}`;
+  element.style.pointerEvents = "none";
+
+  const badge = document.createElement("span");
+  badge.textContent = label;
+  badge.style.position = "absolute";
+  badge.style.left = "3px";
+  badge.style.top = "2px";
+  badge.style.padding = "0 3px";
+  badge.style.borderRadius = "3px";
+  badge.style.background = "rgba(2, 6, 23, 0.88)";
+  badge.style.color = border;
+  badge.style.fontSize = "9px";
+  badge.style.fontWeight = "900";
+  badge.style.lineHeight = "13px";
+  badge.style.whiteSpace = "nowrap";
+  element.appendChild(badge);
+
+  return element;
+}
+
 export class StudyRenderer {
   private readonly chart: IChartApi;
   private readonly series: StudyRendererSeries;
@@ -225,10 +281,13 @@ export class StudyRenderer {
   private latestContext: StudyRenderContext | null = null;
   private structureLines: StructureStudyLine[] = [];
   private liquiditySweepEvents: LiquidityEvent[] = [];
+  private demandZones: AutomaticDemandZone[] = [];
   private structureVisible = true;
+  private demandZonesVisible = true;
 
   private lastResult: StudyRenderResult = {
     atrExpansionMarkers: [],
+    demandZones: [],
   };
 
   constructor(
@@ -254,6 +313,15 @@ export class StudyRenderer {
 
     const atrSettings = context.settings.atrExpansion;
 
+    const structure = buildMarketStructure(context.bars);
+    this.demandZones = this.demandZonesVisible
+      ? buildAutomaticDemandZones(context.bars, {
+          structure,
+          includeReversalZones: true,
+          maxZones: 24,
+        }).filter((zone) => zone.active)
+      : [];
+
     this.lastResult = {
       atrExpansionMarkers: atrSettings.enabled
         ? buildAtrExpansionMarkers(
@@ -263,13 +331,13 @@ export class StudyRenderer {
             atrSettings.color || "#facc15",
           )
         : [],
+      demandZones: this.demandZones,
     };
 
     this.structureLines = this.structureVisible
       ? buildStructureStudyLines(context.bars)
       : [];
 
-    const structure = buildMarketStructure(context.bars);
     this.liquiditySweepEvents = analyzeLiquidity(context.bars, {
       swingHigh: structure.swingHigh,
       swingLow: structure.swingLow,
@@ -290,6 +358,24 @@ export class StudyRenderer {
         ? buildStructureStudyLines(this.latestContext.bars)
         : [];
 
+    this.scheduleOverlayRender();
+  }
+
+  setDemandZonesVisible(visible: boolean): void {
+    if (this.demandZonesVisible === visible) return;
+
+    this.demandZonesVisible = visible;
+    this.demandZones =
+      visible && this.latestContext?.bars.length
+        ? buildAutomaticDemandZones(this.latestContext.bars, {
+            maxZones: 24,
+            includeReversalZones: true,
+          }).filter((zone) => zone.active)
+        : [];
+    this.lastResult = {
+      ...this.lastResult,
+      demandZones: this.demandZones,
+    };
     this.scheduleOverlayRender();
   }
 
@@ -317,6 +403,7 @@ export class StudyRenderer {
     this.latestContext = null;
     this.structureLines = [];
     this.liquiditySweepEvents = [];
+    this.demandZones = [];
   }
 
   private renderOverlay(): void {
@@ -326,6 +413,47 @@ export class StudyRenderer {
 
     const fragment = document.createDocumentFragment();
     const timeScale = this.chart.timeScale();
+
+    const lastBar = this.latestContext.bars[this.latestContext.bars.length - 1];
+    const lastBarX = lastBar
+      ? timeScale.timeToCoordinate(lastBar.time as Time)
+      : null;
+    const timeScaleWidth = (
+      timeScale as unknown as { width?: () => number }
+    ).width?.();
+    const zoneEndX =
+      timeScaleWidth != null && Number.isFinite(timeScaleWidth)
+        ? timeScaleWidth
+        : lastBarX;
+
+    if (zoneEndX != null && Number.isFinite(zoneEndX)) {
+      for (const zone of this.demandZones) {
+        const startX = timeScale.timeToCoordinate(zone.originTime as Time);
+        const topY = this.series.priceToCoordinate(zone.top);
+        const bottomY = this.series.priceToCoordinate(zone.bottom);
+
+        if (
+          startX == null ||
+          topY == null ||
+          bottomY == null ||
+          !Number.isFinite(startX) ||
+          !Number.isFinite(topY) ||
+          !Number.isFinite(bottomY)
+        ) {
+          continue;
+        }
+
+        fragment.appendChild(
+          createDemandZoneElement(
+            zone,
+            Math.min(startX, zoneEndX),
+            Math.max(startX, zoneEndX),
+            Math.min(topY, bottomY),
+            Math.max(topY, bottomY),
+          ),
+        );
+      }
+    }
 
     for (const line of this.structureLines) {
       const startX = timeScale.timeToCoordinate(line.startTime as Time);

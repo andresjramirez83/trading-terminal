@@ -81,6 +81,7 @@ const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
   ema20: true,
   volume: true,
   marketStructure: true,
+  demandZones: true,
 };
 
 type ChartPreferences = {

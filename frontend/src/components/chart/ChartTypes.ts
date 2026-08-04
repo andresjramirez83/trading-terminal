@@ -41,6 +41,9 @@ export interface StudyVisibility {
    * Manual market-structure drawings remain independent.
    */
   marketStructure: boolean;
+
+  /** Automatic structure + FVG confirmed bullish demand zones. */
+  demandZones: boolean;
 }
 
 export type ChartSeriesBundle = {
