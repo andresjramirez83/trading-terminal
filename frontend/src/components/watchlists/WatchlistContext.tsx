@@ -9,7 +9,7 @@ import React, {
   type ReactNode,
 } from "react";
 
-import { API_BASE } from "../../services/api";
+import { API_BASE, fetchScannerDefinitions } from "../../services/api";
 
 import { dailyPracticeUniverseEngine } from "../../trading/practice/DailyPracticeUniverseEngine";
 
@@ -456,6 +456,63 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   const manualMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const previousManualSymbolsRef = useRef<Set<string>>(new Set());
   const didCaptureInitialManualRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadScannerWatchlists() {
+      try {
+        const definitions = await fetchScannerDefinitions();
+        if (cancelled) return;
+
+        const normalizedDefinitions = definitions
+          .map((definition) => ({
+            ...definition,
+            id: normalizeWatchlistId(definition.id),
+            name: definition.name.trim(),
+          }))
+          .filter((definition) => definition.id && definition.name);
+
+        setWatchlists((current) => {
+          const manual =
+            current.find((watchlist) => watchlist.id === "manual") ??
+            DEFAULT_WATCHLISTS[0];
+          const currentById = new Map(
+            current.map((watchlist) => [watchlist.id, watchlist])
+          );
+
+          return [
+            manual,
+            ...normalizedDefinitions.map((definition) => ({
+              id: definition.id,
+              name: definition.name,
+              type: "scanner" as const,
+              description:
+                definition.description ??
+                `Scanner-generated symbols for ${definition.name}.`,
+              symbols: currentById.get(definition.id)?.symbols ?? [],
+            })),
+          ];
+        });
+
+        setActiveWatchlistId((current) => {
+          const validIds = new Set([
+            "manual",
+            ...normalizedDefinitions.map((definition) => definition.id),
+          ]);
+          return validIds.has(current) ? current : "manual";
+        });
+      } catch (error) {
+        console.warn("[WatchlistContext] scanner registry load failed", error);
+      }
+    }
+
+    void loadScannerWatchlists();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const queueManualMutation = useCallback(
     (operation: () => Promise<ManualWatchlistApiResponse>) => {
