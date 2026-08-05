@@ -167,18 +167,40 @@ function isPivotHigh(bars: CleanBar[], index: number): boolean {
   );
 }
 
+type BullishBreakReference = {
+  index: number;
+  bodyTop: number;
+  wickHigh: number;
+};
+
 function findFallbackBreakLevel(
   bars: CleanBar[],
   confirmationIndex: number,
-): { index: number; price: number } | null {
-  const close = bars[confirmationIndex]?.close;
-  if (!Number.isFinite(close)) return null;
+): BullishBreakReference | null {
+  const confirmationBar = bars[confirmationIndex];
+  if (!isFiniteBar(confirmationBar)) return null;
 
   for (let index = confirmationIndex - 1; index >= 2; index -= 1) {
     if (!isPivotHigh(bars, index)) continue;
 
-    const level = bodyHigh(bars[index]);
-    if (close > level) return { index, price: level };
+    const referenceBar = bars[index];
+    const bodyTop = bodyHigh(referenceBar);
+    const wickHigh = referenceBar.high;
+
+    /**
+     * Initial unlabelled structure uses the same validation as a confirmed HH:
+     * take out the prior wick and close above the top of its candle body.
+     */
+    if (
+      confirmationBar.high > wickHigh &&
+      confirmationBar.close > bodyTop
+    ) {
+      return {
+        index,
+        bodyTop,
+        wickHigh,
+      };
+    }
   }
 
   return null;
@@ -264,14 +286,16 @@ function evaluateLifecycle(
  * Detects automatic bullish demand zones using the approved rules:
  *
  * 1. Every completed bullish leg that creates a confirmed HH is evaluated.
- * 2. That same HH leg must contain a three-candle bullish FVG.
- * 3. The demand-zone anchor is always the exact candle immediately before the
+ * 2. The confirming candle must take out the previous HH wick and close above
+ *    the top of the previous HH candle's body.
+ * 3. That same HH leg must contain a three-candle bullish FVG.
+ * 4. The demand-zone anchor is always the exact candle immediately before the
  *    FVG displacement candle, regardless of whether it is bullish, bearish,
  *    or indecision.
- * 4. The zone uses that candle's full wick range.
- * 5. An origin fully above the prior HL is continuation; otherwise reversal.
- * 6. The zone is invalid only when a candle closes below its low.
- * 7. ATR is deliberately not used.
+ * 5. The zone uses that candle's full wick range.
+ * 6. An origin fully above the prior HL is continuation; otherwise reversal.
+ * 7. The zone is invalid only when a candle closes below its low.
+ * 8. ATR is deliberately not used.
  */
 export function buildAutomaticDemandZones(
   bars: CleanBar[],
@@ -304,28 +328,52 @@ export function buildAutomaticDemandZones(
       continue;
     }
 
+    /**
+     * Demand validation uses the previous confirmed HH. An LH does not qualify
+     * as the previous HH for this rule. For the first unlabelled sequence, a
+     * pivot-high fallback is allowed only when it passes the same wick/body
+     * validation.
+     */
     const previousHighPoint = latestPointBefore(
       structure.points,
       confirmationIndex,
-      ["HH", "LH"],
+      ["HH"],
     );
 
-    /**
-     * The fallback recovers the initial unlabelled structure anchor only for
-     * zone metadata and leg boundaries. The confirmed HH remains the sole
-     * validator of the demand zone.
-     */
     const fallbackHigh = previousHighPoint
       ? null
       : findFallbackBreakLevel(bars, confirmationIndex);
 
     const previousHighIndex =
       previousHighPoint?.index ?? fallbackHigh?.index;
-    const previousHigh = previousHighPoint
+    const previousHighBodyTop = previousHighPoint
       ? bodyHigh(bars[previousHighPoint.index])
-      : fallbackHigh?.price;
+      : fallbackHigh?.bodyTop;
+    const previousHighWick = previousHighPoint
+      ? previousHighPoint.price
+      : fallbackHigh?.wickHigh;
 
-    if (previousHighIndex == null || previousHigh == null) {
+    if (
+      previousHighIndex == null ||
+      previousHighBodyTop == null ||
+      previousHighWick == null
+    ) {
+      continue;
+    }
+
+    /**
+     * Exact approved validation:
+     * - the confirming candle's wick must take out the previous HH wick;
+     * - its close must finish above the top of the previous HH candle's body.
+     *
+     * The close may remain below the previous HH wick.
+     */
+    const tookOutPreviousHigh =
+      confirmationBar.high > previousHighWick;
+    const closedAbovePreviousBody =
+      confirmationBar.close > previousHighBodyTop;
+
+    if (!tookOutPreviousHigh || !closedAbovePreviousBody) {
       continue;
     }
 
@@ -425,7 +473,7 @@ export function buildAutomaticDemandZones(
       fvgTime: bars[selectedFvgIndex].time,
       bottom: origin.low,
       top: origin.high,
-      previousHigh,
+      previousHigh: previousHighBodyTop,
       previousHigherLow: previousHigherLow?.price,
       setup,
       status: "fresh",

@@ -615,7 +615,8 @@ function armBullishBreak(
 
   /**
    * Bullish continuation:
-   * A close above the previous HH confirms exactly one HL. That HL is the
+   * A candle must trade above the previous HH wick and close above the top of
+   * the previous HH candle's body. That confirms exactly one HL. The HL is the
    * lowest wick from the previous HH to the confirming breakout candle.
    *
    * Bullish transition from a bearish sequence:
@@ -1120,8 +1121,10 @@ function calculateStrength(state: StructureState): number {
  * Automatic close-confirmed market structure.
  *
  * Bullish:
- * - A break is armed when a candle CLOSES above the body high of the previous
- *   HH candle. The wick still anchors the final HH price.
+ * - A break is armed only when the candle trades above the previous confirmed
+ *   HH wick and CLOSES above the body high of the previous HH candle.
+ * - The close does not need to finish above the previous HH wick.
+ * - The wick still anchors the final HH price.
  * - The new HH is not automatically the confirming candle.
  * - The engine keeps following the leg and uses the highest subsequent wick.
  * - The HH is finalized only after price meaningfully reverses from the
@@ -1208,20 +1211,32 @@ export function buildMarketStructure(
       normalizedStrength,
     );
 
-    const close = bars[index].close;
+    const currentBar = bars[index];
+    const close = currentBar.close;
     const confirmedHighBar = bars[state.confirmedHigh.index];
     const confirmedLowBar = bars[state.confirmedLow.index];
-    const bullishBreakLevel = bodyHigh(confirmedHighBar);
+    const bullishBodyBreakLevel = bodyHigh(confirmedHighBar);
+    const bullishWickBreakLevel = state.confirmedHigh.price;
     const bearishBreakLevel = bodyLow(confirmedLowBar);
 
     /**
+     * Bullish validation has two separate requirements:
+     *
+     * 1. The current candle must take out the previous confirmed HH wick.
+     * 2. The current candle must close above the top of that HH candle's body.
+     *
+     * The close does not need to finish above the old wick. Requiring both
+     * conditions prevents an HH from being armed by a body close that remains
+     * completely underneath the previous HH high.
+     *
      * Do not re-arm the same direction while its breakout leg is still being
      * followed for the final highest/lowest wick.
      */
     if (
       !state.pendingBullishBreak &&
       !state.pendingBearishBreak &&
-      close > bullishBreakLevel
+      currentBar.high > bullishWickBreakLevel &&
+      close > bullishBodyBreakLevel
     ) {
       armBullishBreak(bars, state, index);
       continue;

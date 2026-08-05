@@ -231,16 +231,19 @@ function createDemandZoneElement(
   const continuation = zone.setup === "continuation";
   const invalidated =
     !zone.active || zone.status === "invalidated";
-  const border = invalidated
-    ? "#64748b"
-    : continuation
-      ? "#22c55e"
-      : "#38bdf8";
-  const fill = invalidated
-    ? "rgba(100, 116, 139, 0.08)"
-    : continuation
-      ? "rgba(34, 197, 94, 0.15)"
-      : "rgba(56, 189, 248, 0.13)";
+  /**
+   * Keep historical zones visibly shaded after invalidation. The dashed
+   * border and DZ× label show that the zone failed, while the original demand
+   * color preserves where the setup existed.
+   */
+  const border = continuation ? "#22c55e" : "#38bdf8";
+  const fill = continuation
+    ? invalidated
+      ? "rgba(34, 197, 94, 0.12)"
+      : "rgba(34, 197, 94, 0.18)"
+    : invalidated
+      ? "rgba(56, 189, 248, 0.10)"
+      : "rgba(56, 189, 248, 0.15)";
   const width = Math.max(8, right - left);
   const height = Math.max(2, bottomY - topY);
   const label = invalidated
@@ -267,7 +270,7 @@ function createDemandZoneElement(
   const borderStyle = invalidated ? "dashed" : "solid";
   element.style.borderTop = `1px ${borderStyle} ${border}`;
   element.style.borderBottom = `1px ${borderStyle} ${border}`;
-  element.style.opacity = invalidated ? "0.72" : "1";
+  element.style.opacity = "1";
   element.style.pointerEvents = "none";
 
   const badge = document.createElement("span");
