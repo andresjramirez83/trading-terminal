@@ -102,11 +102,16 @@ function isBullishFvg(bars: CleanBar[], index: number): boolean {
   const displacement = bars[index - 1];
   const confirming = bars[index];
 
+  /**
+   * A bullish FVG is defined by the price gap itself. The HH leg already
+   * validates bullish direction, so the middle candle does not also need to
+   * close green. Requiring a green middle candle caused valid HH-leg
+   * imbalances to be missed.
+   */
   return (
     isFiniteBar(first) &&
     isFiniteBar(displacement) &&
     isFiniteBar(confirming) &&
-    displacement.close > displacement.open &&
     confirming.low > first.high
   );
 }
@@ -349,10 +354,15 @@ export function buildAutomaticDemandZones(
     let selectedFvgIndex: number | null = null;
     let selectedOriginIndex: number | null = null;
 
+    /**
+     * Work backward from the completed HH. A leg can contain more than one
+     * imbalance; the demand zone belongs to the final bullish FVG that feeds
+     * directly into that HH, not an older FVG near the beginning of the leg.
+     */
     for (
-      let fvgIndex = Math.max(2, legStart + 2);
-      fvgIndex <= fvgSearchEnd;
-      fvgIndex += 1
+      let fvgIndex = fvgSearchEnd;
+      fvgIndex >= Math.max(2, legStart + 2);
+      fvgIndex -= 1
     ) {
       if (!isBullishFvg(bars, fvgIndex)) continue;
 

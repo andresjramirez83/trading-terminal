@@ -229,13 +229,27 @@ function createDemandZoneElement(
 ): HTMLDivElement {
   const element = document.createElement("div");
   const continuation = zone.setup === "continuation";
-  const border = continuation ? "#22c55e" : "#38bdf8";
-  const fill = continuation
-    ? "rgba(34, 197, 94, 0.15)"
-    : "rgba(56, 189, 248, 0.13)";
+  const invalidated =
+    !zone.active || zone.status === "invalidated";
+  const border = invalidated
+    ? "#64748b"
+    : continuation
+      ? "#22c55e"
+      : "#38bdf8";
+  const fill = invalidated
+    ? "rgba(100, 116, 139, 0.08)"
+    : continuation
+      ? "rgba(34, 197, 94, 0.15)"
+      : "rgba(56, 189, 248, 0.13)";
   const width = Math.max(8, right - left);
   const height = Math.max(2, bottomY - topY);
-  const label = continuation ? "DZ" : "R-DZ";
+  const label = invalidated
+    ? continuation
+      ? "DZ×"
+      : "R-DZ×"
+    : continuation
+      ? "DZ"
+      : "R-DZ";
 
   element.title = [
     continuation ? "Continuation demand zone" : "Reversal demand zone",
@@ -250,8 +264,10 @@ function createDemandZoneElement(
   element.style.height = `${height}px`;
   element.style.boxSizing = "border-box";
   element.style.background = fill;
-  element.style.borderTop = `1px solid ${border}`;
-  element.style.borderBottom = `1px solid ${border}`;
+  const borderStyle = invalidated ? "dashed" : "solid";
+  element.style.borderTop = `1px ${borderStyle} ${border}`;
+  element.style.borderBottom = `1px ${borderStyle} ${border}`;
+  element.style.opacity = invalidated ? "0.72" : "1";
   element.style.pointerEvents = "none";
 
   const badge = document.createElement("span");
@@ -314,13 +330,19 @@ export class StudyRenderer {
     const atrSettings = context.settings.atrExpansion;
 
     const structure = buildMarketStructure(context.bars);
-    this.demandZones = this.demandZonesVisible
+    const detectedDemandZones = this.demandZonesVisible
       ? buildAutomaticDemandZones(context.bars, {
           structure,
           includeReversalZones: true,
           maxZones: 24,
-        }).filter((zone) => zone.active)
+        })
       : [];
+
+    /**
+     * Keep invalidated zones for historical chart rendering. Downstream study
+     * consumers still receive active zones only.
+     */
+    this.demandZones = detectedDemandZones;
 
     this.lastResult = {
       atrExpansionMarkers: atrSettings.enabled
@@ -331,7 +353,7 @@ export class StudyRenderer {
             atrSettings.color || "#facc15",
           )
         : [],
-      demandZones: this.demandZones,
+      demandZones: detectedDemandZones.filter((zone) => zone.active),
     };
 
     this.structureLines = this.structureVisible
@@ -370,11 +392,11 @@ export class StudyRenderer {
         ? buildAutomaticDemandZones(this.latestContext.bars, {
             maxZones: 24,
             includeReversalZones: true,
-          }).filter((zone) => zone.active)
+          })
         : [];
     this.lastResult = {
       ...this.lastResult,
-      demandZones: this.demandZones,
+      demandZones: this.demandZones.filter((zone) => zone.active),
     };
     this.scheduleOverlayRender();
   }
@@ -429,6 +451,14 @@ export class StudyRenderer {
     if (zoneEndX != null && Number.isFinite(zoneEndX)) {
       for (const zone of this.demandZones) {
         const startX = timeScale.timeToCoordinate(zone.originTime as Time);
+        const invalidationX =
+          !zone.active && zone.invalidationTime != null
+            ? timeScale.timeToCoordinate(zone.invalidationTime as Time)
+            : null;
+        const endX =
+          invalidationX != null && Number.isFinite(invalidationX)
+            ? invalidationX
+            : zoneEndX;
         const topY = this.series.priceToCoordinate(zone.top);
         const bottomY = this.series.priceToCoordinate(zone.bottom);
 
@@ -437,6 +467,7 @@ export class StudyRenderer {
           topY == null ||
           bottomY == null ||
           !Number.isFinite(startX) ||
+          !Number.isFinite(endX) ||
           !Number.isFinite(topY) ||
           !Number.isFinite(bottomY)
         ) {
@@ -446,8 +477,8 @@ export class StudyRenderer {
         fragment.appendChild(
           createDemandZoneElement(
             zone,
-            Math.min(startX, zoneEndX),
-            Math.max(startX, zoneEndX),
+            Math.min(startX, endX),
+            Math.max(startX, endX),
             Math.min(topY, bottomY),
             Math.max(topY, bottomY),
           ),
