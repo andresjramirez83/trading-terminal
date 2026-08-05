@@ -330,15 +330,23 @@ export function buildAutomaticDemandZones(
     }
 
     /**
-     * Treat each confirmed HH as a separate leg. Never allow an FVG belonging
-     * to the previous HH event to be reused by the next leg.
+     * Treat each confirmed HH as a separate bullish leg. The HL carrying the
+     * same confirmationIndex is the actual base of this HH leg.
      */
+    const sameLegHigherLow = structure.points
+      .filter(
+        (point) =>
+          point.type === "HL" &&
+          point.confirmationIndex === confirmationIndex,
+      )
+      .sort((a, b) => a.index - b.index)[0];
+
     const previousEventConfirmation =
       bullishLegs[eventIndex - 1]?.confirmationIndex ?? -1;
 
     const legStart = Math.max(
       0,
-      previousHighIndex + 1,
+      sameLegHigherLow?.index ?? previousHighIndex + 1,
       previousEventConfirmation + 1,
     );
 
@@ -355,14 +363,14 @@ export function buildAutomaticDemandZones(
     let selectedOriginIndex: number | null = null;
 
     /**
-     * Work backward from the completed HH. A leg can contain more than one
-     * imbalance; the demand zone belongs to the final bullish FVG that feeds
-     * directly into that HH, not an older FVG near the beginning of the leg.
+     * Search forward from the leg base and select the FIRST bullish FVG.
+     * This keeps the demand zone at the base of the move instead of selecting
+     * a later imbalance near the HH.
      */
     for (
-      let fvgIndex = fvgSearchEnd;
-      fvgIndex >= Math.max(2, legStart + 2);
-      fvgIndex -= 1
+      let fvgIndex = Math.max(2, legStart + 2);
+      fvgIndex <= fvgSearchEnd;
+      fvgIndex += 1
     ) {
       if (!isBullishFvg(bars, fvgIndex)) continue;
 
