@@ -155,66 +155,31 @@ function latestPointBefore(
     })[0];
 }
 
-function isPivotHigh(bars: CleanBar[], index: number): boolean {
-  if (index < 2 || index > bars.length - 3) return false;
-  const high = bars[index].high;
-
-  return (
-    high > bars[index - 1].high &&
-    high > bars[index - 2].high &&
-    high >= bars[index + 1].high &&
-    high >= bars[index + 2].high
-  );
-}
-
-type BullishBreakReference = {
-  index: number;
-  bodyTop: number;
-  wickHigh: number;
-};
-
-function findFallbackBreakLevel(
-  bars: CleanBar[],
-  confirmationIndex: number,
-): BullishBreakReference | null {
-  const confirmationBar = bars[confirmationIndex];
-  if (!isFiniteBar(confirmationBar)) return null;
-
-  for (let index = confirmationIndex - 1; index >= 2; index -= 1) {
-    if (!isPivotHigh(bars, index)) continue;
-
-    const referenceBar = bars[index];
-    const bodyTop = bodyHigh(referenceBar);
-    const wickHigh = referenceBar.high;
-
-    /**
-     * Initial unlabelled structure uses the same validation as a confirmed HH:
-     * take out the prior wick and close above the top of its candle body.
-     */
-    if (
-      confirmationBar.high > wickHigh &&
-      confirmationBar.close > bodyTop
-    ) {
-      return {
-        index,
-        bodyTop,
-        wickHigh,
-      };
-    }
-  }
-
-  return null;
-}
-
 function getConfirmedBullishLegs(
   structure: MarketStructureResult,
 ): MarketStructurePoint[] {
   /**
-   * Every confirmed HH is evaluated as its own bullish leg. An HL, CHoCH,
-   * generic pivot, or close above an old level is not enough by itself.
+   * Demand zones are created only from true bullish BOS legs.
+   *
+   * A transition/CHoCH HH is useful as the new reference high, but it did not
+   * take out a previous bullish HH and therefore cannot validate demand.
+   * Requiring a matching HL with the same confirmationIndex also guarantees
+   * that the engine has a real base for the leg.
    */
   return structure.points
-    .filter((point) => point.type === "HH")
+    .filter((point) => {
+      if (point.type !== "HH" || point.breakType !== "bos") {
+        return false;
+      }
+
+      return structure.points.some(
+        (candidate) =>
+          candidate.type === "HL" &&
+          candidate.breakType === "bos" &&
+          candidate.confirmationIndex === point.confirmationIndex &&
+          candidate.index < point.confirmationIndex,
+      );
+    })
     .slice()
     .sort((a, b) => {
       if (a.confirmationIndex !== b.confirmationIndex) {
@@ -285,17 +250,18 @@ function evaluateLifecycle(
 /**
  * Detects automatic bullish demand zones using the approved rules:
  *
- * 1. Every completed bullish leg that creates a confirmed HH is evaluated.
- * 2. The confirming candle must take out the previous HH wick and close above
+ * 1. Only a confirmed bullish BOS containing a matched HH/HL pair qualifies.
+ * 2. The breakout candle must take out the previous HH wick and close above
  *    the top of the previous HH candle's body.
- * 3. That same HH leg must contain a three-candle bullish FVG.
- * 4. The demand-zone anchor is always the exact candle immediately before the
- *    FVG displacement candle, regardless of whether it is bullish, bearish,
- *    or indecision.
- * 5. The zone uses that candle's full wick range.
- * 6. An origin fully above the prior HL is continuation; otherwise reversal.
- * 7. The zone is invalid only when a candle closes below its low.
- * 8. ATR is deliberately not used.
+ * 3. CHoCH/transition highs never create demand zones.
+ * 4. The FVG must form from the matching HL base through the breakout candle;
+ *    later FVGs near the top of the completed leg are ignored.
+ * 5. The first bullish FVG from that HL base is selected.
+ * 6. The demand-zone anchor is the exact candle immediately before the FVG
+ *    displacement candle, using its full wick range.
+ * 7. An origin fully above the prior HL is continuation; otherwise reversal.
+ * 8. The zone is invalid only when a candle closes below its low.
+ * 9. ATR is deliberately not used.
  */
 export function buildAutomaticDemandZones(
   bars: CleanBar[],
@@ -311,12 +277,7 @@ export function buildAutomaticDemandZones(
   const bullishLegs = getConfirmedBullishLegs(structure);
   const zones: AutomaticDemandZone[] = [];
 
-  for (
-    let eventIndex = 0;
-    eventIndex < bullishLegs.length;
-    eventIndex += 1
-  ) {
-    const higherHighPoint = bullishLegs[eventIndex];
+  for (const higherHighPoint of bullishLegs) {
     const confirmationIndex = higherHighPoint.confirmationIndex;
     const confirmationBar = bars[confirmationIndex];
     const higherHighBar = bars[higherHighPoint.index];
@@ -329,10 +290,22 @@ export function buildAutomaticDemandZones(
     }
 
     /**
-     * Demand validation uses the previous confirmed HH. An LH does not qualify
-     * as the previous HH for this rule. For the first unlabelled sequence, a
-     * pivot-high fallback is allowed only when it passes the same wick/body
-     * validation.
+     * The HH and HL must belong to the same confirmed bullish BOS. Without the
+     * matched HL, there is no reliable base for a demand-zone leg.
+     */
+    const sameLegHigherLow = structure.points.find(
+      (point) =>
+        point.type === "HL" &&
+        point.breakType === "bos" &&
+        point.confirmationIndex === confirmationIndex &&
+        point.index < confirmationIndex,
+    );
+
+    if (!sameLegHigherLow) continue;
+
+    /**
+     * Use only the actual previous confirmed HH. No generic pivot or LH may
+     * substitute for it.
      */
     const previousHighPoint = latestPointBefore(
       structure.points,
@@ -340,31 +313,23 @@ export function buildAutomaticDemandZones(
       ["HH"],
     );
 
-    const fallbackHigh = previousHighPoint
-      ? null
-      : findFallbackBreakLevel(bars, confirmationIndex);
-
-    const previousHighIndex =
-      previousHighPoint?.index ?? fallbackHigh?.index;
-    const previousHighBodyTop = previousHighPoint
-      ? bodyHigh(bars[previousHighPoint.index])
-      : fallbackHigh?.bodyTop;
-    const previousHighWick = previousHighPoint
-      ? previousHighPoint.price
-      : fallbackHigh?.wickHigh;
-
     if (
-      previousHighIndex == null ||
-      previousHighBodyTop == null ||
-      previousHighWick == null
+      !previousHighPoint ||
+      previousHighPoint.index >= sameLegHigherLow.index
     ) {
       continue;
     }
 
+    const previousHighBar = bars[previousHighPoint.index];
+    if (!isFiniteBar(previousHighBar)) continue;
+
+    const previousHighBodyTop = bodyHigh(previousHighBar);
+    const previousHighWick = previousHighPoint.price;
+
     /**
      * Exact approved validation:
-     * - the confirming candle's wick must take out the previous HH wick;
-     * - its close must finish above the top of the previous HH candle's body.
+     * - the breakout candle must trade above the previous HH wick;
+     * - it must close above the top of the previous HH candle's body.
      *
      * The close may remain below the previous HH wick.
      */
@@ -378,34 +343,18 @@ export function buildAutomaticDemandZones(
     }
 
     /**
-     * Treat each confirmed HH as a separate bullish leg. The HL carrying the
-     * same confirmationIndex is the actual base of this HH leg.
+     * The matching HL is the exact leg base. Do not move the start forward
+     * using a prior confirmation index, because delayed HH finalization can
+     * otherwise skip the true base and select an FVG near the top.
      */
-    const sameLegHigherLow = structure.points
-      .filter(
-        (point) =>
-          point.type === "HL" &&
-          point.confirmationIndex === confirmationIndex,
-      )
-      .sort((a, b) => a.index - b.index)[0];
-
-    const previousEventConfirmation =
-      bullishLegs[eventIndex - 1]?.confirmationIndex ?? -1;
-
-    const legStart = Math.max(
-      0,
-      sameLegHigherLow?.index ?? previousHighIndex + 1,
-      previousEventConfirmation + 1,
-    );
+    const legStart = sameLegHigherLow.index;
 
     /**
-     * Search the complete HH leg. The third FVG candle can appear one candle
-     * after the HH wick when the HH candle itself is the displacement candle.
+     * The FVG must participate in the impulse that actually broke the previous
+     * HH. FVGs forming after the breakout candle belong to later price action
+     * and must not create a zone for this leg.
      */
-    const fvgSearchEnd = Math.min(
-      bars.length - 1,
-      Math.max(confirmationIndex, higherHighPoint.index + 1),
-    );
+    const fvgSearchEnd = confirmationIndex;
 
     let selectedFvgIndex: number | null = null;
     let selectedOriginIndex: number | null = null;
