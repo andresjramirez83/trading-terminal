@@ -17,7 +17,7 @@ export type AutomaticDemandZoneStatus =
 
 /**
  * A demand zone confirmed by structure and imbalance, not a manually drawn
- * rectangle. The full origin-candle range (including both wicks) is used.
+ * rectangle. The full pre-FVG candle range, including both wicks, is used.
  */
 export interface AutomaticDemandZone {
   id: string;
@@ -25,6 +25,9 @@ export interface AutomaticDemandZone {
   originTime: Time;
   confirmationIndex: number;
   confirmationTime: Time;
+  higherHighIndex: number;
+  higherHighTime: Time;
+  higherHighPrice: number;
   fvgIndex: number;
   fvgTime: Time;
   bottom: number;
@@ -41,11 +44,16 @@ export interface AutomaticDemandZone {
 }
 
 export interface AutomaticDemandZoneOptions {
-  /** Last bearish/indecision candle search distance before the impulse. */
+  /**
+   * @deprecated Demand is now always anchored to the exact candle immediately
+   * before the FVG displacement candle.
+   */
   maxOriginLookback?: number;
-  /** Allows the FVG to complete shortly after the structure-break candle. */
+  /** @deprecated The full confirmed HH leg is now searched for its FVG. */
   maxFvgBarsAfterBreak?: number;
-  /** Maximum body/range ratio that qualifies a candle as indecision. */
+  /**
+   * @deprecated The pre-FVG candle no longer needs to be bearish or indecision.
+   */
   indecisionBodyPercent?: number;
   /** Keep reversal demand zones whose origin formed below the prior HL. */
   includeReversalZones?: boolean;
@@ -76,57 +84,49 @@ function isFiniteBar(bar: CleanBar | undefined): bar is CleanBar {
   );
 }
 
+/**
+ * Three-candle bullish FVG:
+ *
+ * first candle         = index - 2
+ * displacement candle  = index - 1
+ * confirming candle    = index
+ *
+ * The gap exists when the confirming candle's low is above the first candle's
+ * high. The demand-zone anchor is the first candle: the exact candle directly
+ * before the displacement/imbalance begins.
+ */
 function isBullishFvg(bars: CleanBar[], index: number): boolean {
   if (index < 2 || index >= bars.length) return false;
 
   const first = bars[index - 2];
-  const impulse = bars[index - 1];
-  const third = bars[index];
+  const displacement = bars[index - 1];
+  const confirming = bars[index];
 
   return (
     isFiniteBar(first) &&
-    isFiniteBar(impulse) &&
-    isFiniteBar(third) &&
-    impulse.close > impulse.open &&
-    third.low > first.high
+    isFiniteBar(displacement) &&
+    isFiniteBar(confirming) &&
+    displacement.close > displacement.open &&
+    confirming.low > first.high
   );
 }
 
-function isOriginCandle(
-  bar: CleanBar,
-  indecisionBodyPercent: number,
-): boolean {
-  const range = Math.max(bar.high - bar.low, 0);
-  const body = Math.abs(bar.close - bar.open);
-  const bearish = bar.close < bar.open;
-  const indecision = range > 0 && body / range <= indecisionBodyPercent;
-
-  return bearish || indecision;
-}
-
-function findOriginIndex(
+/**
+ * Returns the exact candle immediately before the FVG displacement candle.
+ *
+ * Do not walk backward looking for a bearish or indecision candle. A bullish
+ * pre-FVG candle is still the correct demand-zone anchor under the approved
+ * rule.
+ */
+function getPreFvgCandleIndex(
   bars: CleanBar[],
   fvgIndex: number,
   minimumIndex: number,
-  maxLookback: number,
-  indecisionBodyPercent: number,
 ): number | null {
-  // The middle candle of a three-candle FVG is the displacement candle. Start
-  // immediately before it and walk back to the last bearish/indecision candle.
-  const latestOrigin = fvgIndex - 2;
-  const earliestOrigin = Math.max(
-    minimumIndex,
-    latestOrigin - Math.max(1, maxLookback) + 1,
-  );
+  const originIndex = fvgIndex - 2;
 
-  for (let index = latestOrigin; index >= earliestOrigin; index -= 1) {
-    const bar = bars[index];
-    if (isFiniteBar(bar) && isOriginCandle(bar, indecisionBodyPercent)) {
-      return index;
-    }
-  }
-
-  return null;
+  if (originIndex < minimumIndex || originIndex < 0) return null;
+  return isFiniteBar(bars[originIndex]) ? originIndex : null;
 }
 
 function latestPointBefore(
@@ -179,27 +179,23 @@ function findFallbackBreakLevel(
   return null;
 }
 
-function getBullishBreakConfirmations(
+function getConfirmedBullishLegs(
   structure: MarketStructureResult,
-): number[] {
-  const groups = new Map<number, MarketStructurePoint[]>();
+): MarketStructurePoint[] {
+  /**
+   * Every confirmed HH is evaluated as its own bullish leg. An HL, CHoCH,
+   * generic pivot, or close above an old level is not enough by itself.
+   */
+  return structure.points
+    .filter((point) => point.type === "HH")
+    .slice()
+    .sort((a, b) => {
+      if (a.confirmationIndex !== b.confirmationIndex) {
+        return a.confirmationIndex - b.confirmationIndex;
+      }
 
-  for (const point of structure.points) {
-    const group = groups.get(point.confirmationIndex) ?? [];
-    group.push(point);
-    groups.set(point.confirmationIndex, group);
-  }
-
-  return [...groups.entries()]
-    .filter(([, points]) =>
-      points.some(
-        (point) =>
-          point.type === "HL" ||
-          (point.type === "HH" && point.breakType === "choch"),
-      ),
-    )
-    .map(([confirmationIndex]) => confirmationIndex)
-    .sort((a, b) => a - b);
+      return a.index - b.index;
+    });
 }
 
 function evaluateLifecycle(
@@ -211,7 +207,12 @@ function evaluateLifecycle(
   let mitigationPercent = 0;
   let wasInside = false;
   const height = Math.max(zone.top - zone.bottom, 0.0000001);
-  const startIndex = Math.max(zone.confirmationIndex, zone.fvgIndex) + 1;
+  const startIndex =
+    Math.max(
+      zone.confirmationIndex,
+      zone.higherHighIndex,
+      zone.fvgIndex,
+    ) + 1;
 
   for (let index = startIndex; index < bars.length; index += 1) {
     const bar = bars[index];
@@ -233,9 +234,13 @@ function evaluateLifecycle(
     if (inside && !wasInside) touchCount += 1;
 
     if (inside) {
-      const depth = Math.max(0, Math.min(1, (zone.top - bar.low) / height));
+      const depth = Math.max(
+        0,
+        Math.min(1, (zone.top - bar.low) / height),
+      );
       mitigationPercent = Math.max(mitigationPercent, depth * 100);
-      status = mitigationPercent > 5 ? "partially-mitigated" : "touched";
+      status =
+        mitigationPercent > 5 ? "partially-mitigated" : "touched";
     }
 
     wasInside = inside;
@@ -251,71 +256,94 @@ function evaluateLifecycle(
 }
 
 /**
- * Detects automatic bullish demand zones using the user's approved rules:
- * 1. The origin is the last bearish/indecision candle before displacement.
- * 2. The displacement must leave a three-candle bullish FVG.
- * 3. That same leg must CLOSE above a prior confirmed structure high.
- * 4. An origin fully above the prior HL is continuation; otherwise reversal.
- * 5. The zone uses the origin candle's full wick range and is invalid only by
- *    a candle close below its low. ATR is deliberately not used.
+ * Detects automatic bullish demand zones using the approved rules:
+ *
+ * 1. Every completed bullish leg that creates a confirmed HH is evaluated.
+ * 2. That same HH leg must contain a three-candle bullish FVG.
+ * 3. The demand-zone anchor is always the exact candle immediately before the
+ *    FVG displacement candle, regardless of whether it is bullish, bearish,
+ *    or indecision.
+ * 4. The zone uses that candle's full wick range.
+ * 5. An origin fully above the prior HL is continuation; otherwise reversal.
+ * 6. The zone is invalid only when a candle closes below its low.
+ * 7. ATR is deliberately not used.
  */
 export function buildAutomaticDemandZones(
   bars: CleanBar[],
   options: AutomaticDemandZoneOptions = {},
 ): AutomaticDemandZone[] {
-  if (bars.length < 8 || bars.some((bar) => !isFiniteBar(bar))) return [];
+  if (bars.length < 8 || bars.some((bar) => !isFiniteBar(bar))) {
+    return [];
+  }
 
-  const maxOriginLookback = Math.max(1, options.maxOriginLookback ?? 8);
-  const maxFvgBarsAfterBreak = Math.max(
-    0,
-    options.maxFvgBarsAfterBreak ?? 3,
-  );
-  const indecisionBodyPercent = Math.max(
-    0,
-    Math.min(1, options.indecisionBodyPercent ?? 0.25),
-  );
   const includeReversalZones = options.includeReversalZones ?? true;
   const maxZones = Math.max(1, options.maxZones ?? 24);
   const structure = options.structure ?? buildMarketStructure(bars);
-  const confirmations = getBullishBreakConfirmations(structure);
+  const bullishLegs = getConfirmedBullishLegs(structure);
   const zones: AutomaticDemandZone[] = [];
-  const usedOriginIndexes = new Set<number>();
 
-  for (let eventIndex = 0; eventIndex < confirmations.length; eventIndex += 1) {
-    const confirmationIndex = confirmations[eventIndex];
+  for (
+    let eventIndex = 0;
+    eventIndex < bullishLegs.length;
+    eventIndex += 1
+  ) {
+    const higherHighPoint = bullishLegs[eventIndex];
+    const confirmationIndex = higherHighPoint.confirmationIndex;
     const confirmationBar = bars[confirmationIndex];
-    if (!isFiniteBar(confirmationBar)) continue;
+    const higherHighBar = bars[higherHighPoint.index];
+
+    if (
+      !isFiniteBar(confirmationBar) ||
+      !isFiniteBar(higherHighBar)
+    ) {
+      continue;
+    }
 
     const previousHighPoint = latestPointBefore(
       structure.points,
       confirmationIndex,
       ["HH", "LH"],
     );
+
+    /**
+     * The fallback recovers the initial unlabelled structure anchor only for
+     * zone metadata and leg boundaries. The confirmed HH remains the sole
+     * validator of the demand zone.
+     */
     const fallbackHigh = previousHighPoint
       ? null
       : findFallbackBreakLevel(bars, confirmationIndex);
-    const previousHighIndex = previousHighPoint?.index ?? fallbackHigh?.index;
+
+    const previousHighIndex =
+      previousHighPoint?.index ?? fallbackHigh?.index;
     const previousHigh = previousHighPoint
       ? bodyHigh(bars[previousHighPoint.index])
       : fallbackHigh?.price;
 
-    if (
-      previousHighIndex == null ||
-      previousHigh == null ||
-      confirmationBar.close <= previousHigh
-    ) {
+    if (previousHighIndex == null || previousHigh == null) {
       continue;
     }
 
-    const previousEventConfirmation = confirmations[eventIndex - 1] ?? 0;
+    /**
+     * Treat each confirmed HH as a separate leg. Never allow an FVG belonging
+     * to the previous HH event to be reused by the next leg.
+     */
+    const previousEventConfirmation =
+      bullishLegs[eventIndex - 1]?.confirmationIndex ?? -1;
+
     const legStart = Math.max(
       0,
-      Math.min(previousHighIndex + 1, confirmationIndex - 1),
+      previousHighIndex + 1,
       previousEventConfirmation + 1,
     );
+
+    /**
+     * Search the complete HH leg. The third FVG candle can appear one candle
+     * after the HH wick when the HH candle itself is the displacement candle.
+     */
     const fvgSearchEnd = Math.min(
       bars.length - 1,
-      confirmationIndex + maxFvgBarsAfterBreak,
+      Math.max(confirmationIndex, higherHighPoint.index + 1),
     );
 
     let selectedFvgIndex: number | null = null;
@@ -328,22 +356,25 @@ export function buildAutomaticDemandZones(
     ) {
       if (!isBullishFvg(bars, fvgIndex)) continue;
 
-      const originIndex = findOriginIndex(
+      const originIndex = getPreFvgCandleIndex(
         bars,
         fvgIndex,
         legStart,
-        maxOriginLookback,
-        indecisionBodyPercent,
       );
 
-      if (originIndex == null || usedOriginIndexes.has(originIndex)) continue;
+      if (originIndex == null) continue;
 
       selectedFvgIndex = fvgIndex;
       selectedOriginIndex = originIndex;
       break;
     }
 
-    if (selectedFvgIndex == null || selectedOriginIndex == null) continue;
+    if (
+      selectedFvgIndex == null ||
+      selectedOriginIndex == null
+    ) {
+      continue;
+    }
 
     const origin = bars[selectedOriginIndex];
     const previousHigherLow = latestPointBefore(
@@ -351,14 +382,13 @@ export function buildAutomaticDemandZones(
       confirmationIndex,
       ["HL"],
     );
+
     const setup: AutomaticDemandZoneSetup =
       previousHigherLow && origin.low > previousHigherLow.price
         ? "continuation"
         : "reversal";
 
     if (setup === "reversal" && !includeReversalZones) continue;
-
-    usedOriginIndexes.add(selectedOriginIndex);
 
     const baseZone: AutomaticDemandZone = {
       id: [
@@ -370,6 +400,9 @@ export function buildAutomaticDemandZones(
       originTime: origin.time,
       confirmationIndex,
       confirmationTime: confirmationBar.time,
+      higherHighIndex: higherHighPoint.index,
+      higherHighTime: higherHighBar.time,
+      higherHighPrice: higherHighPoint.price,
       fvgIndex: selectedFvgIndex,
       fvgTime: bars[selectedFvgIndex].time,
       bottom: origin.low,
@@ -390,15 +423,26 @@ export function buildAutomaticDemandZones(
 }
 
 function normalizeSymbol(symbol?: string): string {
-  return String(symbol || "SPY").trim().toUpperCase().replace(/[^A-Z0-9_.-]/g, "_");
+  return String(symbol || "SPY")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_.-]/g, "_");
 }
 
 function normalizeTimeframe(timeframe?: string): string {
-  return String(timeframe || "5m").trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "_");
+  return String(timeframe || "5m")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]/g, "_");
 }
 
-function makeStorageKey(symbol?: string, timeframe?: string): string {
-  return `${STORAGE_PREFIX}.${normalizeSymbol(symbol)}.${normalizeTimeframe(timeframe)}`;
+function makeStorageKey(
+  symbol?: string,
+  timeframe?: string,
+): string {
+  return `${STORAGE_PREFIX}.${normalizeSymbol(
+    symbol,
+  )}.${normalizeTimeframe(timeframe)}`;
 }
 
 function canUseLocalStorage(): boolean {
@@ -430,7 +474,10 @@ export class DemandZoneEngine {
     this.bodyOnly = options?.bodyOnly ?? false;
     this.symbol = normalizeSymbol(options?.symbol);
     this.timeframe = normalizeTimeframe(options?.timeframe);
-    this.storageKey = makeStorageKey(this.symbol, this.timeframe);
+    this.storageKey = makeStorageKey(
+      this.symbol,
+      this.timeframe,
+    );
     this.load();
   }
 
@@ -444,7 +491,10 @@ export class DemandZoneEngine {
   setWorkspace(symbol: string, timeframe: string): void {
     this.symbol = normalizeSymbol(symbol);
     this.timeframe = normalizeTimeframe(timeframe);
-    this.storageKey = makeStorageKey(this.symbol, this.timeframe);
+    this.storageKey = makeStorageKey(
+      this.symbol,
+      this.timeframe,
+    );
     this.load();
   }
 
@@ -463,14 +513,19 @@ export class DemandZoneEngine {
   }
 
   createFromCandle(candle: CleanBar): DemandZone {
-    const top = this.bodyOnly ? Math.max(candle.open, candle.close) : candle.high;
-    const bottom = this.bodyOnly ? Math.min(candle.open, candle.close) : candle.low;
+    const top = this.bodyOnly
+      ? Math.max(candle.open, candle.close)
+      : candle.high;
+    const bottom = this.bodyOnly
+      ? Math.min(candle.open, candle.close)
+      : candle.low;
 
     const zone: DemandZone = {
       id: crypto.randomUUID(),
       candleTime: candle.time as UTCTimestamp,
       startTime: candle.time as UTCTimestamp,
-      endTime: (Number(candle.time) + this.extendBars) as UTCTimestamp,
+      endTime: (Number(candle.time) +
+        this.extendBars) as UTCTimestamp,
       top,
       bottom,
       color: "#00ff00",
@@ -486,6 +541,7 @@ export class DemandZoneEngine {
   update(id: string, top: number, bottom: number): void {
     const zone = this.zones.get(id);
     if (!zone) return;
+
     zone.top = top;
     zone.bottom = bottom;
     this.save();
@@ -494,6 +550,7 @@ export class DemandZoneEngine {
   setVisible(id: string, visible: boolean): void {
     const zone = this.zones.get(id);
     if (!zone) return;
+
     zone.visible = visible;
     this.save();
   }
@@ -501,6 +558,7 @@ export class DemandZoneEngine {
   setColor(id: string, border: string, fill: string): void {
     const zone = this.zones.get(id);
     if (!zone) return;
+
     zone.color = border;
     zone.fill = fill;
     this.save();
@@ -509,25 +567,31 @@ export class DemandZoneEngine {
   extend(id: string, bars: number): void {
     const zone = this.zones.get(id);
     if (!zone) return;
+
     zone.endTime = (Number(zone.startTime) + bars) as UTCTimestamp;
     this.save();
   }
 
   findAtPrice(price: number): DemandZone | null {
     for (const zone of this.zones.values()) {
-      if (price >= zone.bottom && price <= zone.top) return cloneZone(zone);
+      if (price >= zone.bottom && price <= zone.top) {
+        return cloneZone(zone);
+      }
     }
+
     return null;
   }
 
   invalidateBrokenZones(currentPrice: number): void {
     let changed = false;
+
     for (const zone of this.zones.values()) {
       if (currentPrice < zone.bottom && zone.visible) {
         zone.visible = false;
         changed = true;
       }
     }
+
     if (changed) this.save();
   }
 
@@ -537,11 +601,16 @@ export class DemandZoneEngine {
 
   deserialize(json: string): void {
     this.zones.clear();
+
     try {
       const zones = JSON.parse(json) as DemandZone[];
+
       for (const zone of zones) {
-        if (zone?.id) this.zones.set(zone.id, cloneZone(zone));
+        if (zone?.id) {
+          this.zones.set(zone.id, cloneZone(zone));
+        }
       }
+
       this.save();
     } catch {
       this.zones.clear();
@@ -552,26 +621,40 @@ export class DemandZoneEngine {
   private load(): void {
     this.zones.clear();
     if (!canUseLocalStorage()) return;
+
     const saved = window.localStorage.getItem(this.storageKey);
     if (!saved) return;
 
     try {
       const zones = JSON.parse(saved) as DemandZone[];
       if (!Array.isArray(zones)) return;
+
       for (const zone of zones) {
-        if (zone?.id) this.zones.set(zone.id, cloneZone(zone));
+        if (zone?.id) {
+          this.zones.set(zone.id, cloneZone(zone));
+        }
       }
     } catch (error) {
-      console.warn("[DemandZoneEngine] failed to load zones", error);
+      console.warn(
+        "[DemandZoneEngine] failed to load zones",
+        error,
+      );
     }
   }
 
   private save(): void {
     if (!canUseLocalStorage()) return;
+
     try {
-      window.localStorage.setItem(this.storageKey, this.serialize());
+      window.localStorage.setItem(
+        this.storageKey,
+        this.serialize(),
+      );
     } catch (error) {
-      console.warn("[DemandZoneEngine] failed to save zones", error);
+      console.warn(
+        "[DemandZoneEngine] failed to save zones",
+        error,
+      );
     }
   }
 }
