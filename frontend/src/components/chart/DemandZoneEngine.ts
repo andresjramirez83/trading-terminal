@@ -322,8 +322,9 @@ function evaluateLifecycle(
  * 5. The demand leg starts at the latest local swing low before the breakout.
  *    This prevents an old failed push from being validated retroactively by a
  *    much later HH.
- * 6. The first bullish FVG after that local leg base and no later than the
- *    breakout candle is selected.
+ * 6. The first bullish FVG after that local leg base is selected. Its
+ *    displacement candle must occur no later than the breakout candle, but
+ *    the third candle may confirm the FVG one bar after the breakout.
  * 7. The demand-zone anchor is the exact candle immediately before the FVG
  *    displacement candle, using its full wick range.
  * 8. An origin fully above the prior structural HL is continuation; otherwise
@@ -411,9 +412,17 @@ export function buildAutomaticDemandZones(
     );
 
     /**
-     * Only an FVG formed inside this final local leg can validate demand.
+     * The breakout candle can itself be the FVG displacement candle. In that
+     * case, the three-candle FVG is not confirmed until the next candle.
+     *
+     * Allow exactly one candle after the breakout for confirmation. The loop
+     * below still rejects any FVG whose displacement candle occurs after the
+     * breakout, preventing later top-of-leg imbalances from being selected.
      */
-    const fvgSearchEnd = confirmationIndex;
+    const fvgSearchEnd = Math.min(
+      bars.length - 1,
+      confirmationIndex + 1,
+    );
 
     let selectedFvgIndex: number | null = null;
     let selectedOriginIndex: number | null = null;
@@ -428,6 +437,13 @@ export function buildAutomaticDemandZones(
       fvgIndex <= fvgSearchEnd;
       fvgIndex += 1
     ) {
+      const displacementIndex = fvgIndex - 1;
+
+      /**
+       * The imbalance must belong to the move that performed the HH break.
+       * Only its confirming third candle may occur one bar later.
+       */
+      if (displacementIndex > confirmationIndex) continue;
       if (!isBullishFvg(bars, fvgIndex)) continue;
 
       const originIndex = getPreFvgCandleIndex(
