@@ -49,6 +49,8 @@ function phaseLabel(phase: string): string {
   switch (phase) {
     case "entry_submitted":
       return "Waiting for entry fill";
+    case "entry_cancel_requested":
+      return "Canceling invalidated entry";
     case "active_synthetic":
       return "Server protection active";
     case "exit_submitted":
@@ -366,9 +368,17 @@ export default function AutoTradeWidget({
         {busy ? "Queuing Order…" : "Place Protected Overnight Order"}
       </button>
 
+      <div style={styles.safetyPanel}>
+        <strong>Pre-entry protection</strong>
+        <span>Cancel if the target is reached before fill.</span>
+        <span>Cancel if the stop is reached before fill.</span>
+        <span>Partial fill: cancel the remainder and protect filled shares.</span>
+      </div>
+
       <div style={styles.footnote}>
-        Protection starts only after the entry fills. Overnight exits are limit
-        orders managed and verified by the server.
+        Pending entries and protected positions are checked by the server about
+        every 2 seconds. Overnight exits are limit orders and are not guaranteed
+        to fill at the exact trigger price.
       </div>
     </section>
   );
@@ -576,6 +586,17 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: 10,
     fontSize: 11,
     fontWeight: 950,
+  },
+  safetyPanel: {
+    display: "grid",
+    gap: 3,
+    border: "1px solid rgba(96,165,250,.22)",
+    background: "rgba(30,64,175,.10)",
+    color: "#bfdbfe",
+    borderRadius: 9,
+    padding: 9,
+    fontSize: 9,
+    lineHeight: 1.4,
   },
   footnote: {
     color: "#64748b",

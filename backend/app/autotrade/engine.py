@@ -41,22 +41,43 @@ class AutoTradeEngine:
     async def run_forever(self) -> None:
         self.store.set_worker_status({"running": True, "status": "started", "last_error": None})
         print("[auto-trade-worker] started", flush=True)
+        next_strategy_cycle_at = 0.0
+        protection_poll_seconds = 2.0
         try:
             while not self.stop_requested:
                 cfg = self.store.get_config()
                 try:
+                    # Protection is intentionally checked more frequently than
+                    # scanner strategies. This reduces the time an overnight
+                    # entry or open position can remain exposed during a fast move.
                     await self.manage_active_synthetic_trades(cfg)
+                    await self.manage_pending_entries(cfg)
+
+                    now_monotonic = time.monotonic()
                     if not cfg.enabled:
-                        self.store.set_worker_status({"running": True, "status": "disabled", "last_error": None})
-                        await asyncio.sleep(1)
-                        continue
-                    await self.run_cycle(cfg)
+                        self.store.set_worker_status({
+                            "running": True,
+                            "status": "disabled",
+                            "last_error": None,
+                            "protection_poll_seconds": protection_poll_seconds,
+                        })
+                    elif now_monotonic >= next_strategy_cycle_at:
+                        await self.run_cycle(cfg)
+                        next_strategy_cycle_at = now_monotonic + max(3, int(cfg.poll_seconds))
+                    else:
+                        worker = self.store.get_worker_status()
+                        worker.update({
+                            "running": True,
+                            "heartbeat": time.time(),
+                            "protection_poll_seconds": protection_poll_seconds,
+                        })
+                        self.store.set_worker_status(worker)
                 except Exception as exc:
                     self.store.set_worker_status({"running": True, "status": "error", "last_error": str(exc)})
                     self.store.log_event("engine_error", {"error": str(exc), "traceback": traceback.format_exc()})
                     print(f"[auto-trade-worker] error: {exc}", flush=True)
                     traceback.print_exc()
-                await asyncio.sleep(max(3, int(cfg.poll_seconds)))
+                await asyncio.sleep(protection_poll_seconds)
         finally:
             self.store.set_worker_status({"running": False, "status": "stopped"})
             print("[auto-trade-worker] stopped", flush=True)
@@ -65,7 +86,6 @@ class AutoTradeEngine:
         now = datetime.now(timezone.utc).isoformat()
         self.store.prune_old_fired_signals()
         await self.cleanup_orphaned_exit_orders(cfg)
-        await self.manage_pending_entries(cfg)
 
         manual_done = await self.process_manual_trade_plans(cfg)
         if manual_done:
@@ -740,10 +760,20 @@ class AutoTradeEngine:
             return
 
         next_state = dict(state)
+        cancel_reason = str(state.get("entry_cancel_reason") or "")
+        forced_exit_reason = ""
+        if cancel_reason == "stop_reached_before_entry_fill":
+            forced_exit_reason = "stop_loss"
+        elif cancel_reason == "target_reached_before_entry_fill":
+            forced_exit_reason = "target_hit"
+
         next_state.update({
             "phase": "active_synthetic",
             "filled_qty": qty,
             "filled_at": datetime.now(timezone.utc).isoformat(),
+            # If shares filled while the cancel request was racing the market,
+            # immediately unwind them instead of treating the setup as valid.
+            "force_exit_reason": forced_exit_reason,
         })
         self.store.delete_pending_entry(order_id)
         self.store.upsert_runner_state(symbol, next_state)
@@ -815,14 +845,22 @@ class AutoTradeEngine:
         for item in pending:
             order_id = str(item.get("order_id") or "")
             symbol = str(item.get("symbol") or "").upper()
-            payload = item.get("payload") or {}
+            payload = dict(item.get("payload") or {})
             entry_mode = "live" if str(payload.get("mode") or cfg.mode).lower() == "live" else "paper"
             alpaca = alpaca_by_mode.get(entry_mode)
             if alpaca is None:
                 alpaca = AlpacaService(mode=entry_mode)
                 alpaca_by_mode[entry_mode] = alpaca
+
+            stop = self._alpaca_price(payload.get("stop_price"))
             target = self._alpaca_price(payload.get("target_price"))
-            if not order_id or not symbol or target <= 0:
+            strategy_id = str(payload.get("strategy_id") or "")
+            protected_manual_entry = strategy_id in {
+                "overnight_protected_order",
+                "overnite_hail_mary",
+            }
+
+            if not order_id or not symbol or target <= 0 or stop <= 0:
                 if order_id:
                     self.store.delete_pending_entry(order_id)
                 continue
@@ -845,74 +883,159 @@ class AutoTradeEngine:
                                 "pending": payload,
                             },
                             symbol,
-                            str(payload.get("strategy_id") or ""),
+                            strategy_id,
                         )
                         continue
                     raise
+
                 status = str(order.get("status") or "").lower()
                 filled_qty = self._safe_float(order.get("filled_qty"))
 
-                if status in {"filled"} or filled_qty > 0:
+                # Filled or partially filled shares always take priority over
+                # cancellation. Cancel the remainder and activate protection.
+                if status == "filled" or filled_qty > 0:
                     await self._promote_filled_entry_to_active(alpaca, symbol, payload)
                     continue
 
-                if status in {"canceled", "expired", "rejected"}:
+                if status in {"canceled", "cancelled", "expired", "rejected"}:
+                    cancel_reason = str(payload.get("entry_cancel_reason") or "")
                     self.store.delete_pending_entry(order_id)
                     self.store.delete_runner_state(symbol)
-                    self.store.log_event("pending_entry_closed", {"order_status": status, "pending": payload}, symbol, str(payload.get("strategy_id") or ""))
+                    self.store.log_event(
+                        "pending_entry_cancel_confirmed" if cancel_reason else "pending_entry_closed",
+                        {
+                            "order_status": status,
+                            "cancel_reason": cancel_reason or None,
+                            "pending": payload,
+                            "order": order,
+                        },
+                        symbol,
+                        strategy_id,
+                    )
                     continue
 
-                if status not in {"new", "accepted", "pending_new", "partially_filled"}:
+                if status not in {"new", "accepted", "pending_new", "partially_filled", "held"}:
                     continue
 
-                target_reached, market_snapshot = await self._target_reached(symbol, target, market)
-                if not target_reached:
+                # A cancel request is not considered complete until Alpaca
+                # confirms a terminal order state. Keep the state alive so a
+                # race-condition fill can still be detected and protected.
+                cancel_reason = str(payload.get("entry_cancel_reason") or "")
+                if cancel_reason:
+                    cancel_age = self._seconds_since_iso(payload.get("entry_cancel_requested_at"))
+                    if cancel_age >= 3:
+                        try:
+                            alpaca.cancel_order(order_id)
+                            payload["entry_cancel_requested_at"] = datetime.now(timezone.utc).isoformat()
+                            payload["entry_cancel_attempts"] = int(payload.get("entry_cancel_attempts") or 1) + 1
+                            self.store.upsert_pending_entry(order_id, payload)
+                            self.store.upsert_runner_state(symbol, {"phase": "entry_cancel_requested", **payload})
+                        except Exception as cancel_exc:
+                            payload["entry_cancel_error"] = str(cancel_exc)
+                            self.store.upsert_pending_entry(order_id, payload)
                     continue
 
-                alpaca.cancel_order(order_id)
-                self.store.delete_pending_entry(order_id)
-                self.store.delete_runner_state(symbol)
+                if not protected_manual_entry:
+                    continue
+
+                invalidation_reason, market_snapshot = await self._entry_invalidation_reason(
+                    symbol=symbol,
+                    stop=stop,
+                    target=target,
+                    market=market,
+                )
+                if not invalidation_reason:
+                    continue
+
+                payload.update({
+                    "phase": "entry_cancel_requested",
+                    "entry_cancel_reason": invalidation_reason,
+                    "entry_cancel_requested_at": datetime.now(timezone.utc).isoformat(),
+                    "entry_cancel_attempts": int(payload.get("entry_cancel_attempts") or 0) + 1,
+                    "entry_cancel_market_snapshot": market_snapshot,
+                })
+                self.store.upsert_pending_entry(order_id, payload)
+                self.store.upsert_runner_state(symbol, {"phase": "entry_cancel_requested", **payload})
+
+                try:
+                    alpaca.cancel_order(order_id)
+                    payload["entry_cancel_error"] = None
+                except Exception as cancel_exc:
+                    # Keep monitoring. A failed cancel request must not erase
+                    # the entry because it may still fill.
+                    payload["entry_cancel_error"] = str(cancel_exc)
+                self.store.upsert_pending_entry(order_id, payload)
+                self.store.upsert_runner_state(symbol, {"phase": "entry_cancel_requested", **payload})
                 self.store.log_event(
-                    "pending_entry_cancelled_target_reached",
+                    "pending_entry_cancel_requested",
                     {
-                        "reason": "target reached before entry fill",
+                        "reason": invalidation_reason,
                         "order_id": order_id,
                         "order_status": status,
+                        "stop_price": stop,
                         "target_price": target,
                         "market": market_snapshot,
                         "pending": payload,
                     },
                     symbol,
-                    str(payload.get("strategy_id") or ""),
+                    strategy_id,
                 )
             except Exception as exc:
                 self.store.log_event(
                     "pending_entry_manage_error",
                     {"order_id": order_id, "symbol": symbol, "error": str(exc), "pending": payload},
                     symbol,
-                    str(payload.get("strategy_id") or ""),
+                    strategy_id,
                 )
 
-    async def _target_reached(self, symbol: str, target: float, market: MarketDataProvider) -> tuple[bool, Dict[str, Any]]:
-        target = self._alpaca_price(target)
+    async def _entry_invalidation_reason(
+        self,
+        *,
+        symbol: str,
+        stop: float,
+        target: float,
+        market: MarketDataProvider,
+    ) -> tuple[Optional[str], Dict[str, Any]]:
+        quote: Dict[str, Any] = {}
+        bid_price = 0.0
+        ask_price = 0.0
         last_price = 0.0
-        recent_high = 0.0
+
         try:
-            last = await market.get_last_trade(symbol)
-            last_price = self._safe_float(last)
+            quote = await market.get_latest_quote(symbol) or {}
+            bid_price = self._safe_float(quote.get("bid_price", quote.get("bp")))
+            ask_price = self._safe_float(quote.get("ask_price", quote.get("ap")))
+        except Exception:
+            quote = {}
+
+        try:
+            last_price = self._safe_float(await market.get_last_trade(symbol))
         except Exception:
             last_price = 0.0
 
-        try:
-            bars = await market.get_bars(symbol, "1m", session="extended")
-            recent = (bars or [])[-3:]
-            highs = [self._safe_float(b.get("high", b.get("h"))) for b in recent]
-            recent_high = max([h for h in highs if h > 0], default=0.0)
-        except Exception:
-            recent_high = 0.0
+        # Long-entry invalidation uses the executable side of the quote:
+        # - bid at/above target means the original move already completed.
+        # - ask at/below stop means the market has broken the setup before fill.
+        target_probe = bid_price or last_price
+        stop_probe = ask_price or last_price
 
-        reached = (self._alpaca_price(last_price) >= target) or (self._alpaca_price(recent_high) >= target)
-        return reached, {"last_price": last_price, "recent_1m_high": recent_high, "target_price": target}
+        reason: Optional[str] = None
+        if target_probe > 0 and self._alpaca_price(target_probe) >= target:
+            reason = "target_reached_before_entry_fill"
+        elif stop_probe > 0 and self._alpaca_price(stop_probe) <= stop:
+            reason = "stop_reached_before_entry_fill"
+
+        return reason, {
+            "symbol": symbol,
+            "bid_price": bid_price,
+            "ask_price": ask_price,
+            "last_price": last_price,
+            "target_probe": target_probe,
+            "stop_probe": stop_probe,
+            "stop_price": stop,
+            "target_price": target,
+            "quote_time": quote.get("time", quote.get("t")),
+        }
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
