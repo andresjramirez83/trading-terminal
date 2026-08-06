@@ -846,6 +846,7 @@ export type AutoTradeEntryTriggerMode = "reclaim_close" | "sweep_touch";
 export type AutoTradeStrategy =
   | "six_seven_sweep"
   | "five_am_sweep"
+  | "overnight_protected_order"
   | "overnite_hail_mary";
 
 export type AutoTradeStrategyConfig = {
@@ -886,6 +887,7 @@ export type AutoTradeStatus = {
   config: AutoTradeConfig;
   running: boolean;
   status: string;
+  worker?: Record<string, any>;
   last_check?: string | null;
   last_error?: string | null;
   last_skip?: any;
@@ -895,6 +897,7 @@ export type AutoTradeStatus = {
   pending_entries?: any[];
   active_trades?: any[];
   queued_manual_plans?: any[];
+  manual_trade_plans?: any[];
   history?: any[];
 };
 
@@ -952,25 +955,37 @@ export type ManualTradePlanRequest = {
   target_price: number;
   qty?: number;
   trade_amount?: number;
+  fixed_shares?: number;
+  mode?: AlpacaMode;
+  sizing_mode?: AutoTradeSizingMode;
+  extended_hours?: boolean;
   strategy_id?: AutoTradeStrategy | string;
   setup?: string;
   note?: string;
 };
 
-export async function queueOverniteHailMaryPlan(
+export async function queueOvernightProtectedOrder(
   payload: ManualTradePlanRequest,
 ): Promise<AutoTradeStatus> {
-  const res = await fetch(`${API_BASE}/auto-trade/overnite-hail-mary`, {
+  const res = await fetch(`${API_BASE}/auto-trade/overnight-protected-order`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       ...payload,
-      strategy_id: "overnite_hail_mary",
-      setup: "overnite_hail_mary_limit_entry_stop_target",
+      strategy_id: "overnight_protected_order",
+      setup: "overnight_protected_limit_entry_stop_target",
+      extended_hours: true,
     }),
   });
 
   return parseJson<AutoTradeStatus>(res);
+}
+
+/** @deprecated Use queueOvernightProtectedOrder. */
+export async function queueOverniteHailMaryPlan(
+  payload: ManualTradePlanRequest,
+): Promise<AutoTradeStatus> {
+  return queueOvernightProtectedOrder(payload);
 }
 
 export async function queueManualTradePlan(

@@ -29,12 +29,13 @@ class ExecutionEngine:
         client_order_id = f"autotrade_{signal.strategy_id}_{signal.symbol}_{int(datetime.now(timezone.utc).timestamp())}"
         entry_price = normalize_alpaca_price(float(signal.entry_price))
 
-        # Hail Mary orders need to survive overnight / session boundaries.
-        # Alpaca DAY + extended_hours orders can be canceled at session boundaries,
-        # so use GTC + extended_hours only for the manual Hail Mary strategy.
-        is_hail_mary = str(signal.strategy_id or "").strip() == "overnite_hail_mary"
-        time_in_force = "gtc" if is_hail_mary else "day"
-        extended_hours = True if is_hail_mary else bool(self.config.extended_hours)
+        # Protected overnight entries must survive session boundaries.
+        is_protected_overnight = str(signal.strategy_id or "").strip() in {
+            "overnight_protected_order",
+            "overnite_hail_mary",  # Legacy compatibility alias.
+        }
+        time_in_force = "gtc" if is_protected_overnight else "day"
+        extended_hours = True if is_protected_overnight else bool(self.config.extended_hours)
 
         return self.alpaca.place_order(
             symbol=signal.symbol,

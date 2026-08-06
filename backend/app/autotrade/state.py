@@ -271,7 +271,7 @@ class AutoTradeStore:
 
     def enqueue_manual_trade_plan(self, plan_id: str, payload: Dict[str, Any]) -> None:
         symbol = str(payload.get("symbol") or "").upper()
-        strategy_id = str(payload.get("strategy_id") or "overnite_hail_mary")
+        strategy_id = str(payload.get("strategy_id") or "overnight_protected_order")
         now = time.time()
         with self._connect() as conn:
             conn.execute(
@@ -326,5 +326,6 @@ class AutoTradeStore:
             "last_order": worker.get("last_order"),
             "runner_states": self.get_runner_states(),
             "manual_trade_plans": self.list_manual_trade_plans(),
+            "queued_manual_plans": self.list_manual_trade_plans(),
             "history": events,
         }

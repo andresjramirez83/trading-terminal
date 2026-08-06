@@ -106,21 +106,25 @@ class AutoTradeEngine:
         payload = dict(item.get("payload") or {})
         plan_id = str(item.get("plan_id") or payload.get("signal_id") or "")
 
+        requested_qty = int(payload.get("qty") or payload.get("fixed_shares") or 0)
+        requested_dollars = float(payload.get("trade_amount") or 0)
+        sizing_mode = "shares" if requested_qty > 0 else str(payload.get("sizing_mode") or cfg.sizing_mode)
+
         manual_cfg = cfg.copy(update={
             "mode": payload.get("mode", cfg.mode),
-            "sizing_mode": payload.get("sizing_mode", cfg.sizing_mode),
-            "trade_amount": float(payload.get("trade_amount") or cfg.trade_amount),
-            "fixed_shares": int(payload.get("fixed_shares") or cfg.fixed_shares),
-            "extended_hours": bool(payload.get("extended_hours", cfg.extended_hours)),
+            "sizing_mode": sizing_mode,
+            "trade_amount": requested_dollars if requested_dollars > 0 else float(cfg.trade_amount),
+            "fixed_shares": requested_qty if requested_qty > 0 else int(payload.get("fixed_shares") or cfg.fixed_shares),
+            "extended_hours": True,
             "runner_mode": "off",
             "min_profit_range": 0.0,
         })
 
         signal = TradeSignal(
-            strategy_id=str(payload.get("strategy_id") or "overnite_hail_mary"),
+            strategy_id=str(payload.get("strategy_id") or "overnight_protected_order"),
             symbol=str(payload.get("symbol") or "").upper(),
             side="buy",
-            setup=str(payload.get("setup") or "overnite_hail_mary_limit_entry_stop_target"),
+            setup=str(payload.get("setup") or "overnight_protected_limit_entry_stop_target"),
             signal_id=plan_id,
             timeframe=str(payload.get("timeframe") or "manual"),
             signal_time=str(payload.get("signal_time") or now),
@@ -211,32 +215,88 @@ class AutoTradeEngine:
         if not states:
             return
 
-        alpaca = AlpacaService(mode=cfg.mode)
         market = get_market_data_provider()
+        account_cache: Dict[str, Dict[str, Any]] = {}
 
-        try:
-            positions = alpaca.get_positions()
-        except Exception as exc:
-            self.store.log_event("synthetic_position_check_error", {"error": str(exc)})
-            positions = []
+        def account_snapshot(mode: str) -> Dict[str, Any]:
+            normalized_mode = "live" if str(mode).lower() == "live" else "paper"
+            cached = account_cache.get(normalized_mode)
+            if cached is not None:
+                return cached
 
-        try:
-            open_orders = alpaca.get_orders(status="open", limit=500, nested=True)
-        except Exception as exc:
-            self.store.log_event("synthetic_open_order_check_error", {"error": str(exc)})
-            open_orders = []
+            alpaca = AlpacaService(mode=normalized_mode)
+            positions_ok = True
+            try:
+                positions = alpaca.get_positions()
+            except Exception as exc:
+                positions_ok = False
+                self.store.log_event(
+                    "synthetic_position_check_error",
+                    {"error": str(exc), "mode": normalized_mode},
+                )
+                positions = []
+
+            open_orders_ok = True
+            try:
+                open_orders = alpaca.get_orders(status="open", limit=500, nested=True)
+            except Exception as exc:
+                open_orders_ok = False
+                self.store.log_event(
+                    "synthetic_open_order_check_error",
+                    {"error": str(exc), "mode": normalized_mode},
+                )
+                open_orders = []
+
+            cached = {
+                "mode": normalized_mode,
+                "alpaca": alpaca,
+                "positions": positions,
+                "positions_ok": positions_ok,
+                "open_orders": open_orders,
+                "open_orders_ok": open_orders_ok,
+            }
+            account_cache[normalized_mode] = cached
+            return cached
 
         for symbol, state in list(states.items()):
             phase = str(state.get("phase") or "")
             strategy_id = str(state.get("strategy_id") or "")
-            if strategy_id not in {"overnite_hail_mary", "six_seven_sweep", "five_am_sweep"}:
+            if strategy_id not in {
+                "overnight_protected_order",
+                "overnite_hail_mary",
+                "six_seven_sweep",
+                "five_am_sweep",
+            }:
                 continue
+
+            trade_mode = str(state.get("mode") or cfg.mode)
+            snapshot = account_snapshot(trade_mode)
+            alpaca: AlpacaService = snapshot["alpaca"]
+            positions: List[Dict[str, Any]] = snapshot["positions"]
+            positions_ok = bool(snapshot.get("positions_ok"))
+            open_orders: List[Dict[str, Any]] = snapshot["open_orders"]
+            open_orders_ok = bool(snapshot.get("open_orders_ok"))
 
             if phase == "entry_submitted":
                 await self._promote_filled_entry_to_active(alpaca, symbol, state)
                 continue
 
+            if phase == "exit_submitted":
+                if not positions_ok:
+                    continue
+                await self._reconcile_submitted_exit(
+                    alpaca=alpaca,
+                    symbol=symbol,
+                    state=state,
+                    positions=positions,
+                )
+                continue
+
             if phase != "active_synthetic":
+                continue
+            if not positions_ok or not open_orders_ok:
+                # Never clear protection or submit a duplicate exit when account
+                # reconciliation is unavailable.
                 continue
 
             qty = int(float(state.get("filled_qty") or state.get("qty") or 0))
@@ -250,77 +310,107 @@ class AutoTradeEngine:
                 self.store.delete_runner_state(symbol)
                 self.store.log_event(
                     "synthetic_state_cleared_no_position",
-                    {"reason": "no live position to exit", "state": state},
+                    {"reason": "no live position to exit", "state": state, "mode": trade_mode},
                     symbol,
                     strategy_id,
                 )
+                continue
+
+            existing_exit = self._find_open_closing_order(open_orders, symbol)
+            if existing_exit is not None:
+                repaired_state = dict(state)
+                repaired_state.update({
+                    "phase": "exit_submitted",
+                    "exit_order_id": str(existing_exit.get("id") or ""),
+                    "exit_reason": str(state.get("exit_reason") or "existing_closing_order"),
+                    "exit_qty": int(max(0, self._safe_float(existing_exit.get("qty")))),
+                    "exit_submitted_at": str(existing_exit.get("submitted_at") or datetime.now(timezone.utc).isoformat()),
+                    "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+                })
+                self.store.upsert_runner_state(symbol, repaired_state)
                 continue
 
             reserved_exit_qty = int(self._open_closing_qty_for(open_orders, symbol))
-            available_exit_qty = max(0, live_qty - reserved_exit_qty)
-            if available_exit_qty <= 0:
+            if reserved_exit_qty > 0:
                 self.store.log_event(
                     "synthetic_exit_waiting_existing_order",
-                    {"live_qty": live_qty, "reserved_exit_qty": reserved_exit_qty, "state": state},
+                    {"reserved_exit_qty": reserved_exit_qty, "state": state},
                     symbol,
                     strategy_id,
                 )
                 continue
 
-            exit_qty = min(qty, available_exit_qty)
-            if exit_qty <= 0:
+            market_snapshot = await self._synthetic_market_snapshot(symbol, market)
+            trigger_price = self._safe_float(market_snapshot.get("trigger_price"))
+            if trigger_price <= 0:
                 continue
 
-            last_price = 0.0
-            try:
-                last_price = self._safe_float(await market.get_last_trade(symbol))
-            except Exception:
-                last_price = 0.0
-            if last_price <= 0:
-                continue
-
-            reason = None
-            if last_price <= stop:
-                reason = "stop_loss"
-            elif last_price >= target:
-                reason = "target_hit"
+            forced_reason = str(state.get("force_exit_reason") or "")
+            reason = forced_reason if forced_reason in {"stop_loss", "target_hit"} else None
+            if reason is None:
+                if trigger_price <= stop:
+                    reason = "stop_loss"
+                elif trigger_price >= target:
+                    reason = "target_hit"
             if reason is None:
                 continue
 
-            use_extended = bool(state.get("extended_hours", cfg.extended_hours))
+            exit_qty = min(qty, live_qty)
+            if exit_qty <= 0:
+                continue
+
+            use_extended = bool(state.get("extended_hours", True))
+            is_protected_overnight = strategy_id in {"overnight_protected_order", "overnite_hail_mary"}
             order_type = "limit" if use_extended else "market"
             limit_price = None
             if order_type == "limit":
-                if reason == "target_hit":
+                bid_price = self._safe_float(market_snapshot.get("bid_price"))
+                if reason == "target_hit" and not forced_reason:
                     limit_price = target
                 else:
-                    # Use a slightly marketable limit for synthetic stops in extended hours.
-                    limit_price = self._alpaca_price(max(0.0001, last_price * 0.98))
+                    # A retry is already committed to exiting. Reprice from the
+                    # executable bid so a stale target/stop limit cannot remain
+                    # stranded after the market moves away.
+                    reference_price = bid_price or trigger_price
+                    limit_price = self._alpaca_price(max(0.0001, reference_price * 0.995))
 
             try:
                 order = alpaca.place_order(
                     symbol=symbol,
                     side="sell",
                     order_type=order_type,
-                    time_in_force="day",
+                    time_in_force="gtc" if is_protected_overnight else "day",
                     qty=exit_qty,
                     limit_price=limit_price,
                     extended_hours=use_extended,
                     position_intent="sell_to_close",
                     client_order_id=f"autotrade_exit_{reason}_{symbol}_{int(time.time())}",
                 )
-                self.store.delete_runner_state(symbol)
+                exit_order_id = str((order or {}).get("id") or "")
+                next_state = dict(state)
+                next_state.update({
+                    "phase": "exit_submitted",
+                    "exit_order_id": exit_order_id,
+                    "exit_reason": reason,
+                    "exit_qty": exit_qty,
+                    "exit_limit_price": limit_price,
+                    "exit_submitted_at": datetime.now(timezone.utc).isoformat(),
+                    "last_market_snapshot": market_snapshot,
+                    "last_exit_error": None,
+                    "force_exit_reason": reason,
+                    "exit_attempt_count": int(state.get("exit_attempt_count") or 0) + 1,
+                })
+                self.store.upsert_runner_state(symbol, next_state)
                 self.store.log_event(
                     "synthetic_exit_submitted",
                     {
                         "reason": reason,
-                        "last_price": last_price,
-                        "requested_qty": qty,
+                        "trigger_price": trigger_price,
                         "live_qty": live_qty,
-                        "reserved_exit_qty": reserved_exit_qty,
                         "exit_qty": exit_qty,
-                        "state": state,
+                        "state": next_state,
                         "order": order,
+                        "market": market_snapshot,
                     },
                     symbol,
                     strategy_id,
@@ -328,7 +418,6 @@ class AutoTradeEngine:
             except Exception as exc:
                 error_text = str(exc)
                 if "not allowed to short" in error_text.lower():
-                    refreshed_positions = []
                     try:
                         refreshed_positions = alpaca.get_positions()
                     except Exception:
@@ -338,32 +427,235 @@ class AutoTradeEngine:
                         self.store.delete_runner_state(symbol)
                         self.store.log_event(
                             "synthetic_state_cleared_after_short_reject",
-                            {"reason": "alpaca reported short risk and no live position remains", "state": state, "error": error_text},
+                            {"state": state, "error": error_text, "mode": trade_mode},
                             symbol,
                             strategy_id,
                         )
                         continue
                     repaired_state = dict(state)
-                    repaired_state["qty"] = refreshed_qty
-                    repaired_state["filled_qty"] = refreshed_qty
-                    repaired_state["last_exit_error"] = error_text
-                    repaired_state["last_reconciled_at"] = datetime.now(timezone.utc).isoformat()
+                    repaired_state.update({
+                        "qty": refreshed_qty,
+                        "filled_qty": refreshed_qty,
+                        "last_exit_error": error_text,
+                        "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+                    })
                     self.store.upsert_runner_state(symbol, repaired_state)
-                    self.store.log_event(
-                        "synthetic_exit_qty_reconciled",
-                        {"reason": reason, "live_qty": refreshed_qty, "state": repaired_state, "error": error_text},
-                        symbol,
-                        strategy_id,
-                    )
                     continue
 
+                failed_state = dict(state)
+                failed_state.update({
+                    "last_exit_error": error_text,
+                    "last_exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "last_market_snapshot": market_snapshot,
+                })
+                self.store.upsert_runner_state(symbol, failed_state)
                 self.store.log_event(
                     "synthetic_exit_error",
-                    {"reason": reason, "last_price": last_price, "state": state, "error": error_text},
+                    {"reason": reason, "state": failed_state, "error": error_text},
                     symbol,
                     strategy_id,
                 )
 
+    async def _synthetic_market_snapshot(
+        self,
+        symbol: str,
+        market: MarketDataProvider,
+    ) -> Dict[str, Any]:
+        quote: Dict[str, Any] = {}
+        bid_price = 0.0
+        ask_price = 0.0
+        last_price = 0.0
+
+        try:
+            quote = await market.get_latest_quote(symbol) or {}
+            bid_price = self._safe_float(quote.get("bid_price", quote.get("bp")))
+            ask_price = self._safe_float(quote.get("ask_price", quote.get("ap")))
+        except Exception:
+            quote = {}
+
+        try:
+            last_price = self._safe_float(await market.get_last_trade(symbol))
+        except Exception:
+            last_price = 0.0
+
+        # For a long position, the bid is the executable side of the market.
+        trigger_price = bid_price or last_price
+        return {
+            "symbol": symbol,
+            "bid_price": bid_price,
+            "ask_price": ask_price,
+            "last_price": last_price,
+            "trigger_price": trigger_price,
+            "quote_time": quote.get("time", quote.get("t")),
+        }
+
+    async def _reconcile_submitted_exit(
+        self,
+        *,
+        alpaca: AlpacaService,
+        symbol: str,
+        state: Dict[str, Any],
+        positions: List[Dict[str, Any]],
+    ) -> None:
+        strategy_id = str(state.get("strategy_id") or "")
+        order_id = str(state.get("exit_order_id") or "")
+        live_qty = int(self._position_qty_for(positions, symbol))
+
+        if live_qty <= 0:
+            self.store.delete_runner_state(symbol)
+            self.store.log_event(
+                "synthetic_exit_filled",
+                {"reason": state.get("exit_reason"), "state": state, "position_qty": 0},
+                symbol,
+                strategy_id,
+            )
+            return
+
+        if not order_id:
+            retry_state = dict(state)
+            retry_state.update({
+                "phase": "active_synthetic",
+                "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
+                "last_exit_error": "exit order id missing; protection re-armed",
+                "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+            })
+            self.store.upsert_runner_state(symbol, retry_state)
+            return
+
+        try:
+            order = alpaca.get_order(order_id, nested=True)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "order not found" not in message and "40410000" not in message:
+                raise
+            retry_state = dict(state)
+            retry_state.update({
+                "phase": "active_synthetic",
+                "filled_qty": live_qty,
+                "qty": live_qty,
+                "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
+                "last_exit_error": str(exc),
+                "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+            })
+            retry_state.pop("exit_order_id", None)
+            self.store.upsert_runner_state(symbol, retry_state)
+            self.store.log_event(
+                "synthetic_exit_missing_rearmed",
+                {"state": retry_state, "error": str(exc)},
+                symbol,
+                strategy_id,
+            )
+            return
+
+        status = str(order.get("status") or "").lower()
+        if status == "filled":
+            self.store.delete_runner_state(symbol)
+            self.store.log_event(
+                "synthetic_exit_filled",
+                {"reason": state.get("exit_reason"), "state": state, "order": order},
+                symbol,
+                strategy_id,
+            )
+            return
+
+        if status in {"canceled", "cancelled", "expired", "rejected"}:
+            retry_state = dict(state)
+            retry_state.update({
+                "phase": "active_synthetic",
+                "filled_qty": live_qty,
+                "qty": live_qty,
+                "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
+                "last_exit_error": f"exit order {status}; protection re-armed",
+                "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+            })
+            retry_state.pop("exit_order_id", None)
+            self.store.upsert_runner_state(symbol, retry_state)
+            self.store.log_event(
+                "synthetic_exit_rearmed",
+                {"order_status": status, "state": retry_state, "order": order},
+                symbol,
+                strategy_id,
+            )
+            return
+
+        exit_age_seconds = self._seconds_since_iso(state.get("exit_submitted_at"))
+        if exit_age_seconds >= 15 and status in {
+            "new",
+            "accepted",
+            "pending_new",
+            "partially_filled",
+            "held",
+        }:
+            try:
+                alpaca.cancel_order(order_id)
+                retry_state = dict(state)
+                retry_state.update({
+                    "phase": "active_synthetic",
+                    "filled_qty": live_qty,
+                    "qty": live_qty,
+                    "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
+                    "last_exit_error": "unfilled exit canceled for a more marketable retry",
+                    "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+                })
+                retry_state.pop("exit_order_id", None)
+                self.store.upsert_runner_state(symbol, retry_state)
+                self.store.log_event(
+                    "synthetic_exit_retry_requested",
+                    {"order": order, "state": retry_state, "exit_age_seconds": exit_age_seconds},
+                    symbol,
+                    strategy_id,
+                )
+                return
+            except Exception as exc:
+                waiting_state = dict(state)
+                waiting_state.update({
+                    "last_exit_error": f"exit retry cancel failed: {exc}",
+                    "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+                })
+                self.store.upsert_runner_state(symbol, waiting_state)
+                return
+
+        waiting_state = dict(state)
+        waiting_state.update({
+            "phase": "exit_submitted",
+            "remaining_qty": live_qty,
+            "exit_order_status": status,
+            "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+        })
+        self.store.upsert_runner_state(symbol, waiting_state)
+
+    @staticmethod
+    def _seconds_since_iso(value: Any) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+        except Exception:
+            return 0.0
+
+    def _find_open_closing_order(
+        self,
+        orders: List[Dict[str, Any]],
+        symbol: str,
+    ) -> Optional[Dict[str, Any]]:
+        symbol_u = str(symbol or "").upper()
+        terminal = {"filled", "canceled", "cancelled", "expired", "rejected"}
+        for order in orders or []:
+            if str(order.get("symbol") or "").upper() != symbol_u:
+                continue
+            if str(order.get("status") or "").lower() in terminal:
+                continue
+            if str(order.get("side") or "").lower() != "sell":
+                continue
+            client_order_id = str(order.get("client_order_id") or "")
+            if not client_order_id.startswith("autotrade_exit_"):
+                continue
+            return order
+        return None
 
     def _position_qty_for(self, positions: List[Dict[str, Any]], symbol: str) -> float:
         symbol_u = str(symbol or "").upper()
@@ -431,6 +723,17 @@ class AutoTradeEngine:
             return
         if status != "filled" and filled_qty <= 0:
             return
+
+        if status != "filled" and filled_qty > 0:
+            try:
+                alpaca.cancel_order(order_id)
+            except Exception as exc:
+                self.store.log_event(
+                    "partial_entry_cancel_error",
+                    {"order_id": order_id, "state": state, "error": str(exc)},
+                    symbol,
+                    str(state.get("strategy_id") or ""),
+                )
 
         qty = int(filled_qty or self._safe_float(state.get("qty")))
         if qty <= 0:
@@ -506,13 +809,18 @@ class AutoTradeEngine:
         if not pending:
             return
 
-        alpaca = AlpacaService(mode=cfg.mode)
         market = get_market_data_provider()
+        alpaca_by_mode: Dict[str, AlpacaService] = {}
 
         for item in pending:
             order_id = str(item.get("order_id") or "")
             symbol = str(item.get("symbol") or "").upper()
             payload = item.get("payload") or {}
+            entry_mode = "live" if str(payload.get("mode") or cfg.mode).lower() == "live" else "paper"
+            alpaca = alpaca_by_mode.get(entry_mode)
+            if alpaca is None:
+                alpaca = AlpacaService(mode=entry_mode)
+                alpaca_by_mode[entry_mode] = alpaca
             target = self._alpaca_price(payload.get("target_price"))
             if not order_id or not symbol or target <= 0:
                 if order_id:

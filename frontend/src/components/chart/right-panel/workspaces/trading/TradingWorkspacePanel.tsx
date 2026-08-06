@@ -300,7 +300,13 @@ export default function TradingWorkspacePanel({
             />
           )}
 
-          {activeTab === "auto" && <AutoTradeWidget symbol={safeSymbol} />}
+          {activeTab === "auto" && (
+            <AutoTradeWidget
+              symbol={safeSymbol}
+              currentPrice={safePrice}
+              mode={store.executionMode === "live" ? "live" : "paper"}
+            />
+          )}
 
           {activeTab === "plan" && (
             <TradePlanWidget

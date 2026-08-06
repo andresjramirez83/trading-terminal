@@ -10,7 +10,12 @@ AutoTradeSource = Literal["manual", "scanner", "both"]
 SizingMode = Literal["dollars", "shares"]
 RunnerMode = Literal["off", "scale_trail"]
 EntryTriggerMode = Literal["reclaim_close", "sweep_touch"]
-StrategyId = Literal["six_seven_sweep", "five_am_sweep", "overnite_hail_mary"]
+StrategyId = Literal[
+    "six_seven_sweep",
+    "five_am_sweep",
+    "overnight_protected_order",
+    "overnite_hail_mary",  # Legacy compatibility alias.
+]
 
 
 class StrategyConfig(BaseModel):
@@ -103,11 +108,8 @@ class EngineEvent(BaseModel):
 
 
 class ManualTradePlan(BaseModel):
-    """Manual entry/stop/target plan for Overnite Hail Mary.
+    """Manual overnight entry with server-managed stop and target protection."""
 
-    Keep this permissive so route code can safely attach metadata without
-    Pydantic assignment errors.
-    """
     model_config = ConfigDict(extra="allow")
 
     symbol: str
@@ -115,8 +117,8 @@ class ManualTradePlan(BaseModel):
     stop_price: float
     target_price: float
 
-    strategy_id: StrategyId = "overnite_hail_mary"
-    setup: str = "overnite_hail_mary_limit_entry_stop_target"
+    strategy_id: StrategyId = "overnight_protected_order"
+    setup: str = "overnight_protected_limit_entry_stop_target"
     signal_id: Optional[str] = None
     timeframe: str = "manual"
     signal_time: Optional[str] = None
@@ -126,6 +128,6 @@ class ManualTradePlan(BaseModel):
 
     mode: AutoTradeMode = "paper"
     sizing_mode: SizingMode = "dollars"
-    trade_amount: float
+    trade_amount: Optional[float] = None
     fixed_shares: int = 0
     extended_hours: bool = True

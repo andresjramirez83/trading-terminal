@@ -1,125 +1,391 @@
-import { useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
-type AutoTradeStatus = "running" | "stopped";
+import {
+  fetchAutoTradeStatus,
+  queueOvernightProtectedOrder,
+  updateAutoTradeConfig,
+  type AlpacaMode,
+  type AutoTradeSizingMode,
+  type AutoTradeStatus,
+} from "../../../../../services/api";
 
 type AutoTradeWidgetProps = {
   symbol: string;
+  currentPrice: number;
+  mode: AlpacaMode;
 };
 
-const STRATEGIES = [
-  "6/7 Low Sweep Reclaim",
-  "5AM Pacific Sweep",
-  "Overnight Runner",
-  "IFVG HTF",
-  "Gap ATR Runner",
-  "Hourly Sweep Runner",
-];
+function normalizeSymbol(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9.]/g, "");
+}
 
-const WATCHLISTS = [
-  "Scanner Watchlist",
-  "Manual Watchlist",
-  "Momentum",
-  "Premarket",
-];
+function positiveNumber(value: string): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
 
-export default function AutoTradeWidget({ symbol }: AutoTradeWidgetProps) {
-  const [status, setStatus] = useState<AutoTradeStatus>("stopped");
-  const [strategy, setStrategy] = useState(STRATEGIES[0]);
-  const [watchlist, setWatchlist] = useState(WATCHLISTS[0]);
+function formatPrice(value: unknown): string {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "—";
+  return `$${number.toFixed(number >= 1 ? 2 : 4)}`;
+}
 
-  const running = status === "running";
+function inputPrice(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return value.toFixed(value >= 1 ? 2 : 4);
+}
+
+function phaseLabel(phase: string): string {
+  switch (phase) {
+    case "entry_submitted":
+      return "Waiting for entry fill";
+    case "active_synthetic":
+      return "Server protection active";
+    case "exit_submitted":
+      return "Protective exit submitted";
+    default:
+      return phase ? phase.split("_").join(" ") : "Ready";
+  }
+}
+
+export default function AutoTradeWidget({
+  symbol,
+  currentPrice,
+  mode,
+}: AutoTradeWidgetProps) {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  const previousSymbolRef = useRef("");
+
+  const [sizingMode, setSizingMode] =
+    useState<AutoTradeSizingMode>("shares");
+  const [entryPrice, setEntryPrice] = useState(() => inputPrice(currentPrice));
+  const [stopPrice, setStopPrice] = useState("");
+  const [targetPrice, setTargetPrice] = useState("");
+  const [shares, setShares] = useState("100");
+  const [dollars, setDollars] = useState("500");
+  const [status, setStatus] = useState<AutoTradeStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (previousSymbolRef.current === normalizedSymbol) return;
+    previousSymbolRef.current = normalizedSymbol;
+    setEntryPrice(inputPrice(currentPrice));
+    setStopPrice("");
+    setTargetPrice("");
+    setMessage("");
+    setError("");
+  }, [currentPrice, normalizedSymbol]);
+
+  useEffect(() => {
+    let active = true;
+
+    const refresh = async () => {
+      try {
+        const next = await fetchAutoTradeStatus();
+        if (active) setStatus(next);
+      } catch {
+        // Keep the last known state during a temporary refresh failure.
+      }
+    };
+
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const runnerState = useMemo(() => {
+    if (!normalizedSymbol) return null;
+    return status?.runner_states?.[normalizedSymbol] ?? null;
+  }, [normalizedSymbol, status]);
+
+  const queuedPlan = useMemo(() => {
+    const plans = status?.queued_manual_plans ?? status?.manual_trade_plans ?? [];
+    return (
+      plans.find((item: any) => {
+        const payload = item?.payload ?? item ?? {};
+        const planSymbol = normalizeSymbol(item?.symbol ?? payload.symbol);
+        const strategyId = String(
+          item?.strategy_id ?? payload.strategy_id ?? "",
+        );
+        return (
+          planSymbol === normalizedSymbol &&
+          ["overnight_protected_order", "overnite_hail_mary"].includes(
+            strategyId,
+          )
+        );
+      }) ?? null
+    );
+  }, [normalizedSymbol, status]);
+
+  const workerOnline = Boolean(status?.running);
+  const currentPhase = String(runnerState?.phase ?? "");
+  const currentStatus = runnerState
+    ? phaseLabel(currentPhase)
+    : queuedPlan
+      ? "Queued for server worker"
+      : "Ready";
+
+  const submit = async () => {
+    setMessage("");
+    setError("");
+
+    const entry = positiveNumber(entryPrice);
+    const stop = positiveNumber(stopPrice);
+    const target = positiveNumber(targetPrice);
+    const qty = Math.floor(positiveNumber(shares));
+    const amount = positiveNumber(dollars);
+
+    if (!normalizedSymbol) {
+      setError("Select a valid symbol first.");
+      return;
+    }
+    if (!workerOnline) {
+      setError("The auto-trade worker is offline. Start it before placing this order.");
+      return;
+    }
+    if (!(stop < entry && entry < target)) {
+      setError("For a long order, prices must be Stop < Entry < Target.");
+      return;
+    }
+    if (sizingMode === "shares" && qty <= 0) {
+      setError("Enter a valid share quantity.");
+      return;
+    }
+    if (sizingMode === "dollars" && amount <= 0) {
+      setError("Enter a valid dollar amount.");
+      return;
+    }
+
+    if (
+      mode === "live" &&
+      !window.confirm(
+        `Place a LIVE protected overnight order for ${normalizedSymbol}? The server will manage the stop and target.`,
+      )
+    ) {
+      return;
+    }
+
+    setBusy(true);
+    try {
+      if (mode === "live" && !status?.config?.allow_live) {
+        await updateAutoTradeConfig({ allow_live: true });
+      }
+
+      const next = await queueOvernightProtectedOrder({
+        symbol: normalizedSymbol,
+        entry_price: entry,
+        stop_price: stop,
+        target_price: target,
+        mode,
+        sizing_mode: sizingMode,
+        qty: sizingMode === "shares" ? qty : undefined,
+        fixed_shares: sizingMode === "shares" ? qty : 0,
+        trade_amount: sizingMode === "shares" ? entry * qty : amount,
+        extended_hours: true,
+      });
+      setStatus(next);
+      setMessage(
+        `${normalizedSymbol} was queued. The server will submit the limit entry and activate protection after it fills.`,
+      );
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : "Unable to place the protected overnight order.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <section style={styles.card}>
       <div style={styles.top}>
         <div>
-          <div style={styles.kicker}>Automation</div>
-          <div style={styles.title}>Auto Trade</div>
+          <div style={styles.kicker}>Extended Hours</div>
+          <div style={styles.title}>Overnight Protected Order</div>
+          <div style={styles.subtitle}>
+            Limit entry with server-managed stop and target
+          </div>
         </div>
 
         <div
           style={{
             ...styles.statusBadge,
-            color: running ? "#22c55e" : "#94a3b8",
-            borderColor: running
+            color: workerOnline ? "#bbf7d0" : "#fecaca",
+            borderColor: workerOnline
               ? "rgba(34,197,94,.45)"
-              : "rgba(148,163,184,.25)",
-            background: running
-              ? "rgba(34,197,94,.12)"
-              : "rgba(15,23,42,.75)",
+              : "rgba(248,113,113,.45)",
+            background: workerOnline
+              ? "rgba(22,101,52,.18)"
+              : "rgba(127,29,29,.18)",
           }}
         >
-          {running ? "RUNNING" : "STOPPED"}
+          {workerOnline ? "WORKER ONLINE" : "WORKER OFFLINE"}
         </div>
       </div>
 
       <div style={styles.symbolStrip}>
-        <span>Active Symbol</span>
-        <strong>{symbol}</strong>
+        <span>Order</span>
+        <strong>{normalizedSymbol || "—"}</strong>
+        <span style={mode === "live" ? styles.liveMode : styles.paperMode}>
+          {mode.toUpperCase()}
+        </span>
       </div>
 
-      <label style={styles.field}>
-        <span>Strategy</span>
-        <select
-          value={strategy}
-          onChange={(event) => setStrategy(event.target.value)}
-          style={styles.select}
-        >
-          {STRATEGIES.map((item) => (
-            <option key={item} value={item}>
-              {item}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label style={styles.field}>
-        <span>Watchlist</span>
-        <select
-          value={watchlist}
-          onChange={(event) => setWatchlist(event.target.value)}
-          style={styles.select}
-        >
-          {WATCHLISTS.map((item) => (
-            <option key={item} value={item}>
-              {item}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <div style={styles.metrics}>
-        <Metric label="Trades Today" value="0" />
-        <Metric label="Active Positions" value="0" />
-        <Metric label="Last Trade" value="—" />
-        <Metric label="Last Scan" value="—" />
-        <Metric label="Next Scan" value="45s" />
-        <Metric label="Mode" value="Paper" />
+      <div style={styles.statusPanel}>
+        <div>
+          <span style={styles.statusLabel}>Status</span>
+          <strong style={styles.statusValue}>{currentStatus}</strong>
+        </div>
+        <div>
+          <span style={styles.statusLabel}>Poll</span>
+          <strong style={styles.statusValue}>
+            {status?.config?.poll_seconds ?? 10}s
+          </strong>
+        </div>
       </div>
 
-      <div style={styles.actions}>
+      <div style={styles.grid3}>
+        <Field label="Entry Limit">
+          <input
+            value={entryPrice}
+            onChange={(event) => setEntryPrice(event.target.value)}
+            inputMode="decimal"
+            placeholder="0.00"
+            style={styles.input}
+          />
+        </Field>
+        <Field label="Stop Price">
+          <input
+            value={stopPrice}
+            onChange={(event) => setStopPrice(event.target.value)}
+            inputMode="decimal"
+            placeholder="0.00"
+            style={styles.input}
+          />
+        </Field>
+        <Field label="Target Price">
+          <input
+            value={targetPrice}
+            onChange={(event) => setTargetPrice(event.target.value)}
+            inputMode="decimal"
+            placeholder="0.00"
+            style={styles.input}
+          />
+        </Field>
+      </div>
+
+      <div style={styles.sizingRow}>
         <button
           type="button"
-          onClick={() => setStatus(running ? "stopped" : "running")}
+          onClick={() => setSizingMode("shares")}
           style={{
-            ...styles.primaryButton,
-            background: running
-              ? "rgba(127,29,29,.22)"
-              : "rgba(22,163,74,.18)",
-            borderColor: running
-              ? "rgba(248,113,113,.4)"
-              : "rgba(34,197,94,.4)",
-            color: running ? "#fecaca" : "#bbf7d0",
+            ...styles.modeButton,
+            ...(sizingMode === "shares" ? styles.modeButtonActive : {}),
           }}
         >
-          {running ? "Stop" : "Start"}
+          Shares
         </button>
-
-        <button type="button" style={styles.secondaryButton}>
-          Settings
+        <button
+          type="button"
+          onClick={() => setSizingMode("dollars")}
+          style={{
+            ...styles.modeButton,
+            ...(sizingMode === "dollars" ? styles.modeButtonActive : {}),
+          }}
+        >
+          Dollars
         </button>
       </div>
+
+      {sizingMode === "shares" ? (
+        <Field label="Share Quantity">
+          <input
+            value={shares}
+            onChange={(event) => setShares(event.target.value)}
+            inputMode="numeric"
+            placeholder="100"
+            style={styles.input}
+          />
+        </Field>
+      ) : (
+        <Field label="Dollar Amount">
+          <input
+            value={dollars}
+            onChange={(event) => setDollars(event.target.value)}
+            inputMode="decimal"
+            placeholder="500"
+            style={styles.input}
+          />
+        </Field>
+      )}
+
+      {runnerState && (
+        <div style={styles.protectionGrid}>
+          <Metric label="Qty" value={String(runnerState.filled_qty ?? runnerState.qty ?? "—")} />
+          <Metric label="Entry" value={formatPrice(runnerState.entry_price)} />
+          <Metric label="Stop" value={formatPrice(runnerState.stop_price)} />
+          <Metric label="Target" value={formatPrice(runnerState.target_price)} />
+        </div>
+      )}
+
+      {!workerOnline && (
+        <div style={styles.warning}>
+          No order will be accepted while the protection worker is offline.
+        </div>
+      )}
+      {message && <div style={styles.success}>{message}</div>}
+      {error && <div style={styles.error}>{error}</div>}
+
+      <button
+        type="button"
+        onClick={() => void submit()}
+        disabled={busy || !workerOnline}
+        style={{
+          ...styles.submitButton,
+          opacity: busy || !workerOnline ? 0.5 : 1,
+          cursor: busy || !workerOnline ? "not-allowed" : "pointer",
+        }}
+      >
+        {busy ? "Queuing Order…" : "Place Protected Overnight Order"}
+      </button>
+
+      <div style={styles.footnote}>
+        Protection starts only after the entry fills. Overnight exits are limit
+        orders managed and verified by the server.
+      </div>
     </section>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <label style={styles.field}>
+      <span>{label}</span>
+      {children}
+    </label>
   );
 }
 
@@ -132,108 +398,188 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
   card: {
-    border: "1px solid rgba(148, 163, 184, 0.22)",
-    borderRadius: 18,
+    border: "1px solid rgba(96,165,250,.26)",
+    borderRadius: 16,
     background:
-      "linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(2, 6, 23, 0.96))",
+      "linear-gradient(180deg, rgba(15,23,42,.98), rgba(2,6,23,.98))",
     padding: 14,
-    boxShadow: "0 20px 50px rgba(0,0,0,.22)",
+    display: "grid",
+    gap: 11,
   },
   top: {
     display: "flex",
     justifyContent: "space-between",
+    alignItems: "flex-start",
     gap: 10,
-    marginBottom: 12,
   },
   kicker: {
+    color: "#60a5fa",
     fontSize: 10,
-    color: "#94a3b8",
-    textTransform: "uppercase",
+    fontWeight: 900,
     letterSpacing: 0.9,
+    textTransform: "uppercase",
   },
   title: {
+    color: "#f8fafc",
     fontSize: 16,
-    fontWeight: 900,
+    fontWeight: 950,
+    marginTop: 2,
+  },
+  subtitle: {
+    color: "#94a3b8",
+    fontSize: 11,
+    marginTop: 3,
   },
   statusBadge: {
     border: "1px solid",
     borderRadius: 999,
-    padding: "6px 10px",
-    fontSize: 11,
-    fontWeight: 900,
-    height: "fit-content",
+    padding: "5px 8px",
+    fontSize: 9,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
   },
   symbolStrip: {
-    display: "flex",
-    justifyContent: "space-between",
+    display: "grid",
+    gridTemplateColumns: "auto 1fr auto",
     alignItems: "center",
+    gap: 8,
     border: "1px solid rgba(148,163,184,.16)",
     background: "rgba(2,6,23,.65)",
-    borderRadius: 12,
-    padding: "9px 10px",
-    marginBottom: 10,
+    borderRadius: 10,
+    padding: "8px 10px",
     color: "#94a3b8",
-    fontSize: 12,
+    fontSize: 11,
+  },
+  paperMode: {
+    color: "#bfdbfe",
+    fontSize: 10,
+    fontWeight: 950,
+  },
+  liveMode: {
+    color: "#fecaca",
+    fontSize: 10,
+    fontWeight: 950,
+  },
+  statusPanel: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto",
+    gap: 10,
+    border: "1px solid rgba(34,197,94,.18)",
+    background: "rgba(20,83,45,.10)",
+    borderRadius: 10,
+    padding: "9px 10px",
+  },
+  statusLabel: {
+    display: "block",
+    color: "#94a3b8",
+    fontSize: 9,
+    fontWeight: 900,
+    textTransform: "uppercase",
+  },
+  statusValue: {
+    color: "#e2e8f0",
+    fontSize: 11,
+  },
+  grid3: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: 7,
   },
   field: {
     display: "grid",
     gap: 5,
-    marginBottom: 10,
     color: "#94a3b8",
-    fontSize: 11,
-    fontWeight: 800,
+    fontSize: 10,
+    fontWeight: 850,
   },
-  select: {
+  input: {
     width: "100%",
+    height: 34,
     boxSizing: "border-box",
-    background: "rgba(2,6,23,.95)",
     border: "1px solid rgba(148,163,184,.24)",
-    borderRadius: 11,
-    color: "#e5e7eb",
-    padding: "9px 10px",
+    background: "rgba(2,6,23,.9)",
+    color: "#f8fafc",
+    borderRadius: 9,
+    padding: "0 9px",
     outline: "none",
     fontSize: 12,
-    fontWeight: 800,
+    fontWeight: 850,
   },
-  metrics: {
+  sizingRow: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
-    gap: 8,
+    gap: 7,
+  },
+  modeButton: {
+    height: 31,
+    border: "1px solid rgba(148,163,184,.18)",
+    background: "rgba(15,23,42,.72)",
+    color: "#94a3b8",
+    borderRadius: 9,
+    fontSize: 10,
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  modeButtonActive: {
+    borderColor: "rgba(96,165,250,.55)",
+    background: "rgba(37,99,235,.20)",
+    color: "#dbeafe",
+  },
+  protectionGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: 6,
   },
   metric: {
     display: "grid",
-    gap: 3,
-    border: "1px solid rgba(148,163,184,.16)",
-    background: "rgba(15,23,42,.72)",
-    borderRadius: 12,
-    padding: "9px 10px",
-    fontSize: 11,
+    gap: 2,
+    border: "1px solid rgba(148,163,184,.14)",
+    borderRadius: 9,
+    padding: "7px 8px",
     color: "#94a3b8",
+    fontSize: 9,
   },
-  actions: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 8,
-    marginTop: 12,
+  warning: {
+    border: "1px solid rgba(250,204,21,.30)",
+    background: "rgba(113,63,18,.18)",
+    color: "#fde68a",
+    borderRadius: 9,
+    padding: 9,
+    fontSize: 10,
+    fontWeight: 800,
   },
-  primaryButton: {
-    border: "1px solid",
-    borderRadius: 12,
-    padding: "10px",
+  success: {
+    border: "1px solid rgba(34,197,94,.28)",
+    background: "rgba(20,83,45,.18)",
+    color: "#bbf7d0",
+    borderRadius: 9,
+    padding: 9,
+    fontSize: 10,
+    fontWeight: 800,
+  },
+  error: {
+    border: "1px solid rgba(248,113,113,.32)",
+    background: "rgba(127,29,29,.20)",
+    color: "#fecaca",
+    borderRadius: 9,
+    padding: 9,
+    fontSize: 10,
+    fontWeight: 800,
+  },
+  submitButton: {
+    height: 38,
+    border: "1px solid rgba(34,197,94,.45)",
+    background: "rgba(22,101,52,.92)",
+    color: "#ffffff",
+    borderRadius: 10,
     fontSize: 11,
-    fontWeight: 900,
-    cursor: "pointer",
+    fontWeight: 950,
   },
-  secondaryButton: {
-    border: "1px solid rgba(96,165,250,.35)",
-    background: "rgba(37,99,235,.16)",
-    color: "#bfdbfe",
-    borderRadius: 12,
-    padding: "10px",
-    fontSize: 11,
-    fontWeight: 900,
-    cursor: "pointer",
+  footnote: {
+    color: "#64748b",
+    fontSize: 9,
+    lineHeight: 1.45,
   },
 };
