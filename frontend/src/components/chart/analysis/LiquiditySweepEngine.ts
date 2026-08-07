@@ -108,9 +108,16 @@ function clusterCandidates(
     );
 
     if (matching) {
+      /**
+       * A liquidity pool must be swept beyond the true outside edge of the
+       * repeated highs/lows, not an averaged price inside the cluster.
+       * Averaging could print an LS even when price never actually took the
+       * highest high / lowest low that created the pool.
+       */
       matching.price =
-        (matching.price * matching.touches + candidate.price) /
-        (matching.touches + 1);
+        matching.side === "buy-side"
+          ? Math.max(matching.price, candidate.price)
+          : Math.min(matching.price, candidate.price);
       matching.touches += 1;
       matching.lastTouchIndex = candidate.index;
     } else {
@@ -162,13 +169,21 @@ function eventForBar(
 ): LiquidityEvent | undefined {
   if (barIndex <= pool.lastTouchIndex) return undefined;
 
-  // A real sweep must move meaningfully through the pool and then close a
-  // meaningful distance back inside it. This filters tiny one-tick pokes.
-  const minimumPenetration = Math.max(tolerance, atr * 0.08);
-  const minimumReclaim = Math.max(tolerance * 0.5, atr * 0.04);
+  // An LS label should represent a visually clear rejection, not a tiny poke.
+  // Price must take the TRUE outside edge of the pool, penetrate it by a
+  // meaningful amount, then close clearly back inside with a visible wick.
+  const minimumPenetration = Math.max(tolerance, atr * 0.16);
+  const minimumReclaim = Math.max(tolerance * 0.75, atr * 0.08);
+  const minimumWick = Math.max(tolerance * 0.5, atr * 0.06);
+  const bodyHigh = Math.max(bar.open, bar.close);
+  const bodyLow = Math.min(bar.open, bar.close);
+  const upperWick = Math.max(0, bar.high - bodyHigh);
+  const lowerWick = Math.max(0, bodyLow - bar.low);
 
   if (pool.side === "buy-side" && bar.high >= pool.price + minimumPenetration) {
-    const reclaimed = bar.close <= pool.price - minimumReclaim;
+    const reclaimed =
+      bar.close <= pool.price - minimumReclaim &&
+      upperWick >= minimumWick;
     const broken = bar.close > pool.price;
     if (!reclaimed && !broken) return undefined;
     return {
@@ -184,7 +199,9 @@ function eventForBar(
   }
 
   if (pool.side === "sell-side" && bar.low <= pool.price - minimumPenetration) {
-    const reclaimed = bar.close >= pool.price + minimumReclaim;
+    const reclaimed =
+      bar.close >= pool.price + minimumReclaim &&
+      lowerWick >= minimumWick;
     const broken = bar.close < pool.price;
     if (!reclaimed && !broken) return undefined;
     return {

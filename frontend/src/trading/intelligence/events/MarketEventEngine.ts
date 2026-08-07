@@ -473,6 +473,107 @@ function detectStructureEvents(current: MarketContextSnapshot, previous?: Market
     }
   }
 
+  /**
+   * higherHighs/lowerLows are regime flags in ChartState: once a bearish
+   * sequence is active, lowerLows stays true. Detect changes in the protected
+   * swing prices too so every newly confirmed LL/LH (or HH/HL) can become a
+   * fresh intelligence event instead of only the first one in the sequence.
+   */
+  if (prior) {
+    const levelChanged = (
+      currentLevel: number | undefined,
+      previousLevel: number | undefined,
+      comparison: "higher" | "lower",
+    ): boolean => {
+      if (!finite(currentLevel) || !finite(previousLevel)) return false;
+      const epsilon = Math.max(1e-8, Math.abs(previousLevel) * 1e-8);
+      return comparison === "higher"
+        ? currentLevel > previousLevel + epsilon
+        : currentLevel < previousLevel - epsilon;
+    };
+
+    const repeatedConfirmations: Array<{
+      active: boolean | undefined;
+      wasActive: boolean | undefined;
+      currentLevel: number | undefined;
+      previousLevel: number | undefined;
+      comparison: "higher" | "lower";
+      type: MarketEventType;
+      title: string;
+      direction: MarketContextDirection;
+    }> = [
+      {
+        active: structure?.higherHighs,
+        wasActive: prior?.higherHighs,
+        currentLevel: structure?.lastSwingHigh,
+        previousLevel: prior?.lastSwingHigh,
+        comparison: "higher",
+        type: "higher-high-confirmed",
+        title: "Higher High Confirmed",
+        direction: "bullish",
+      },
+      {
+        active: structure?.higherLows,
+        wasActive: prior?.higherLows,
+        currentLevel: structure?.lastSwingLow,
+        previousLevel: prior?.lastSwingLow,
+        comparison: "higher",
+        type: "higher-low-confirmed",
+        title: "Higher Low Confirmed",
+        direction: "bullish",
+      },
+      {
+        active: structure?.lowerHighs,
+        wasActive: prior?.lowerHighs,
+        currentLevel: structure?.lastSwingHigh,
+        previousLevel: prior?.lastSwingHigh,
+        comparison: "lower",
+        type: "lower-high-confirmed",
+        title: "Lower High Confirmed",
+        direction: "bearish",
+      },
+      {
+        active: structure?.lowerLows,
+        wasActive: prior?.lowerLows,
+        currentLevel: structure?.lastSwingLow,
+        previousLevel: prior?.lastSwingLow,
+        comparison: "lower",
+        type: "lower-low-confirmed",
+        title: "Lower Low Confirmed",
+        direction: "bearish",
+      },
+    ];
+
+    for (const item of repeatedConfirmations) {
+      if (
+        item.active &&
+        item.wasActive &&
+        levelChanged(
+          item.currentLevel,
+          item.previousLevel,
+          item.comparison,
+        )
+      ) {
+        drafts.push({
+          category: "structure",
+          type: item.type,
+          title: item.title,
+          description: `${item.title} at ${item.currentLevel?.toFixed(2)} within the active ${item.direction} market structure sequence.`,
+          direction: item.direction,
+          confidence,
+          importance: "high",
+          price: item.currentLevel,
+          level: item.currentLevel,
+          previousValue: item.previousLevel,
+          currentValue: item.currentLevel,
+          sourceComponentIds: ["market-structure"],
+          evidenceIds,
+          tags: ["structure", item.type, item.direction, "new-swing"],
+        });
+      }
+    }
+  }
+
   return drafts;
 }
 
