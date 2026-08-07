@@ -221,6 +221,54 @@ function normalizeDirection(
   return direction ?? "neutral";
 }
 
+/**
+ * ChartState.structure.strength is a directional 0-100 score:
+ *   100 = strongly bullish, 50 = neutral, 0 = strongly bearish.
+ *
+ * Intelligence scores are quality/conviction scores, with direction carried
+ * separately. Mirror bearish values so a strong bearish structure (for
+ * example 15) becomes strong conviction (85) instead of being mistaken for
+ * weak/unconfirmed structure.
+ */
+function intelligenceStructureScore(
+  direction: MarketContextDirection,
+  directionalScore: number | undefined,
+): number | undefined {
+  if (!finite(directionalScore)) return undefined;
+
+  const score = Math.max(0, Math.min(100, directionalScore));
+
+  if (direction === "bearish") return 100 - score;
+  if (direction === "bullish") return score;
+  return 50;
+}
+
+function intelligenceStructureConfidence(
+  chartState: ChartState,
+  direction: MarketContextDirection,
+  convictionScore: number | undefined,
+): number | undefined {
+  const confirmedBullish =
+    direction === "bullish" &&
+    chartState.structure.higherHighs === true &&
+    chartState.structure.higherLows === true;
+
+  const confirmedBearish =
+    direction === "bearish" &&
+    chartState.structure.lowerHighs === true &&
+    chartState.structure.lowerLows === true;
+
+  if (confirmedBullish || confirmedBearish) {
+    return Math.max(0.82, Math.min(0.95, (convictionScore ?? 82) / 100));
+  }
+
+  if (direction !== "neutral") {
+    return Math.max(0.65, Math.min(0.85, (convictionScore ?? 65) / 100));
+  }
+
+  return finite(convictionScore) ? 0.5 : undefined;
+}
+
 export function buildMarketIntelligenceRequestFromChartState(
   chartState: ChartState,
   options: ChartStateIntelligenceAdapterOptions = {},
@@ -256,6 +304,16 @@ export function buildMarketIntelligenceRequestFromChartState(
     swingLow: chartState.structure.lastSwingLow ?? chartState.structure.swingLow,
   });
   const liquidityEvent = liquidity.latestEvent;
+  const structureDirection = normalizeDirection(chartState.structure.trend);
+  const structureScore = intelligenceStructureScore(
+    structureDirection,
+    chartState.structure.strength,
+  );
+  const structureConfidence = intelligenceStructureConfidence(
+    chartState,
+    structureDirection,
+    structureScore,
+  );
 
   return {
     contextRequest: {
@@ -314,15 +372,10 @@ export function buildMarketIntelligenceRequestFromChartState(
         },
 
         structure: {
-          direction: normalizeDirection(chartState.structure.trend),
-          trend: normalizeDirection(chartState.structure.trend),
-          score: chartState.structure.strength,
-          confidence: finite(chartState.structure.strength)
-            ? Math.min(
-                1,
-                Math.max(0, chartState.structure.strength / 100),
-              )
-            : undefined,
+          direction: structureDirection,
+          trend: structureDirection,
+          score: structureScore,
+          confidence: structureConfidence,
           breakOfStructure: chartState.structure.bos,
           changeOfCharacter: chartState.structure.choch,
           higherHighs: chartState.structure.higherHighs,
@@ -345,7 +398,7 @@ export function buildMarketIntelligenceRequestFromChartState(
           momentumScore: chartState.momentum.score,
           compressionScore: chartState.compression.score,
           relativeVolume,
-          trendStrengthScore: chartState.structure.strength,
+          trendStrengthScore: structureScore,
           participationScore: finite(relativeVolume)
             ? Math.min(100, Math.max(0, relativeVolume * 50))
             : undefined,
