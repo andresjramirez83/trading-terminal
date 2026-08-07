@@ -14,8 +14,6 @@ import type { ChartState } from "../../../components/chart/ChartState";
 import type { CleanBar } from "../../../components/chart/ChartTypes";
 import { analyzeLiquidity } from "../../../components/chart/analysis/LiquiditySweepEngine";
 import { buildMarketStructure } from "../../../components/chart/analysis/MarketStructureEngine";
-import { buildAutomaticDemandZones } from "../../../components/chart/DemandZoneEngine";
-import { buildAutomaticSupplyZones } from "../../../components/chart/SupplyZoneEngine";
 import type {
   IntelligenceConsumer,
   MarketIntelligenceReport,
@@ -303,20 +301,10 @@ export function buildMarketIntelligenceRequestFromChartState(
       ? lastBar.volume / averageVolume
       : undefined);
   const automaticStructure = buildMarketStructure(chartState.bars);
-  const automaticDemandZones = buildAutomaticDemandZones(chartState.bars, {
-    structure: automaticStructure,
-    includeReversalZones: true,
-    maxZones: 24,
-  });
-  const automaticSupplyZones = buildAutomaticSupplyZones(chartState.bars, {
-    structure: automaticStructure,
-    maxZones: 24,
-  });
   const liquidity = analyzeLiquidity(chartState.bars, {
     swingHigh: chartState.structure.lastSwingHigh ?? chartState.structure.swingHigh,
     swingLow: chartState.structure.lastSwingLow ?? chartState.structure.swingLow,
-    demandZones: automaticDemandZones,
-    supplyZones: automaticSupplyZones,
+    points: automaticStructure.points,
   });
   const liquidityEvent = liquidity.latestEvent;
   const structureDirection = normalizeDirection(chartState.structure.trend);

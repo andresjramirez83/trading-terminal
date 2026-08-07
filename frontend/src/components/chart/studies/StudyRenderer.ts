@@ -15,7 +15,6 @@ import {
 } from "./StructureStudy";
 import { analyzeLiquidity, type LiquidityEvent } from "../analysis/LiquiditySweepEngine";
 import { buildMarketStructure } from "../analysis/MarketStructureEngine";
-import { buildAutomaticSupplyZones } from "../SupplyZoneEngine";
 import {
   buildAutomaticDemandZones,
   type AutomaticDemandZone,
@@ -341,11 +340,6 @@ export class StudyRenderer {
           maxZones: 24,
         })
       : [];
-    const detectedSupplyZones = buildAutomaticSupplyZones(context.bars, {
-      structure,
-      maxZones: 24,
-    });
-
     /**
      * Keep invalidated zones for historical chart rendering. Downstream study
      * consumers still receive active zones only.
@@ -371,8 +365,7 @@ export class StudyRenderer {
     this.liquiditySweepEvents = analyzeLiquidity(context.bars, {
       swingHigh: structure.swingHigh,
       swingLow: structure.swingLow,
-      demandZones: detectedDemandZones,
-      supplyZones: detectedSupplyZones,
+      points: structure.points,
     }).sweepEvents.slice(-80);
 
     this.scheduleOverlayRender();
