@@ -9,6 +9,7 @@ export interface LiquidityPool {
   touches: number;
   firstTouchIndex: number;
   lastTouchIndex: number;
+  establishedIndex: number;
   source: "repeated-touch" | "structure";
 }
 
@@ -18,7 +19,10 @@ export interface LiquidityEvent {
   direction: "bullish" | "bearish";
   price: number;
   touches: number;
+  /** Bar where the actual sweep extreme happened. */
   barIndex: number;
+  /** Bar where the return/hold was confirmed. */
+  confirmationBarIndex?: number;
   reclaimed: boolean;
   source: LiquidityPool["source"];
 }
@@ -43,6 +47,7 @@ const MIN_TOUCHES = 2;
 const MIN_TOUCH_SEPARATION = 3;
 const PIVOT_STRENGTH = 2;
 const EVENT_PERSISTENCE_BARS = 6;
+const HOLD_CONFIRM_BARS = 2;
 
 function finite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -69,6 +74,32 @@ function averageTrueRange(bars: readonly CleanBar[], length = 14): number {
 function toleranceFor(bars: readonly CleanBar[]): number {
   const price = Math.abs(bars.at(-1)?.close ?? 0);
   return Math.max(0.0001, price * 0.0005, averageTrueRange(bars) * 0.12);
+}
+
+function inferredBarMinutes(bars: readonly CleanBar[]): number {
+  const samples: number[] = [];
+  const start = Math.max(1, bars.length - 30);
+
+  for (let index = start; index < bars.length; index += 1) {
+    const current = Number(bars[index].time);
+    const previous = Number(bars[index - 1].time);
+    if (!Number.isFinite(current) || !Number.isFinite(previous)) continue;
+
+    // Lightweight Charts time values are normally epoch seconds here.
+    const minutes = Math.abs(current - previous) / 60;
+    if (minutes > 0 && minutes <= 1440) samples.push(minutes);
+  }
+
+  if (samples.length === 0) return 5;
+  samples.sort((left, right) => left - right);
+  return samples[Math.floor(samples.length / 2)] ?? 5;
+}
+
+function reclaimWindowBars(bars: readonly CleanBar[]): number {
+  // Give a 5-minute chart roughly 90 minutes to return to the swept support/
+  // resistance, while keeping very fast and slow timeframes bounded.
+  const minutes = Math.max(1, inferredBarMinutes(bars));
+  return Math.max(6, Math.min(24, Math.round(90 / minutes)));
 }
 
 function isPivotHigh(bars: readonly CleanBar[], index: number): boolean {
@@ -108,18 +139,17 @@ function clusterCandidates(
     );
 
     if (matching) {
-      /**
-       * A liquidity pool must be swept beyond the true outside edge of the
-       * repeated highs/lows, not an averaged price inside the cluster.
-       * Averaging could print an LS even when price never actually took the
-       * highest high / lowest low that created the pool.
-       */
+      // Keep the true outside edge of the support/resistance cluster so a
+      // sweep must actually take liquidity beyond the protected area.
       matching.price =
         matching.side === "buy-side"
           ? Math.max(matching.price, candidate.price)
           : Math.min(matching.price, candidate.price);
       matching.touches += 1;
       matching.lastTouchIndex = candidate.index;
+      if (matching.touches === MIN_TOUCHES) {
+        matching.establishedIndex = candidate.index;
+      }
     } else {
       pools.push({
         side: candidate.side,
@@ -127,6 +157,7 @@ function clusterCandidates(
         touches: 1,
         firstTouchIndex: candidate.index,
         lastTouchIndex: candidate.index,
+        establishedIndex: candidate.index,
         source: "repeated-touch",
       });
     }
@@ -150,89 +181,186 @@ function addStructurePool(
     existing.source = "structure";
     return;
   }
+
+  const establishedIndex = Math.max(0, lastBarIndex - EVENT_PERSISTENCE_BARS);
   pools.push({
     side,
     price,
     touches: 1,
-    firstTouchIndex: Math.max(0, lastBarIndex - EVENT_PERSISTENCE_BARS),
-    lastTouchIndex: Math.max(0, lastBarIndex - EVENT_PERSISTENCE_BARS),
+    firstTouchIndex: establishedIndex,
+    lastTouchIndex: establishedIndex,
+    establishedIndex,
     source: "structure",
   });
 }
 
-function eventForBar(
-  pool: LiquidityPool,
+function significantRejectionWick(
   bar: CleanBar,
-  barIndex: number,
+  side: LiquiditySide,
   tolerance: number,
   atr: number,
-): LiquidityEvent | undefined {
-  if (barIndex <= pool.lastTouchIndex) return undefined;
+): boolean {
+  const range = Math.max(0, bar.high - bar.low);
+  if (range <= 0) return false;
 
-  // An LS label should represent a visually clear rejection, not a tiny poke.
-  // Price must take the TRUE outside edge of the pool, penetrate it by a
-  // meaningful amount, then close clearly back inside with a visible wick.
-  const minimumPenetration = Math.max(tolerance, atr * 0.16);
-  const minimumReclaim = Math.max(tolerance * 0.75, atr * 0.08);
-  const minimumWick = Math.max(tolerance * 0.5, atr * 0.06);
   const bodyHigh = Math.max(bar.open, bar.close);
   const bodyLow = Math.min(bar.open, bar.close);
-  const upperWick = Math.max(0, bar.high - bodyHigh);
-  const lowerWick = Math.max(0, bodyLow - bar.low);
+  const body = Math.max(0, bodyHigh - bodyLow);
+  const wick =
+    side === "sell-side"
+      ? Math.max(0, bodyLow - bar.low)
+      : Math.max(0, bar.high - bodyHigh);
 
-  if (pool.side === "buy-side" && bar.high >= pool.price + minimumPenetration) {
-    const reclaimed =
-      bar.close <= pool.price - minimumReclaim &&
-      upperWick >= minimumWick;
-    const broken = bar.close > pool.price;
-    if (!reclaimed && !broken) return undefined;
-    return {
-      type: reclaimed ? "sweep" : "break",
-      side: pool.side,
-      direction: reclaimed ? "bearish" : "bullish",
-      price: pool.price,
-      touches: pool.touches,
-      barIndex,
-      reclaimed,
-      source: pool.source,
-    };
-  }
+  const minimumAbsoluteWick = Math.max(tolerance, atr * 0.12);
 
-  if (pool.side === "sell-side" && bar.low <= pool.price - minimumPenetration) {
-    const reclaimed =
-      bar.close >= pool.price + minimumReclaim &&
-      lowerWick >= minimumWick;
-    const broken = bar.close < pool.price;
-    if (!reclaimed && !broken) return undefined;
-    return {
-      type: reclaimed ? "sweep" : "break",
-      side: pool.side,
-      direction: reclaimed ? "bullish" : "bearish",
-      price: pool.price,
-      touches: pool.touches,
-      barIndex,
-      reclaimed,
-      source: pool.source,
-    };
-  }
-
-  return undefined;
+  return (
+    wick >= minimumAbsoluteWick &&
+    wick / range >= 0.4 &&
+    wick >= Math.max(body * 1.2, tolerance)
+  );
 }
 
-function firstEventForPool(
+function returnedNearPool(
+  bar: CleanBar,
+  pool: LiquidityPool,
+  returnTolerance: number,
+): boolean {
+  return pool.side === "sell-side"
+    ? bar.close >= pool.price - returnTolerance
+    : bar.close <= pool.price + returnTolerance;
+}
+
+function heldReturnedPool(
+  bars: readonly CleanBar[],
+  pool: LiquidityPool,
+  returnBarIndex: number,
+  holdTolerance: number,
+): number | undefined {
+  const confirmationIndex = returnBarIndex + HOLD_CONFIRM_BARS;
+  if (confirmationIndex >= bars.length) return undefined;
+
+  for (let index = returnBarIndex + 1; index <= confirmationIndex; index += 1) {
+    const close = bars[index].close;
+    if (
+      (pool.side === "sell-side" && close < pool.price - holdTolerance) ||
+      (pool.side === "buy-side" && close > pool.price + holdTolerance)
+    ) {
+      return undefined;
+    }
+  }
+
+  return confirmationIndex;
+}
+
+function eventsForPool(
   pool: LiquidityPool,
   bars: readonly CleanBar[],
   lastBarIndex: number,
   tolerance: number,
   atr: number,
-): LiquidityEvent | undefined {
-  // Liquidity is consumed by its first decisive breach. Never reuse the same
-  // pool to print LS labels on later candles.
-  for (let index = pool.lastTouchIndex + 1; index <= lastBarIndex; index += 1) {
-    const event = eventForBar(pool, bars[index], index, tolerance, atr);
-    if (event) return event;
+): LiquidityEvent[] {
+  const events: LiquidityEvent[] = [];
+  const minimumPenetration = Math.max(tolerance, atr * 0.08);
+  const returnTolerance = Math.max(tolerance * 1.5, atr * 0.25);
+  const holdTolerance = Math.max(tolerance * 2, atr * 0.35);
+  const maxReclaimBars = reclaimWindowBars(bars);
+
+  let index = Math.max(pool.establishedIndex + 1, 0);
+
+  while (index <= lastBarIndex) {
+    const bar = bars[index];
+    const penetrated =
+      pool.side === "sell-side"
+        ? bar.low <= pool.price - minimumPenetration
+        : bar.high >= pool.price + minimumPenetration;
+
+    if (!penetrated) {
+      index += 1;
+      continue;
+    }
+
+    const excursionStart = index;
+    let extremeIndex = index;
+    let confirmedSweep = false;
+    const searchEnd = Math.min(lastBarIndex, excursionStart + maxReclaimBars);
+
+    for (let cursor = excursionStart; cursor <= searchEnd; cursor += 1) {
+      const current = bars[cursor];
+
+      if (
+        (pool.side === "sell-side" &&
+          current.low < bars[extremeIndex].low) ||
+        (pool.side === "buy-side" &&
+          current.high > bars[extremeIndex].high)
+      ) {
+        extremeIndex = cursor;
+      }
+
+      if (!returnedNearPool(current, pool, returnTolerance)) continue;
+
+      // A one-candle sweep is valid only when the wick itself is obvious.
+      // Multi-candle sweeps do not need a giant wick; the reclaim back to the
+      // prior support/resistance and subsequent hold is the confirmation.
+      if (
+        cursor === excursionStart &&
+        !significantRejectionWick(current, pool.side, tolerance, atr)
+      ) {
+        continue;
+      }
+
+      const confirmationBarIndex = heldReturnedPool(
+        bars,
+        pool,
+        cursor,
+        holdTolerance,
+      );
+      if (confirmationBarIndex == null) continue;
+
+      events.push({
+        type: "sweep",
+        side: pool.side,
+        direction: pool.side === "sell-side" ? "bullish" : "bearish",
+        price: pool.price,
+        touches: pool.touches,
+        barIndex: extremeIndex,
+        confirmationBarIndex,
+        reclaimed: true,
+        source: pool.source,
+      });
+
+      // The same support/resistance can produce another later sweep after the
+      // first reclaim has held. Resume scanning after the hold confirmation.
+      index = confirmationBarIndex + 1;
+      confirmedSweep = true;
+      break;
+    }
+
+    if (confirmedSweep) continue;
+
+    // Do not call a fresh penetration a break immediately. Give price the
+    // reclaim window first. If the window completes with no return/hold, then
+    // the level was accepted through rather than swept.
+    if (excursionStart + maxReclaimBars <= lastBarIndex) {
+      events.push({
+        type: "break",
+        side: pool.side,
+        direction: pool.side === "sell-side" ? "bearish" : "bullish",
+        price: pool.price,
+        touches: pool.touches,
+        barIndex: extremeIndex,
+        confirmationBarIndex: excursionStart + maxReclaimBars,
+        reclaimed: false,
+        source: pool.source,
+      });
+      break;
+    }
+
+    // Current data ends before the reclaim window is complete. Leave this as
+    // an unconfirmed candidate instead of printing a false LS/break.
+    break;
   }
-  return undefined;
+
+  return events;
 }
 
 export function analyzeLiquidity(
@@ -270,19 +398,27 @@ export function analyzeLiquidity(
   addStructurePool(pools, "buy-side", structure.swingHigh, lastBarIndex, tolerance);
   addStructurePool(pools, "sell-side", structure.swingLow, lastBarIndex, tolerance);
 
-  const firstEvents = pools
-    .map((pool) => firstEventForPool(pool, bars, lastBarIndex, tolerance, atr))
-    .filter((event): event is LiquidityEvent => Boolean(event));
+  const allEvents = pools.flatMap((pool) =>
+    eventsForPool(pool, bars, lastBarIndex, tolerance, atr),
+  );
 
   const eventStart = Math.max(0, lastBarIndex - EVENT_PERSISTENCE_BARS + 1);
-  const latestEvent = firstEvents
-    .filter((event) => event.barIndex >= eventStart)
-    .sort((left, right) => right.barIndex - left.barIndex)[0];
+  const latestEvent = allEvents
+    .filter(
+      (event) =>
+        (event.confirmationBarIndex ?? event.barIndex) >= eventStart,
+    )
+    .sort(
+      (left, right) =>
+        (right.confirmationBarIndex ?? right.barIndex) -
+        (left.confirmationBarIndex ?? left.barIndex),
+    )[0];
 
-  // Nearby pools can describe the same liquidity. Keep only the strongest
-  // sweep for each candle and side so the chart never stacks duplicate LS tags.
+  // Nearby pools can describe the same liquidity move. Keep only the strongest
+  // LS for each actual sweep candle and side while still allowing a later,
+  // separate sweep of the same support/resistance.
   const deduplicatedSweeps = new Map<string, LiquidityEvent>();
-  for (const event of firstEvents) {
+  for (const event of allEvents) {
     if (event.type !== "sweep") continue;
     const key = `${event.barIndex}:${event.side}`;
     const existing = deduplicatedSweeps.get(key);
@@ -298,7 +434,6 @@ export function analyzeLiquidity(
   }
 
   const sweepEvents = [...deduplicatedSweeps.values()];
-
   sweepEvents.sort((left, right) => left.barIndex - right.barIndex);
 
   const currentPrice = bars[lastBarIndex].close;
