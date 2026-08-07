@@ -371,7 +371,6 @@ export class StudyRenderer {
     this.liquiditySweepEvents = analyzeLiquidity(context.bars, {
       swingHigh: structure.swingHigh,
       swingLow: structure.swingLow,
-      points: structure.points,
       demandZones: detectedDemandZones,
       supplyZones: detectedSupplyZones,
     }).sweepEvents.slice(-80);

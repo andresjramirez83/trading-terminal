@@ -315,7 +315,6 @@ export function buildMarketIntelligenceRequestFromChartState(
   const liquidity = analyzeLiquidity(chartState.bars, {
     swingHigh: chartState.structure.lastSwingHigh ?? chartState.structure.swingHigh,
     swingLow: chartState.structure.lastSwingLow ?? chartState.structure.swingLow,
-    points: automaticStructure.points,
     demandZones: automaticDemandZones,
     supplyZones: automaticSupplyZones,
   });
