@@ -71,6 +71,8 @@ const MIN_TOUCH_SEPARATION = 3;
 const PIVOT_STRENGTH = 2;
 const EVENT_PERSISTENCE_BARS = 6;
 const HOLD_CONFIRM_BARS = 2;
+const MIN_REENTRY_ATR = 0.04;
+const MAX_HOLD_DRIFT_ATR = 0.10;
 
 function finite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -292,28 +294,31 @@ function significantRejectionWick(
     side === "sell-side"
       ? Math.max(0, bodyLow - bar.low)
       : Math.max(0, bar.high - bodyHigh);
-  const minimumAbsoluteWick = Math.max(tolerance, atr * 0.15);
+  const minimumAbsoluteWick = Math.max(tolerance, atr * 0.25);
   return (
     wick >= minimumAbsoluteWick &&
-    wick / range >= 0.45 &&
-    wick >= Math.max(body * 1.35, tolerance)
+    wick / range >= 0.50 &&
+    wick >= Math.max(body * 1.50, tolerance)
   );
 }
 
-function returnedNearPool(
+function returnedInsidePriorArea(
   bar: CleanBar,
   pool: LiquidityPool,
-  returnTolerance: number,
+  reentryBuffer: number,
 ): boolean {
-  if (pool.source === "demand-zone" && finite(pool.zoneTop)) {
-    return bar.close >= Math.min(pool.zoneTop, pool.price + returnTolerance);
-  }
-  if (pool.source === "supply-zone" && finite(pool.zoneBottom)) {
-    return bar.close <= Math.max(pool.zoneBottom, pool.price - returnTolerance);
-  }
+  // A sweep is only valid after price comes BACK THROUGH the swept boundary.
+  // Merely getting close to the old support/resistance is not enough.
+  //
+  // sell-side sweep: trade below support, then CLOSE back above support.
+  // buy-side sweep:  trade above resistance, then CLOSE back below resistance.
+  //
+  // For demand/supply zones, pool.price is already the outside boundary
+  // (demand bottom / supply top), so crossing it puts price back into the
+  // prior protected area instead of accepting beyond the level.
   return pool.side === "sell-side"
-    ? bar.close >= pool.price - returnTolerance
-    : bar.close <= pool.price + returnTolerance;
+    ? bar.close >= pool.price + reentryBuffer
+    : bar.close <= pool.price - reentryBuffer;
 }
 
 function heldReturnedPool(
@@ -324,8 +329,13 @@ function heldReturnedPool(
 ): number | undefined {
   const confirmationIndex = returnBarIndex + HOLD_CONFIRM_BARS;
   if (confirmationIndex >= bars.length) return undefined;
+
   for (let index = returnBarIndex + 1; index <= confirmationIndex; index += 1) {
     const close = bars[index].close;
+
+    // After re-entry, allow only a small retest of the swept boundary.
+    // If price accepts beyond the old resistance/support again, this was a
+    // breakout/breakdown, not the rejection-style liquidity sweep we want.
     if (
       (pool.side === "sell-side" && close < pool.price - holdTolerance) ||
       (pool.side === "buy-side" && close > pool.price + holdTolerance)
@@ -333,14 +343,19 @@ function heldReturnedPool(
       return undefined;
     }
   }
+
   return confirmationIndex;
 }
 
 function canUseMultiCandleReclaim(pool: LiquidityPool): boolean {
+  // A range edge can be real liquidity even when it comes from repeated
+  // touches instead of a formal structure/demand/supply object. The key
+  // requirement is still a meaningful excursion AND a confirmed re-entry.
   return (
+    pool.source === "repeated-touch" ||
+    pool.source === "structure" ||
     pool.source === "demand-zone" ||
-    pool.source === "supply-zone" ||
-    (pool.source === "structure" && pool.side === "sell-side")
+    pool.source === "supply-zone"
   );
 }
 
@@ -352,9 +367,10 @@ function eventsForPool(
   atr: number,
 ): LiquidityEvent[] {
   const events: LiquidityEvent[] = [];
-  const minimumPenetration = Math.max(tolerance, atr * 0.08);
-  const returnTolerance = Math.max(tolerance * 1.5, atr * 0.25);
-  const holdTolerance = Math.max(tolerance * 2, atr * 0.35);
+  const minimumPenetration = Math.max(tolerance, atr * 0.12);
+  const minimumExcursion = Math.max(tolerance * 1.5, atr * 0.20);
+  const reentryBuffer = Math.max(tolerance * 0.25, atr * MIN_REENTRY_ATR);
+  const holdTolerance = Math.max(tolerance, atr * MAX_HOLD_DRIFT_ATR);
   const maxReclaimBars = reclaimWindowBars(bars);
   let index = Math.max(pool.establishedIndex + 1, 0);
 
@@ -382,8 +398,12 @@ function eventsForPool(
       ) {
         extremeIndex = cursor;
       }
-      if (!returnedNearPool(current, pool, returnTolerance)) continue;
+      if (!returnedInsidePriorArea(current, pool, reentryBuffer)) continue;
 
+      const excursionDepth =
+        pool.side === "sell-side"
+          ? pool.price - bars[extremeIndex].low
+          : bars[extremeIndex].high - pool.price;
       const wickSweep = significantRejectionWick(
         bars[extremeIndex],
         pool.side,
@@ -391,14 +411,18 @@ function eventsForPool(
         atr,
       );
       const multiCandle = cursor > excursionStart;
+      const meaningfulMultiCandleSweep =
+        multiCandle &&
+        excursionDepth >= minimumExcursion &&
+        canUseMultiCandleReclaim(pool);
 
-      // This is the important filter:
-      // - ordinary repeated highs/lows can ONLY create LS from a significant wick;
-      // - buy-side structural resistance also needs a significant wick unless a
-      //   real supply zone is being swept;
-      // - demand/supply zones and structural support may use a multi-candle
-      //   sweep/reclaim like the lower example on the chart.
-      if (!wickSweep && !(multiCandle && canUseMultiCandleReclaim(pool))) continue;
+      // Valid LS:
+      // 1) significant rejection wick, OR
+      // 2) meaningful multi-candle excursion beyond the range edge;
+      // AND in both cases price must CLOSE back through the swept boundary.
+      // This rejects the repeated orange labels inside a range and rejects
+      // breakouts that sweep resistance but continue accepting above it.
+      if (!wickSweep && !meaningfulMultiCandleSweep) continue;
 
       const confirmationBarIndex = heldReturnedPool(
         bars,
