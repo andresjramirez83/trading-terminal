@@ -133,3 +133,124 @@ async def load_alpaca_history(
 
 
 __all__ = ["load_alpaca_history", "load_alpaca_history_for_symbol"]
+
+def _date_range_explicit(
+    start_date: str,
+    end_date: str,
+    *,
+    warmup_calendar_days: int = 7,
+    future_calendar_days: int = 10,
+) -> tuple[datetime, datetime]:
+    start_local = datetime.fromisoformat(str(start_date)[:10]).replace(tzinfo=ET)
+    end_local = datetime.fromisoformat(str(end_date)[:10]).replace(tzinfo=ET)
+    start_local = start_local - timedelta(days=max(0, int(warmup_calendar_days)))
+    end_local = end_local + timedelta(days=max(0, int(future_calendar_days)) + 1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+async def load_alpaca_history_for_symbol_range(
+    symbol: str,
+    timeframe: str,
+    start_date: str,
+    end_date: str,
+    *,
+    warmup_calendar_days: int = 7,
+    future_calendar_days: int = 10,
+) -> Dict[str, Any]:
+    tf = str(timeframe or "").lower().strip()
+    if tf not in ALPACA_TIMEFRAME_MAP:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+    service = AlpacaMarketService()
+    start, end = _date_range_explicit(
+        start_date,
+        end_date,
+        warmup_calendar_days=warmup_calendar_days,
+        future_calendar_days=future_calendar_days,
+    )
+
+    raw_bars = await service._historical_bars(
+        symbol=symbol.upper().strip(),
+        timeframe=ALPACA_TIMEFRAME_MAP[tf],
+        start=start,
+        end=end,
+        feed=service.feed,
+        adjustment="all",
+    )
+
+    normalized: List[Dict[str, Any]] = []
+    for row in raw_bars:
+        try:
+            bar = _normalize_alpaca_bar(row)
+        except (TypeError, ValueError):
+            continue
+        if bar["ts"] > 0 and bar["high"] > 0 and bar["low"] > 0 and bar["close"] > 0:
+            normalized.append(bar)
+
+    saved = upsert_candles(symbol, tf, normalized)
+    return {
+        "symbol": symbol.upper(),
+        "timeframe": tf,
+        "bars_saved": saved,
+        "requested_start_date": str(start_date)[:10],
+        "requested_end_date": str(end_date)[:10],
+        "loaded_start_date": start.date().isoformat(),
+        "loaded_end_date": end.date().isoformat(),
+        "provider": "alpaca",
+        "feed": service.feed,
+    }
+
+
+async def load_alpaca_history_for_ranges(
+    symbol_ranges: Dict[str, Dict[str, str]],
+    *,
+    timeframe: str = "5m",
+    warmup_calendar_days: int = 7,
+    future_calendar_days: int = 10,
+) -> Dict[str, Any]:
+    results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+
+    for raw_symbol, date_range in (symbol_ranges or {}).items():
+        symbol = "".join(ch for ch in str(raw_symbol).upper().strip() if ch.isalpha() or ch == ".")
+        if not symbol or not isinstance(date_range, dict):
+            continue
+        start_date = str(date_range.get("start_date") or "")[:10]
+        end_date = str(date_range.get("end_date") or start_date)[:10]
+        if not start_date or not end_date:
+            continue
+        try:
+            results.append(
+                await load_alpaca_history_for_symbol_range(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_date=start_date,
+                    end_date=end_date,
+                    warmup_calendar_days=warmup_calendar_days,
+                    future_calendar_days=future_calendar_days,
+                )
+            )
+        except Exception as exc:
+            errors.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "start_date": start_date,
+                "end_date": end_date,
+                "error": str(exc),
+            })
+
+    return {
+        "ok": len(errors) == 0,
+        "provider": "alpaca",
+        "timeframe": timeframe,
+        "results": results,
+        "errors": errors,
+    }
+
+
+__all__ = [
+    "load_alpaca_history",
+    "load_alpaca_history_for_symbol",
+    "load_alpaca_history_for_symbol_range",
+    "load_alpaca_history_for_ranges",
+]

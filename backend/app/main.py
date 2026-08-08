@@ -43,6 +43,7 @@ from app.services.alpaca_market_service import AlpacaMarketService
 from app.services.market_data_provider import get_market_data_provider
 from app.services.alpaca_ws import alpaca_ws_manager
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
+from app.services.daily_watchlist_store import DailyWatchlistStore
 from app.services.signal_engine import (
     SignalEngineConfig,
     evaluate_symbol_signal,
@@ -57,6 +58,7 @@ DEBUG_BACKGROUND = os.getenv("DEBUG_BACKGROUND", "false").strip().lower() in {"1
 USE_HISTORY_ENGINE = os.getenv("USE_HISTORY_ENGINE", "false").strip().lower() in {"1", "true", "yes", "on"}
 registry = ScannerRegistry()
 snapshot_store = ScannerSnapshotStore()
+daily_watchlist_store = DailyWatchlistStore()
 
 # Small in-memory cache so multiple chart panels do not hammer Alpaca on every mount.
 BARS_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -2766,6 +2768,11 @@ async def run_background_scanner_loop() -> None:
             scanner_last_status = "running"
             scanner_run_count += 1
 
+            try:
+                daily_watchlist_store.save_scanner_cycle(scanner_caches)
+            except Exception as archive_exc:
+                print(f"[scanner-loop] daily watchlist archive failed: {archive_exc}", flush=True)
+
             print(
                 f"[scanner-loop] updated scanners={len(scanner_caches)} "
                 f"errors={len(cycle_errors)} run={scanner_run_count}",
@@ -2873,6 +2880,12 @@ async def on_startup() -> None:
 
     BACKGROUND_EVENT_LOOP = asyncio.get_running_loop()
     if acquire_background_worker_lock():
+        try:
+            with _locked_alpaca_state():
+                current_state = _read_alpaca_state_unlocked()
+            daily_watchlist_store.save_manual(current_state.get("manualWatchlist") or [])
+        except Exception as archive_exc:
+            print(f"[startup] daily manual watchlist archive failed: {archive_exc}", flush=True)
         start_backend_alert_task_if_needed()
         start_scanner_task_if_needed()
         # Auto-trade execution moved to dedicated trading-autotrade.service.
@@ -3006,6 +3019,11 @@ def put_manual_watchlist(payload: ManualWatchlistPayload):
         state["updatedAt"] = updated_at
         _write_alpaca_state_unlocked(state)
 
+    try:
+        daily_watchlist_store.save_manual(symbols)
+    except Exception as archive_exc:
+        print(f"[manual-watchlist] daily archive failed: {archive_exc}", flush=True)
+
     return {
         "symbols": symbols,
         "count": len(symbols),
@@ -3038,6 +3056,11 @@ def toggle_manual_watchlist_symbol(payload: dict = Body(default={})):
         state["manualWatchlistUpdatedAt"] = updated_at
         state["updatedAt"] = updated_at
         _write_alpaca_state_unlocked(state)
+
+    try:
+        daily_watchlist_store.save_manual(current)
+    except Exception as archive_exc:
+        print(f"[manual-watchlist/toggle] daily archive failed: {archive_exc}", flush=True)
 
     return {
         "symbol": normalized_symbol,
