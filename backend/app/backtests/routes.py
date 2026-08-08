@@ -90,6 +90,14 @@ class VwapStdBacktestRequest(BaseModel):
     std_length: int = Field(default=20, ge=2, le=200)
     multiplier: float = Field(default=3.0, gt=0, le=10)
     future_trading_days: int = Field(default=5, ge=0, le=10)
+
+    # Search the prior trading day's after-hours session plus the candidate day's
+    # premarket session. This captures setups like NAMI where the displacement
+    # began after 4 PM and the +3 STD target was reached the next morning.
+    include_prior_after_hours: bool = True
+    after_hours_start_hhmm: int = Field(default=1600, ge=0, le=2359)
+    after_hours_end_hhmm: int = Field(default=2000, ge=0, le=2359)
+    include_premarket: bool = True
     premarket_start_hhmm: int = Field(default=400, ge=0, le=2359)
     premarket_end_hhmm: int = Field(default=930, ge=0, le=2359)
 
@@ -99,6 +107,11 @@ class VwapStdBacktestRequest(BaseModel):
     min_range_pct: float = Field(default=4.0, ge=0)
     min_volume: float = Field(default=50_000.0, ge=0)
     min_close_location: float = Field(default=0.65, ge=0, le=1)
+
+    # Freeze the highest +STD projection from the initial expansion episode after
+    # the band contracts for N consecutive bars.
+    projection_contraction_bars: int = Field(default=3, ge=1, le=12)
+    projection_max_bars: int = Field(default=36, ge=1, le=120)
 
     # continuous mirrors the user's thinkScript CompoundValue behavior within the
     # loaded history window. daily resets VWAP each ET date for a reproducible control.
@@ -319,12 +332,18 @@ async def run_vwap_std(req: VwapStdBacktestRequest):
         std_length=req.std_length,
         multiplier=req.multiplier,
         future_trading_days=req.future_trading_days,
+        include_prior_after_hours=req.include_prior_after_hours,
+        after_hours_start_hhmm=req.after_hours_start_hhmm,
+        after_hours_end_hhmm=req.after_hours_end_hhmm,
+        include_premarket=req.include_premarket,
         premarket_start_hhmm=req.premarket_start_hhmm,
         premarket_end_hhmm=req.premarket_end_hhmm,
         min_body_pct=req.min_body_pct,
         min_range_pct=req.min_range_pct,
         min_volume=req.min_volume,
         min_close_location=req.min_close_location,
+        projection_contraction_bars=req.projection_contraction_bars,
+        projection_max_bars=req.projection_max_bars,
         vwap_mode=req.vwap_mode,
     )
     result["alpaca_load"] = alpaca_load
