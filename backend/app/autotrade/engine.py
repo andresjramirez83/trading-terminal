@@ -1023,9 +1023,52 @@ class AutoTradeEngine:
                 if status not in {"new", "accepted", "pending_new", "partially_filled", "held"}:
                     continue
 
-                # A cancel request is not considered complete until Alpaca
-                # confirms a terminal order state. Keep the state alive so a
-                # race-condition fill can still be detected and protected.
+                # LOCKED OWNERSHIP RULE FOR MANUAL OVERNIGHT ORDERS:
+                # Once Alpaca accepts the pending limit entry, the AutoTrade
+                # worker is NEVER allowed to cancel that unfilled order.
+                #
+                # Previous versions stored entry_cancel_reason and retried
+                # cancel_order() every few seconds.  That stale flag could keep
+                # deleting newly accepted overnight orders even after the market
+                # data/freshness logic was corrected.  Clear any legacy cancel
+                # state and leave the broker order untouched until it fills, the
+                # user cancels it, or Alpaca itself returns a terminal status.
+                if protected_manual_entry:
+                    had_legacy_cancel = bool(
+                        payload.get("entry_cancel_reason")
+                        or payload.get("entry_cancel_requested_at")
+                        or payload.get("entry_cancel_error")
+                    )
+                    for key in (
+                        "entry_cancel_reason",
+                        "entry_cancel_requested_at",
+                        "entry_cancel_attempts",
+                        "entry_cancel_market_snapshot",
+                        "entry_cancel_error",
+                    ):
+                        payload.pop(key, None)
+                    payload["phase"] = "entry_submitted"
+                    payload["pending_entry_locked"] = True
+                    payload["pending_entry_lock_reason"] = "manual_overnight_order_owned_by_broker_until_fill"
+                    payload["last_reconciled_at"] = datetime.now(timezone.utc).isoformat()
+                    self.store.upsert_pending_entry(order_id, payload)
+                    self.store.upsert_runner_state(symbol, {"phase": "entry_submitted", **payload})
+                    if had_legacy_cancel:
+                        self.store.log_event(
+                            "pending_entry_legacy_cancel_cleared",
+                            {
+                                "order_id": order_id,
+                                "order_status": status,
+                                "pending": payload,
+                            },
+                            symbol,
+                            strategy_id,
+                        )
+                    continue
+
+                # Non-manual strategies may still use their own cancellation
+                # lifecycle.  Do not apply that lifecycle to locked manual
+                # Overnight Protected Orders.
                 cancel_reason = str(payload.get("entry_cancel_reason") or "")
                 if cancel_reason:
                     cancel_age = self._seconds_since_iso(payload.get("entry_cancel_requested_at"))
@@ -1040,53 +1083,6 @@ class AutoTradeEngine:
                             payload["entry_cancel_error"] = str(cancel_exc)
                             self.store.upsert_pending_entry(order_id, payload)
                     continue
-
-                if not protected_manual_entry:
-                    continue
-
-                invalidation_reason, market_snapshot = await self._entry_invalidation_reason(
-                    symbol=symbol,
-                    stop=stop,
-                    target=target,
-                    market=market,
-                    submitted_at=payload.get("submitted_at"),
-                )
-                if not invalidation_reason:
-                    continue
-
-                payload.update({
-                    "phase": "entry_cancel_requested",
-                    "entry_cancel_reason": invalidation_reason,
-                    "entry_cancel_requested_at": datetime.now(timezone.utc).isoformat(),
-                    "entry_cancel_attempts": int(payload.get("entry_cancel_attempts") or 0) + 1,
-                    "entry_cancel_market_snapshot": market_snapshot,
-                })
-                self.store.upsert_pending_entry(order_id, payload)
-                self.store.upsert_runner_state(symbol, {"phase": "entry_cancel_requested", **payload})
-
-                try:
-                    alpaca.cancel_order(order_id)
-                    payload["entry_cancel_error"] = None
-                except Exception as cancel_exc:
-                    # Keep monitoring. A failed cancel request must not erase
-                    # the entry because it may still fill.
-                    payload["entry_cancel_error"] = str(cancel_exc)
-                self.store.upsert_pending_entry(order_id, payload)
-                self.store.upsert_runner_state(symbol, {"phase": "entry_cancel_requested", **payload})
-                self.store.log_event(
-                    "pending_entry_cancel_requested",
-                    {
-                        "reason": invalidation_reason,
-                        "order_id": order_id,
-                        "order_status": status,
-                        "stop_price": stop,
-                        "target_price": target,
-                        "market": market_snapshot,
-                        "pending": payload,
-                    },
-                    symbol,
-                    strategy_id,
-                )
             except Exception as exc:
                 self.store.log_event(
                     "pending_entry_manage_error",
