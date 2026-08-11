@@ -175,6 +175,19 @@ class AlpacaMarketService:
             os.getenv("APCA_API_SECRET_KEY_PAPER", "").strip(),
         )
 
+    def _latest_stock_feed(self) -> str:
+        """Use the overnight market-data feed during the BOATS session.
+
+        SIP does not represent the 8:00 PM-4:00 AM ET overnight market. Using
+        a frozen SIP quote there can falsely trigger synthetic stop/target or
+        pre-entry invalidation logic.
+        """
+        now_et = datetime.now(ET)
+        hour = now_et.hour
+        if self.include_overnight and (hour >= 20 or hour < 4):
+            return self.overnight_feed
+        return self.feed
+
     @property
     def headers(self) -> Dict[str, str]:
         return {
@@ -944,11 +957,12 @@ class AlpacaMarketService:
         if not symbol:
             return None
 
+        latest_feed = self._latest_stock_feed()
         data = await self._get(
             "/v2/stocks/trades/latest",
             params={
                 "symbols": symbol,
-                "feed": self.feed,
+                "feed": latest_feed,
             },
         )
         trade = (data.get("trades") or {}).get(symbol) or {}
@@ -960,11 +974,12 @@ class AlpacaMarketService:
         if not symbol:
             return {}
 
+        latest_feed = self._latest_stock_feed()
         data = await self._get(
             "/v2/stocks/quotes/latest",
             params={
                 "symbols": symbol,
-                "feed": self.feed,
+                "feed": latest_feed,
             },
         )
         quote = (data.get("quotes") or {}).get(symbol) or {}
@@ -979,6 +994,7 @@ class AlpacaMarketService:
             "bid_size": _safe_float(quote.get("bs")),
             "ask_size": _safe_float(quote.get("as")),
             "time": _timestamp_ms(quote.get("t")),
+            "feed": latest_feed,
         }
 
     async def get_ticker_snapshot(self, symbol: str) -> Dict[str, Any]:

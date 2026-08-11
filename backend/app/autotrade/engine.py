@@ -503,15 +503,34 @@ class AutoTradeEngine:
         except Exception:
             last_price = 0.0
 
+        quote_time_raw = quote.get("time", quote.get("t"))
+        quote_time_ms = self._epoch_ms(quote_time_raw)
+        now_ms = int(time.time() * 1000)
+        quote_age_seconds = (now_ms - quote_time_ms) / 1000.0 if quote_time_ms > 0 else None
+        quote_is_fresh = (
+            quote_time_ms > 0
+            and quote_age_seconds is not None
+            and quote_age_seconds <= 60.0
+            and bid_price > 0
+        )
+
         # For a long position, the bid is the executable side of the market.
-        trigger_price = bid_price or last_price
+        # Never fall back to an untimestamped last trade for synthetic exits;
+        # a stale SIP print during BOATS hours can otherwise flatten a valid
+        # overnight position immediately after it fills.
+        trigger_price = bid_price if quote_is_fresh else 0.0
         return {
             "symbol": symbol,
             "bid_price": bid_price,
             "ask_price": ask_price,
             "last_price": last_price,
             "trigger_price": trigger_price,
-            "quote_time": quote.get("time", quote.get("t")),
+            "quote_time": quote_time_raw,
+            "quote_time_ms": quote_time_ms,
+            "quote_age_seconds": quote_age_seconds,
+            "quote_is_fresh": quote_is_fresh,
+            "feed": quote.get("feed"),
+            "market_data_status": "fresh" if quote_is_fresh else "stale_or_unavailable",
         }
 
     async def _reconcile_submitted_exit(
@@ -1030,6 +1049,7 @@ class AutoTradeEngine:
                     stop=stop,
                     target=target,
                     market=market,
+                    submitted_at=payload.get("submitted_at"),
                 )
                 if not invalidation_reason:
                     continue
@@ -1082,6 +1102,7 @@ class AutoTradeEngine:
         stop: float,
         target: float,
         market: MarketDataProvider,
+        submitted_at: Any = None,
     ) -> tuple[Optional[str], Dict[str, Any]]:
         quote: Dict[str, Any] = {}
         bid_price = 0.0
@@ -1095,34 +1116,98 @@ class AutoTradeEngine:
         except Exception:
             quote = {}
 
+        # Keep last trade for diagnostics only. The existing provider returns
+        # a price without its timestamp, so it is unsafe to use as an overnight
+        # cancel trigger: during BOATS hours the normal SIP trade can be stale.
         try:
             last_price = self._safe_float(await market.get_last_trade(symbol))
         except Exception:
             last_price = 0.0
 
-        # Long-entry invalidation uses the executable side of the quote:
-        # - bid at/above target means the original move already completed.
-        # - ask at/below stop means the market has broken the setup before fill.
-        target_probe = bid_price or last_price
-        stop_probe = ask_price or last_price
+        quote_time_raw = quote.get("time", quote.get("t"))
+        quote_time_ms = self._epoch_ms(quote_time_raw)
+        submitted_ms = self._epoch_ms(submitted_at)
+        now_ms = int(time.time() * 1000)
+        quote_age_seconds = (now_ms - quote_time_ms) / 1000.0 if quote_time_ms > 0 else None
+        entry_age_seconds = self._seconds_since_iso(submitted_at)
 
-        reason: Optional[str] = None
-        if target_probe > 0 and self._alpaca_price(target_probe) >= target:
-            reason = "target_reached_before_entry_fill"
-        elif stop_probe > 0 and self._alpaca_price(stop_probe) <= stop:
-            reason = "stop_reached_before_entry_fill"
-
-        return reason, {
+        snapshot: Dict[str, Any] = {
             "symbol": symbol,
             "bid_price": bid_price,
             "ask_price": ask_price,
             "last_price": last_price,
-            "target_probe": target_probe,
-            "stop_probe": stop_probe,
+            "target_probe": bid_price,
+            "stop_probe": ask_price,
             "stop_price": stop,
             "target_price": target,
-            "quote_time": quote.get("time", quote.get("t")),
+            "quote_time": quote_time_raw,
+            "quote_time_ms": quote_time_ms,
+            "submitted_at": submitted_at,
+            "submitted_ms": submitted_ms,
+            "quote_age_seconds": quote_age_seconds,
+            "entry_age_seconds": entry_age_seconds,
         }
+
+        # Do not let the first worker pass instantly cancel a freshly accepted
+        # order. More importantly, never use a quote that predates the order or
+        # is stale. SIP can freeze during the 8 PM-4 AM ET BOATS session, and
+        # that stale snapshot was canceling valid Overnight Protected Orders.
+        if entry_age_seconds < 5.0:
+            snapshot["invalidation_status"] = "grace_period"
+            return None, snapshot
+
+        if quote_time_ms <= 0:
+            snapshot["invalidation_status"] = "missing_quote_timestamp"
+            return None, snapshot
+
+        if submitted_ms > 0 and quote_time_ms < submitted_ms:
+            snapshot["invalidation_status"] = "quote_predates_entry"
+            return None, snapshot
+
+        if quote_age_seconds is None or quote_age_seconds > 60.0:
+            snapshot["invalidation_status"] = "stale_quote"
+            return None, snapshot
+
+        if bid_price <= 0 or ask_price <= 0:
+            snapshot["invalidation_status"] = "incomplete_quote"
+            return None, snapshot
+
+        # Only a fresh, post-submission executable quote is allowed to cancel
+        # an unfilled entry. Never fall back to an untimestamped last trade.
+        reason: Optional[str] = None
+        if self._alpaca_price(bid_price) >= target:
+            reason = "target_reached_before_entry_fill"
+        elif self._alpaca_price(ask_price) <= stop:
+            reason = "stop_reached_before_entry_fill"
+
+        snapshot["invalidation_status"] = reason or "armed_no_trigger"
+        return reason, snapshot
+
+    @staticmethod
+    def _epoch_ms(value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, (int, float)):
+            number = int(float(value))
+            return number if number >= 10_000_000_000 else number * 1000
+
+        text = str(value).strip()
+        if not text:
+            return 0
+
+        try:
+            number = int(float(text))
+            return number if number >= 10_000_000_000 else number * 1000
+        except Exception:
+            pass
+
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+        except Exception:
+            return 0
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
