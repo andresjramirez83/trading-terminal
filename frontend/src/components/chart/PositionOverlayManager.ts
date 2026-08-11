@@ -26,6 +26,10 @@ export type PositionOverlaySnapshot = {
   targetOrderId: string | null;
   entryIsLive?: boolean;
   entryOrderId?: string | null;
+  entryCanDrag?: boolean;
+  entryCanCancel?: boolean;
+  stopCanDrag?: boolean;
+  targetCanDrag?: boolean;
 };
 
 export type PositionOverlayCommit = {
@@ -108,6 +112,12 @@ function buildSnapshot(
       targetIsLive: false,
       stopOrderId: null,
       targetOrderId: null,
+      entryIsLive: false,
+      entryOrderId: null,
+      entryCanDrag: false,
+      entryCanCancel: false,
+      stopCanDrag: false,
+      targetCanDrag: false,
     };
   }
 
@@ -121,6 +131,12 @@ function buildSnapshot(
     targetIsLive: Boolean(protection.targetOrderId),
     stopOrderId: protection.stopOrderId ?? null,
     targetOrderId: protection.targetOrderId ?? null,
+    entryIsLive: false,
+    entryOrderId: null,
+    entryCanDrag: false,
+    entryCanCancel: false,
+    stopCanDrag: Boolean(protection.stopOrderId),
+    targetCanDrag: Boolean(protection.targetOrderId),
   };
 }
 
@@ -154,6 +170,10 @@ export class PositionOverlayManager {
     targetOrderId: null,
     entryIsLive: false,
     entryOrderId: null,
+    entryCanDrag: false,
+    entryCanCancel: false,
+    stopCanDrag: false,
+    targetCanDrag: false,
   };
 
   constructor(
@@ -215,6 +235,11 @@ export class PositionOverlayManager {
     target: number;
     stopOrderId?: string | null;
     targetOrderId?: string | null;
+    entryIsLive?: boolean;
+    entryCanDrag?: boolean;
+    entryCanCancel?: boolean;
+    stopCanDrag?: boolean;
+    targetCanDrag?: boolean;
   } | null): void {
     if (!order || safePrice(order.entry) <= 0) {
       this.update(null);
@@ -231,8 +256,12 @@ export class PositionOverlayManager {
       targetIsLive: Boolean(order.targetOrderId),
       stopOrderId: order.stopOrderId ?? null,
       targetOrderId: order.targetOrderId ?? null,
-      entryIsLive: true,
+      entryIsLive: order.entryIsLive ?? true,
       entryOrderId: order.id,
+      entryCanDrag: order.entryCanDrag ?? true,
+      entryCanCancel: order.entryCanCancel ?? true,
+      stopCanDrag: order.stopCanDrag ?? Boolean(order.stopOrderId),
+      targetCanDrag: order.targetCanDrag ?? Boolean(order.targetOrderId),
     };
 
     this.applyPendingPrices(next);
@@ -252,13 +281,13 @@ export class PositionOverlayManager {
       level: DraggablePositionOverlayLevel;
       price: number;
     }> = [
-      ...(this.snapshot.entryIsLive
+      ...(this.snapshot.entryCanDrag
         ? [{ level: "entry" as const, price: this.snapshot.entry }]
         : []),
-      ...(this.snapshot.stopOrderId || !this.snapshot.entryIsLive
+      ...(this.snapshot.stopCanDrag
         ? [{ level: "stop" as const, price: this.snapshot.stop }]
         : []),
-      ...(this.snapshot.targetOrderId || !this.snapshot.entryIsLive
+      ...(this.snapshot.targetCanDrag
         ? [{ level: "target" as const, price: this.snapshot.target }]
         : []),
     ];
@@ -422,6 +451,10 @@ export class PositionOverlayManager {
       targetOrderId: null,
       entryIsLive: false,
       entryOrderId: null,
+      entryCanDrag: false,
+      entryCanCancel: false,
+      stopCanDrag: false,
+      targetCanDrag: false,
     };
   }
 
@@ -656,7 +689,7 @@ export class PositionOverlayManager {
     drag.title = "Drag to change the working order price";
     drag.style.cssText = "height:24px;padding:0 8px;border:1px solid #facc15;border-radius:4px;background:#29220a;color:#fde047;font:600 11px Inter,system-ui;cursor:ns-resize";
     drag.addEventListener("pointerdown", (event) => {
-      if (!this.snapshot.entryIsLive || this.committing) return;
+      if (!this.snapshot.entryCanDrag || this.committing) return;
       const y = this.priceSeries.priceToCoordinate(this.snapshot.entry);
       if (y == null || !this.beginDrag(y)) return;
       event.preventDefault();
@@ -676,7 +709,7 @@ export class PositionOverlayManager {
       event.preventDefault();
       event.stopPropagation();
       const orderId = this.snapshot.entryOrderId;
-      if (!this.snapshot.entryIsLive || !orderId || !this.onCancelOrder) return;
+      if (!this.snapshot.entryCanCancel || !orderId || !this.onCancelOrder) return;
       cancel.disabled = true;
       cancel.textContent = "Canceling…";
       try {
@@ -695,7 +728,11 @@ export class PositionOverlayManager {
 
   private placeOrderControls(): void {
     const controls = this.orderControls;
-    if (!controls || !this.snapshot.entryIsLive || !this.snapshot.entryOrderId) {
+    if (
+      !controls ||
+      !this.snapshot.entryOrderId ||
+      (!this.snapshot.entryCanDrag && !this.snapshot.entryCanCancel)
+    ) {
       if (controls) controls.style.display = "none";
       return;
     }

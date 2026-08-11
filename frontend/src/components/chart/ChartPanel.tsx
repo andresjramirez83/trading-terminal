@@ -62,7 +62,11 @@ import {
   normalizeChartSettings,
   type ChartSettings,
 } from "./ChartSettingsTypes";
-import { API_BASE } from "../../services/api";
+import {
+  API_BASE,
+  fetchAutoTradeStatus,
+  type AutoTradeStatus,
+} from "../../services/api";
 
 const TIMEFRAME_STORAGE_KEY = "chartv2.timeframe";
 const STUDY_STORAGE_KEY = "chartv2.studyVisibility";
@@ -905,6 +909,83 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   useEffect(() => {
     const executionService = getSharedExecutionGateway();
     const protectionEngine = getSharedPositionProtectionEngine();
+    const safeSymbol = symbol.trim().toUpperCase();
+    let latestAutoTradeStatus: AutoTradeStatus | null = null;
+    let active = true;
+
+    const positivePrice = (value: unknown): number => {
+      const price = Number(value);
+      return Number.isFinite(price) && price > 0 ? price : 0;
+    };
+
+    const normalizePlanSymbol = (value: unknown): string =>
+      String(value ?? "").trim().toUpperCase();
+
+    const getOvernightPlan = () => {
+      const runnerState = latestAutoTradeStatus?.runner_states?.[safeSymbol];
+      if (runnerState && typeof runnerState === "object") {
+        const strategyId = String(runnerState.strategy_id ?? "");
+        const entry = positivePrice(runnerState.entry_price);
+        const stop = positivePrice(runnerState.stop_price);
+        const target = positivePrice(runnerState.target_price);
+
+        if (
+          ["overnight_protected_order", "overnite_hail_mary"].includes(strategyId) &&
+          entry > 0 &&
+          stop > 0 &&
+          target > 0
+        ) {
+          const phase = String(runnerState.phase ?? "");
+          const orderId = String(
+            runnerState.order_id ?? runnerState.entry_order_id ?? `autotrade-${safeSymbol}`,
+          );
+
+          return {
+            id: orderId,
+            symbol: safeSymbol,
+            entry,
+            stop,
+            target,
+            phase,
+            entryIsLive: ["entry_submitted", "entry_cancel_requested"].includes(phase),
+          };
+        }
+      }
+
+      const plans =
+        latestAutoTradeStatus?.queued_manual_plans ??
+        latestAutoTradeStatus?.manual_trade_plans ??
+        [];
+
+      for (const item of plans) {
+        const payload = item?.payload ?? item ?? {};
+        const strategyId = String(item?.strategy_id ?? payload.strategy_id ?? "");
+        const planSymbol = normalizePlanSymbol(item?.symbol ?? payload.symbol);
+        if (
+          planSymbol !== safeSymbol ||
+          !["overnight_protected_order", "overnite_hail_mary"].includes(strategyId)
+        ) {
+          continue;
+        }
+
+        const entry = positivePrice(payload.entry_price);
+        const stop = positivePrice(payload.stop_price);
+        const target = positivePrice(payload.target_price);
+        if (entry <= 0 || stop <= 0 || target <= 0) continue;
+
+        return {
+          id: String(payload.order_id ?? `autotrade-queued-${safeSymbol}`),
+          symbol: safeSymbol,
+          entry,
+          stop,
+          target,
+          phase: "queued",
+          entryIsLive: false,
+        };
+      }
+
+      return null;
+    };
 
     const applySnapshot = (
       snapshot: ReturnType<typeof executionService.getSnapshot>,
@@ -915,12 +996,39 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         snapshot.openOrders,
       );
 
+      // Overnight Protected Orders are intentionally submitted to Alpaca as a
+      // simple extended-hours limit entry. Their stop/target live in the
+      // AutoTrade worker, so the normal broker snapshot cannot reconstruct the
+      // full overlay after a chart interaction or refresh. Give the worker
+      // state precedence and keep these lines read-only on the chart; modifying
+      // the broker order directly would replace its id behind the worker.
+      const overnightPlan = getOvernightPlan();
+      if (overnightPlan) {
+        const actualEntry =
+          protection && protection.position.entry > 0
+            ? protection.position.entry
+            : overnightPlan.entry;
+
+        positionOverlayRef.current?.updateWorkingOrder({
+          id: overnightPlan.id,
+          symbol: overnightPlan.symbol,
+          entry: actualEntry,
+          stop: overnightPlan.stop,
+          target: overnightPlan.target,
+          entryIsLive: overnightPlan.entryIsLive,
+          entryCanDrag: false,
+          entryCanCancel: false,
+          stopCanDrag: false,
+          targetCanDrag: false,
+        });
+        return;
+      }
+
       if (protection) {
         positionOverlayRef.current?.update(protection);
         return;
       }
 
-      const safeSymbol = symbol.trim().toUpperCase();
       const workingOrder = snapshot.openOrders.find(
         (order) =>
           order.symbol.trim().toUpperCase() === safeSymbol &&
@@ -967,11 +1075,30 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       );
     };
 
+    const refreshAutoTradeStatus = async () => {
+      try {
+        const next = await fetchAutoTradeStatus();
+        if (!active) return;
+        latestAutoTradeStatus = next;
+        applySnapshot(executionService.getSnapshot());
+      } catch {
+        // Keep the last known worker state during a temporary API failure so a
+        // protected order never disappears just because one poll failed.
+      }
+    };
+
     const unsubscribe = executionService.subscribe(applySnapshot);
     applySnapshot(executionService.getSnapshot());
     executionService.queueRefresh();
+    void refreshAutoTradeStatus();
+    const autoTradeTimer = window.setInterval(
+      () => void refreshAutoTradeStatus(),
+      2_000,
+    );
 
     return () => {
+      active = false;
+      window.clearInterval(autoTradeTimer);
       unsubscribe();
       positionOverlayRef.current?.clear();
     };

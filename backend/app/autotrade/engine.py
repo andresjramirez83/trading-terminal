@@ -896,6 +896,88 @@ class AutoTradeEngine:
                 status = str(order.get("status") or "").lower()
                 filled_qty = self._safe_float(order.get("filled_qty"))
 
+                # Alpaca PATCHes are replacement operations. If a working
+                # overnight entry was replaced from the chart or Alpaca UI,
+                # follow the new id instead of leaving the protection worker
+                # attached to the stale parent order.
+                if status == "replaced":
+                    replacement_id = str(
+                        order.get("replaced_by")
+                        or order.get("replacedBy")
+                        or ""
+                    ).strip()
+
+                    replacement = None
+                    if replacement_id:
+                        try:
+                            replacement = alpaca.get_order(replacement_id, nested=True)
+                        except Exception:
+                            replacement = None
+
+                    if replacement is None:
+                        try:
+                            open_orders = alpaca.get_orders(
+                                status="open",
+                                limit=500,
+                                nested=True,
+                                symbols=[symbol],
+                            )
+                            replacement = next(
+                                (
+                                    candidate
+                                    for candidate in open_orders
+                                    if str(candidate.get("replaces") or "").strip() == order_id
+                                ),
+                                None,
+                            )
+                            if replacement:
+                                replacement_id = str(replacement.get("id") or "").strip()
+                        except Exception:
+                            replacement = None
+
+                    if replacement_id and replacement:
+                        replacement_entry = self._alpaca_price(
+                            replacement.get("limit_price")
+                            or payload.get("entry_price")
+                        )
+                        old_order_id = order_id
+                        order_id = replacement_id
+                        payload.update({
+                            "order_id": replacement_id,
+                            "entry_order_id": replacement_id,
+                            "entry_price": replacement_entry,
+                            "replaced_order_id": old_order_id,
+                            "replacement_followed_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                        self.store.delete_pending_entry(old_order_id)
+                        self.store.upsert_pending_entry(replacement_id, payload)
+                        self.store.upsert_runner_state(
+                            symbol,
+                            {"phase": "entry_submitted", **payload},
+                        )
+                        self.store.log_event(
+                            "pending_entry_replacement_followed",
+                            {
+                                "old_order_id": old_order_id,
+                                "new_order_id": replacement_id,
+                                "entry_price": replacement_entry,
+                                "replacement": replacement,
+                            },
+                            symbol,
+                            strategy_id,
+                        )
+                        order = replacement
+                        status = str(order.get("status") or "").lower()
+                        filled_qty = self._safe_float(order.get("filled_qty"))
+                    else:
+                        self.store.log_event(
+                            "pending_entry_replacement_unresolved",
+                            {"order_id": order_id, "order": order, "pending": payload},
+                            symbol,
+                            strategy_id,
+                        )
+                        continue
+
                 # Filled or partially filled shares always take priority over
                 # cancellation. Cancel the remainder and activate protection.
                 if status == "filled" or filled_qty > 0:
