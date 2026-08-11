@@ -157,8 +157,12 @@ class AutoTradeEngine:
         )
 
         try:
-            await self.submit_signal(manual_cfg, signal, now)
-            self.store.delete_manual_trade_plan(plan_id)
+            handled = await self.submit_signal(manual_cfg, signal, now)
+            # Do not throw away a manual protected order just because the
+            # risk gate is temporarily blocking it. Keep it queued so the
+            # worker can retry after the blocking condition clears.
+            if handled:
+                self.store.delete_manual_trade_plan(plan_id)
             return True
         except Exception as exc:
             self.store.set_worker_status({
@@ -171,7 +175,7 @@ class AutoTradeEngine:
             self.store.log_event("manual_plan_error", {"error": str(exc), "traceback": traceback.format_exc(), "plan": payload}, signal.symbol, signal.strategy_id)
             raise
 
-    async def submit_signal(self, cfg: AutoTradeConfig, signal: TradeSignal, now: str) -> None:
+    async def submit_signal(self, cfg: AutoTradeConfig, signal: TradeSignal, now: str) -> bool:
         if self.store.signal_was_fired(signal.signal_id):
             self.store.set_worker_status({
                 "running": True,
@@ -181,7 +185,7 @@ class AutoTradeEngine:
                 "last_signal": signal.dict(),
                 "last_error": None,
             })
-            return
+            return True
 
         approved, reason, qty = await asyncio.to_thread(self.risk_check, cfg, signal)
         if not approved:
@@ -194,7 +198,7 @@ class AutoTradeEngine:
                 "last_error": None,
             })
             self.store.log_event("skip", {"reason": reason, "signal": signal.dict()}, signal.symbol, signal.strategy_id)
-            return
+            return False
 
         order = await asyncio.to_thread(self.execute, cfg, signal, qty)
         order_id = str((order or {}).get("id") or "")
@@ -229,6 +233,7 @@ class AutoTradeEngine:
             "last_error": None,
         })
         self.store.log_event("ordered", {"qty": qty, "order": order, "signal": signal.dict()}, signal.symbol, signal.strategy_id)
+        return True
 
     async def manage_active_synthetic_trades(self, cfg: AutoTradeConfig) -> None:
         states = self.store.get_runner_states()

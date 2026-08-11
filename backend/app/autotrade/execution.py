@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Any, Dict
 
 from app.autotrade.models import AutoTradeConfig, TradeSignal
@@ -26,14 +27,21 @@ class ExecutionEngine:
         bracket orders in extended hours. The dedicated backend worker owns
         synthetic stop/target lifecycle management.
         """
-        client_order_id = f"autotrade_{signal.strategy_id}_{signal.symbol}_{int(datetime.now(timezone.utc).timestamp())}"
-        entry_price = normalize_alpaca_price(float(signal.entry_price))
-
-        # Protected overnight entries must survive session boundaries.
-        is_protected_overnight = str(signal.strategy_id or "").strip() in {
+        # Alpaca caps client_order_id at 48 characters.  The full strategy
+        # name "overnight_protected_order" made the old ID too long for
+        # normal ticker symbols, so use a compact strategy tag.
+        strategy_id = str(signal.strategy_id or "").strip()
+        is_protected_overnight = strategy_id in {
             "overnight_protected_order",
             "overnite_hail_mary",  # Legacy compatibility alias.
         }
+        strategy_tag = "opo" if is_protected_overnight else strategy_id.replace("_", "-")[:12]
+        symbol_tag = str(signal.symbol or "").upper().replace(".", "-")[:8]
+        ts = int(datetime.now(timezone.utc).timestamp())
+        client_order_id = f"autotrade_{strategy_tag}_{symbol_tag}_{ts}_{uuid4().hex[:6]}"[:48]
+        entry_price = normalize_alpaca_price(float(signal.entry_price))
+
+        # Protected overnight entries must survive session boundaries.
         time_in_force = "gtc" if is_protected_overnight else "day"
         extended_hours = True if is_protected_overnight else bool(self.config.extended_hours)
 

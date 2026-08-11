@@ -135,6 +135,8 @@ export default function AutoTradeWidget({
   }, [normalizedSymbol, status]);
 
   const workerOnline = Boolean(status?.running);
+  const serverError = String(status?.last_error ?? status?.worker?.last_error ?? "").trim();
+  const serverBlockedReason = String(status?.last_skip?.reason ?? "").trim();
   const currentPhase = String(runnerState?.phase ?? "");
   const currentStatus = runnerState
     ? phaseLabel(currentPhase)
@@ -354,6 +356,12 @@ export default function AutoTradeWidget({
       )}
       {message && <div style={styles.success}>{message}</div>}
       {error && <div style={styles.error}>{error}</div>}
+      {queuedPlan && serverError && (
+        <div style={styles.error}>Server: {serverError}</div>
+      )}
+      {queuedPlan && !serverError && serverBlockedReason && (
+        <div style={styles.warning}>Server: {serverBlockedReason}</div>
+      )}
 
       <button
         type="button"
