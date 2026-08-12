@@ -87,6 +87,30 @@ type ScannerRow = {
   liquidity_level?: number;
   touch_count?: number;
   trigger_level?: number;
+  grade?: "A+" | "A" | string;
+  live_rank?: number | null;
+  rank_at_freeze?: number | null;
+  session?: "PM" | "AH" | string;
+  confirmation_status?: string;
+  confirmed?: boolean;
+  strong_confirmed?: boolean;
+  target_hit?: boolean;
+  freeze_price?: number;
+  target_price?: number;
+  frozen_target?: number;
+  target_distance_pct?: number;
+  displacement_pct?: number;
+  displacement_open?: number;
+  displacement_high?: number;
+  displacement_low?: number;
+  displacement_close?: number;
+  displacement_volume?: number;
+  displacement_time?: string;
+  freeze_time?: string;
+  projection_peak_time?: string;
+  freeze_reason?: string;
+  bars_to_freeze?: number;
+  is_live_top20_now?: boolean;
 };
 
 type ScannerResponse = {
@@ -115,6 +139,12 @@ function formatVolume(value?: number | null): string {
 function formatMaybe(value: number | null | undefined, digits = 2): string {
   if (value == null || Number.isNaN(value)) return "-";
   return value.toFixed(digits);
+}
+
+function formatPrice(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "-";
+  const digits = Math.abs(value) < 1 ? 4 : 2;
+  return `$${value.toFixed(digits)}`;
 }
 
 function arraysEqual(a: string[], b: string[]): boolean {
@@ -357,6 +387,8 @@ export default function ScannerPanel({
     () => definitions.find((item) => item.id === selectedScannerId) ?? null,
     [definitions, selectedScannerId],
   );
+
+  const isVwap3TargetScanner = selectedScannerId === "vwap3_target";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -786,7 +818,7 @@ export default function ScannerPanel({
 
   const filteredRows = useMemo(() => {
     const byRunner = rows.filter((row) => {
-      if (runnerTypeFilter === "all") return true;
+      if (isVwap3TargetScanner || runnerTypeFilter === "all") return true;
       return String(row.runner_type ?? "").toLowerCase() === runnerTypeFilter;
     });
 
@@ -808,7 +840,7 @@ export default function ScannerPanel({
     });
 
     return sorted;
-  }, [rows, runnerTypeFilter, sortKey, sortDir]);
+  }, [rows, runnerTypeFilter, sortKey, sortDir, isVwap3TargetScanner]);
 
   const runnerCounts = useMemo(() => {
     const momentum = rows.filter(
@@ -1101,13 +1133,20 @@ export default function ScannerPanel({
           <label style={labelStyle}>
             <div style={labelTextStyle}>Workflow</div>
             <select
-              value={workflow}
+              value={isVwap3TargetScanner ? "live" : workflow}
               onChange={(e) => setWorkflow(e.target.value as Workflow)}
               style={inputStyle}
+              disabled={isVwap3TargetScanner}
             >
-              <option value="auto">Auto</option>
-              <option value="combined">Combined (Saved AH + PM)</option>
-              <option value="live">Live PM Only</option>
+              {isVwap3TargetScanner ? (
+                <option value="live">Live PM + AH</option>
+              ) : (
+                <>
+                  <option value="auto">Auto</option>
+                  <option value="combined">Combined (Saved AH + PM)</option>
+                  <option value="live">Live PM Only</option>
+                </>
+              )}
             </select>
           </label>
 
@@ -1117,9 +1156,11 @@ export default function ScannerPanel({
               value={ahDate}
               onChange={(e) => setAhDate(e.target.value)}
               style={inputStyle}
-              disabled={workflow !== "combined"}
+              disabled={isVwap3TargetScanner || workflow !== "combined"}
             >
-              {snapshotDates.length ? (
+              {isVwap3TargetScanner ? (
+                <option value="">Not used by VWAP +3</option>
+              ) : snapshotDates.length ? (
                 snapshotDates.map((dateValue, index) => (
                   <option
                     key={`snapshot-${dateValue}-${index}`}
@@ -1145,14 +1186,20 @@ export default function ScannerPanel({
             }}
           >
             <div style={{ fontWeight: 700, marginBottom: 6 }}>
-              Overnight Workflow
+              {isVwap3TargetScanner ? "VWAP +3 Target" : "Overnight Workflow"}
             </div>
             <div>
               {selectedDefinition?.description ?? "Loading scanner module..."}
             </div>
-            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
-              Latest saved AH: {latestSnapshot || "none"}
-            </div>
+            {!isVwap3TargetScanner ? (
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
+                Latest saved AH: {latestSnapshot || "none"}
+              </div>
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
+                Automatic live Top-20 scan. No saved AH snapshot is required.
+              </div>
+            )}
             {data?.meta?.workflow_auto_rule ? (
               <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
                 {data.meta.workflow_auto_rule}
@@ -1160,17 +1207,41 @@ export default function ScannerPanel({
             ) : null}
           </div>
 
-          <button
-            onClick={handleSaveAfterhours}
-            disabled={savingAh}
-            style={{ ...buttonStyle, minWidth: 150 }}
-          >
-            {savingAh ? "Saving AH..." : "Save AH Snapshot"}
-          </button>
+          {isVwap3TargetScanner ? (
+            <div
+              style={{
+                ...buttonStyle,
+                minWidth: 150,
+                cursor: "default",
+                opacity: 0.8,
+                textAlign: "center",
+              }}
+            >
+              Auto Live
+            </div>
+          ) : (
+            <button
+              onClick={handleSaveAfterhours}
+              disabled={savingAh}
+              style={{ ...buttonStyle, minWidth: 150 }}
+            >
+              {savingAh ? "Saving AH..." : "Save AH Snapshot"}
+            </button>
+          )}
         </div>
       ) : null}
 
-      {isWorkspace ? (
+      {isWorkspace && isVwap3TargetScanner ? (
+        <div style={panelStyle}>
+          <div style={{ fontWeight: 800, marginBottom: 8 }}>VWAP +3 Target Rules</div>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 13 }}>
+            <span><strong>A+</strong> = frozen target &lt; 10% from freeze close</span>
+            <span><strong>A</strong> = frozen target 10-15%</span>
+            <span><strong>Confirmed</strong> = 5m close above displacement close/body</span>
+            <span><strong>Strong</strong> = 5m close above displacement high/wick</span>
+          </div>
+        </div>
+      ) : isWorkspace ? (
         <div style={panelStyle}>
           <div
             style={{
@@ -1422,6 +1493,7 @@ export default function ScannerPanel({
               flexWrap: "wrap",
             }}
           >
+            {!isVwap3TargetScanner ? (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
                 onClick={() => setRunnerTypeFilter("all")}
@@ -1452,11 +1524,14 @@ export default function ScannerPanel({
                 Overnight ({runnerCounts.overnight})
               </button>
             </div>
+            ) : (
+              <div style={{ fontSize: 13, fontWeight: 700 }}>Live validated target setups</div>
+            )}
             <div style={{ fontSize: 12, opacity: 0.8 }}>
               Sort: {String(sortKey)} ({sortDir})
             </div>
           </div>
-          {activeFilterChips.length ? (
+          {!isVwap3TargetScanner && activeFilterChips.length ? (
             <div
               style={{
                 display: "flex",
@@ -1543,6 +1618,138 @@ export default function ScannerPanel({
               );
             })}
           </div>
+        ) : isVwap3TargetScanner ? (
+          <table
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
+          >
+            <thead
+              style={{
+                position: "sticky",
+                top: 0,
+                background: "#161d29",
+                zIndex: 1,
+              }}
+            >
+              <tr>
+                {[
+                  ["alert", "Alert"],
+                  ["symbol", "Symbol"],
+                  ["grade", "Grade"],
+                  ["rank_at_freeze", "Rank@Freeze"],
+                  ["session", "Session"],
+                  ["confirmation_status", "Status"],
+                  ["last_price", "Last"],
+                  ["freeze_price", "Freeze"],
+                  ["target_price", "TARGET"],
+                  ["target_distance_pct", "Target Dist"],
+                  ["displacement_pct", "Displacement"],
+                  ["displacement_close", "Disp Close"],
+                  ["displacement_high", "Disp High"],
+                  ["freeze_time", "Freeze Time"],
+                  ["notes", "Notes"],
+                ].map(([key, header], index) => (
+                  <th
+                    key={`vwap3-header-${String(key)}-${index}`}
+                    onClick={() =>
+                      key !== "notes" && key !== "alert"
+                        ? toggleSort(key as keyof ScannerRow)
+                        : undefined
+                    }
+                    style={{
+                      textAlign:
+                        header === "Symbol" ||
+                        header === "Grade" ||
+                        header === "Session" ||
+                        header === "Status" ||
+                        header === "Notes" ||
+                        header === "Alert"
+                          ? "left"
+                          : "right",
+                      padding: "10px 12px",
+                      borderBottom: "1px solid #2a2f3a",
+                      whiteSpace: "nowrap",
+                      cursor:
+                        key !== "notes" && key !== "alert"
+                          ? "pointer"
+                          : "default",
+                    }}
+                  >
+                    {header}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRows.map((row, index) => {
+                const symbol = normalizeSymbol(row.symbol);
+                const isSelected = symbol === currentSelectedSymbol;
+                const statusText = String(row.confirmation_status ?? "WAITING");
+                const statusColor =
+                  statusText === "TARGET HIT"
+                    ? "#66d17a"
+                    : statusText === "STRONG CONFIRMED"
+                      ? "#79c7ff"
+                      : statusText === "CONFIRMED"
+                        ? "#b9e679"
+                        : "#f0c36a";
+                const gradeColor = row.grade === "A+" ? "#66d17a" : "#f0c36a";
+                return (
+                  <tr
+                    key={`vwap3-row-${symbol}-${index}`}
+                    onClick={() => handleScannerSymbolSelect(symbol)}
+                    style={{
+                      cursor: "pointer",
+                      background: isSelected
+                        ? "rgba(120, 90, 255, 0.18)"
+                        : "transparent",
+                    }}
+                  >
+                    <td style={cellLeft}>{renderAlertArmButton(symbol)}</td>
+                    <td style={cellLeft}><strong>{symbol}</strong></td>
+                    <td style={{ ...cellLeft, color: gradeColor, fontWeight: 900 }}>
+                      {row.grade ?? "-"}
+                    </td>
+                    <td style={cellRight}>{row.rank_at_freeze ?? "-"}</td>
+                    <td style={cellLeft}>{row.session ?? "-"}</td>
+                    <td style={{ ...cellLeft, color: statusColor, fontWeight: 800 }}>
+                      {statusText}
+                    </td>
+                    <td style={cellRight}>{formatPrice(row.last_price ?? row.price)}</td>
+                    <td style={cellRight}>{formatPrice(row.freeze_price)}</td>
+                    <td style={{ ...cellRight, color: "#79c7ff", fontWeight: 900, fontSize: 14 }}>
+                      {formatPrice(row.target_price ?? row.frozen_target)}
+                    </td>
+                    <td style={cellRight}>
+                      {formatMaybe(row.target_distance_pct)}%
+                    </td>
+                    <td style={cellRight}>
+                      {formatMaybe(row.displacement_pct)}%
+                    </td>
+                    <td style={cellRight}>{formatPrice(row.displacement_close)}</td>
+                    <td style={cellRight}>{formatPrice(row.displacement_high)}</td>
+                    <td style={cellRight}>
+                      {row.freeze_time
+                        ? new Date(row.freeze_time).toLocaleString([], {
+                            month: "numeric",
+                            day: "numeric",
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })
+                        : "-"}
+                    </td>
+                    <td style={cellLeft}>{(row.notes ?? []).join(", ") || "-"}</td>
+                  </tr>
+                );
+              })}
+              {!loading && filteredRows.length === 0 ? (
+                <tr>
+                  <td colSpan={15} style={{ padding: 16, opacity: 0.7 }}>
+                    No A+/A VWAP +3 target setups are active right now.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
         ) : (
           <table
             style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
