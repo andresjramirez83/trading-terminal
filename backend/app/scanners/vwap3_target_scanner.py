@@ -27,10 +27,39 @@ MIN_VOLUME = 50_000.0
 MIN_CLOSE_LOCATION = 0.65
 A_PLUS_MAX_DISTANCE_PCT = 10.0
 A_MAX_DISTANCE_PCT = 15.0
+
+PM_RUNNER_MIN_DISTANCE_PCT = 20.0
+PM_RUNNER_MAX_DISTANCE_PCT = 25.0
+PM_RUNNER_MIN_RANGE_PCT = 7.0
+
+PM_EXTREME_MIN_DISTANCE_PCT = 25.0
+PM_EXTREME_MAX_DISTANCE_PCT = 30.0
+PM_EXTREME_MIN_BODY_PCT = 20.0
+PM_EXTREME_MIN_RANGE_PCT = 20.0
+PM_EXTREME_T1_PCT = 20.0
+
 WARMUP_CALENDAR_DAYS = 30
 MAX_NATIVE_5M_BARS = 5000
 TRACKED_MAX_AGE_DAYS = 14
 COMPLETED_KEEP_DAYS = 1
+
+
+def _grade_base_score(grade: str) -> int:
+    return {
+        "A+": 92,
+        "A": 78,
+        "PM RUNNER": 72,
+        "PM EXTREME RUNNER WATCH": 64,
+    }.get(str(grade or ""), 60)
+
+
+def _grade_sort_order(grade: str) -> int:
+    return {
+        "A+": 0,
+        "A": 1,
+        "PM RUNNER": 2,
+        "PM EXTREME RUNNER WATCH": 3,
+    }.get(str(grade or ""), 9)
 
 
 def _state_path() -> Path:
@@ -355,8 +384,8 @@ class VWAP3TargetScanner(ScannerBase):
     id = "vwap3_target"
     name = "VWAP +3 Target"
     description = (
-        "Live Top-20 displacement scanner using the validated continuous VWAP + 20-bar STD projection. "
-        "A+ target distance is under 10%; A is 10-15%."
+        "Live Top-20 displacement scanner using continuous VWAP + 20-bar STD projection. "
+        "A+ is under 10%; A is 10-15%; validated premarket Runner classes are tracked separately."
     )
 
     def __init__(self) -> None:
@@ -469,105 +498,241 @@ class VWAP3TargetScanner(ScannerBase):
         now_et: datetime,
         session_start: int,
         session_end: int,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> List[Dict[str, Any]]:
         indexes = _session_indexes(rows, trade_date, session_start, session_end)
         if not indexes:
-            return None
+            return []
 
         tps = [_typical_price(row) for row in rows]
         vwaps = _continuous_vwap(rows)
-
-        event_idx: Optional[int] = None
-        for idx in indexes:
-            if not _qualifies_displacement(rows[idx]):
-                continue
-            if _rolling_std(tps, idx, STD_LENGTH) is None:
-                continue
-            event_idx = idx
-            break
-
-        if event_idx is None:
-            return None
 
         last_session_idx = indexes[-1]
         hhmm_now = now_et.hour * 100 + now_et.minute
         session_has_ended = hhmm_now >= session_end or str(now_et.date()) > trade_date
 
-        projection = _find_projection(
-            rows,
-            tps,
-            vwaps,
-            event_idx,
-            last_session_idx,
-            session_has_ended=session_has_ended,
-        )
-        if projection is None or projection["already_reached_before_freeze"]:
-            return None
+        qualified: List[Dict[str, Any]] = []
+        seen_setup_keys = set()
 
-        freeze_idx = int(projection["freeze_idx"])
-        event = rows[event_idx]
-        freeze = rows[freeze_idx]
-        target = float(projection["target"])
-        freeze_close = _safe_float(freeze.get("close"))
-        if freeze_close <= 0:
-            return None
+        # Evaluate every qualifying displacement in the session.
+        # An earlier failed displacement must not block a later valid leg.
+        for event_idx in indexes:
+            event = rows[event_idx]
 
-        target_distance_pct = _pct(target, freeze_close)
-        if target_distance_pct < 0 or target_distance_pct >= A_MAX_DISTANCE_PCT:
-            return None
+            if not _qualifies_displacement(event):
+                continue
 
-        grade = "A+" if target_distance_pct < A_PLUS_MAX_DISTANCE_PCT else "A"
-        displacement_open = _safe_float(event.get("open"))
-        displacement_close = _safe_float(event.get("close"))
-        displacement_high = _safe_float(event.get("high"))
-        displacement_low = _safe_float(event.get("low"))
-        displacement_pct = _pct(displacement_close, displacement_open)
-        freeze_time = str(freeze.get("dt_et") or "")
-        setup_key = f"{symbol}|{pool}|{freeze_time}"
+            if _rolling_std(tps, event_idx, STD_LENGTH) is None:
+                continue
 
-        row: Dict[str, Any] = {
-            "setup_key": setup_key,
-            "symbol": symbol,
-            "scanner_id": self.id,
-            "runner_type": "vwap3",
-            "source": "vwap3_target",
-            "direction": "bullish",
-            "grade": grade,
-            "live_rank": live_rank,
-            "rank_at_freeze": live_rank,
-            "rank_source": "alpaca_live_movers",
-            "session": "PM" if pool == "premarket" else "AH",
-            "pool": pool,
-            "trade_date": trade_date,
-            "last_price": round(last_price or _safe_float(rows[-1].get("close")), 6),
-            "price": round(last_price or _safe_float(rows[-1].get("close")), 6),
-            "change_pct": round(change_pct, 3),
-            "pm_gap_pct": round(change_pct, 3),
-            "freeze_price": round(freeze_close, 6),
-            "target_price": round(target, 6),
-            "frozen_target": round(target, 6),
-            "target_distance_pct": round(target_distance_pct, 3),
-            "displacement_pct": round(displacement_pct, 3),
-            "displacement_open": round(displacement_open, 6),
-            "displacement_high": round(displacement_high, 6),
-            "displacement_low": round(displacement_low, 6),
-            "displacement_close": round(displacement_close, 6),
-            "displacement_volume": int(_safe_float(event.get("volume"))),
-            "displacement_time": event.get("dt_et"),
-            "freeze_time": freeze_time,
-            "projection_peak_time": rows[int(projection["peak_idx"])].get("dt_et"),
-            "freeze_reason": projection.get("freeze_reason"),
-            "bars_to_freeze": int(projection.get("bars_to_freeze") or 0),
-            "score": 92 if grade == "A+" else 78,
-            "runner_score": 92 if grade == "A+" else 78,
-            "notes": [
-                f"Target ${target:.4f}" if target < 1 else f"Target ${target:.2f}",
-                f"Target distance {target_distance_pct:.2f}%",
-            ],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
+            projection = _find_projection(
+                rows,
+                tps,
+                vwaps,
+                event_idx,
+                last_session_idx,
+                session_has_ended=session_has_ended,
+            )
 
-        return _status_from_rows(rows, row)
+            if projection is None:
+                continue
+
+            if projection["already_reached_before_freeze"]:
+                continue
+
+            freeze_idx = int(projection["freeze_idx"])
+            freeze = rows[freeze_idx]
+
+            full_target = float(projection["target"])
+            freeze_close = _safe_float(freeze.get("close"))
+
+            if freeze_close <= 0:
+                continue
+
+            target_distance_pct = _pct(full_target, freeze_close)
+
+            if target_distance_pct < 0:
+                continue
+
+            displacement_open = _safe_float(event.get("open"))
+            displacement_close = _safe_float(event.get("close"))
+            displacement_high = _safe_float(event.get("high"))
+            displacement_low = _safe_float(event.get("low"))
+
+            displacement_pct = _pct(displacement_close, displacement_open)
+            displacement_range_pct = _pct(displacement_high, displacement_low)
+
+            grade: Optional[str] = None
+            actionable_target = full_target
+            t1_target: Optional[float] = None
+            actionable_distance_pct = target_distance_pct
+
+            # Existing validated A+/A behavior stays unchanged.
+            if target_distance_pct < A_PLUS_MAX_DISTANCE_PCT:
+                grade = "A+"
+
+            elif target_distance_pct < A_MAX_DISTANCE_PCT:
+                grade = "A"
+
+            # 15-20% remains rejected for now.
+
+            # Validated PM Runner:
+            # 20-25% full +3 projection + displacement range >= 7%.
+            elif (
+                pool == "premarket"
+                and PM_RUNNER_MIN_DISTANCE_PCT
+                <= target_distance_pct
+                < PM_RUNNER_MAX_DISTANCE_PCT
+                and displacement_range_pct >= PM_RUNNER_MIN_RANGE_PCT
+            ):
+                grade = "PM RUNNER"
+
+            # BOXL-type extreme displacement:
+            # 25-30% full +3 projection,
+            # body >=20%, range >=20%.
+            # Actionable T1 is +20% from freeze; full +3 remains T2.
+            elif (
+                pool == "premarket"
+                and PM_EXTREME_MIN_DISTANCE_PCT
+                <= target_distance_pct
+                < PM_EXTREME_MAX_DISTANCE_PCT
+                and displacement_pct >= PM_EXTREME_MIN_BODY_PCT
+                and displacement_range_pct >= PM_EXTREME_MIN_RANGE_PCT
+            ):
+                grade = "PM EXTREME RUNNER WATCH"
+                t1_target = freeze_close * (1.0 + PM_EXTREME_T1_PCT / 100.0)
+                actionable_target = t1_target
+                actionable_distance_pct = PM_EXTREME_T1_PCT
+
+            else:
+                continue
+
+            freeze_time = str(freeze.get("dt_et") or "")
+            setup_key = f"{symbol}|{pool}|{freeze_time}"
+
+            # Several displacement candles can resolve to the same projection
+            # freeze. Keep one signal for that frozen projection.
+            if setup_key in seen_setup_keys:
+                continue
+
+            seen_setup_keys.add(setup_key)
+
+            base_score = _grade_base_score(grade)
+
+            notes: List[str] = []
+
+            if grade == "PM EXTREME RUNNER WATCH":
+                notes.extend(
+                    [
+                        (
+                            f"T1 ${actionable_target:.4f}"
+                            if actionable_target < 1
+                            else f"T1 ${actionable_target:.2f}"
+                        ),
+                        (
+                            f"T2 +3 ${full_target:.4f}"
+                            if full_target < 1
+                            else f"T2 +3 ${full_target:.2f}"
+                        ),
+                        f"Full +3 distance {target_distance_pct:.2f}%",
+                        (
+                            f"Extreme displacement: body {displacement_pct:.2f}% "
+                            f"| range {displacement_range_pct:.2f}%"
+                        ),
+                    ]
+                )
+            else:
+                notes.extend(
+                    [
+                        (
+                            f"Target ${full_target:.4f}"
+                            if full_target < 1
+                            else f"Target ${full_target:.2f}"
+                        ),
+                        f"Target distance {target_distance_pct:.2f}%",
+                    ]
+                )
+
+                if grade == "PM RUNNER":
+                    notes.append(
+                        f"PM Runner range {displacement_range_pct:.2f}%"
+                    )
+
+            row: Dict[str, Any] = {
+                "setup_key": setup_key,
+                "symbol": symbol,
+                "scanner_id": self.id,
+                "runner_type": "vwap3",
+                "source": "vwap3_target",
+                "direction": "bullish",
+                "grade": grade,
+                "setup_class": grade,
+                "live_rank": live_rank,
+                "rank_at_freeze": live_rank,
+                "rank_source": "alpaca_live_movers",
+                "session": "PM" if pool == "premarket" else "AH",
+                "pool": pool,
+                "trade_date": trade_date,
+                "last_price": round(
+                    last_price or _safe_float(rows[-1].get("close")), 6
+                ),
+                "price": round(
+                    last_price or _safe_float(rows[-1].get("close")), 6
+                ),
+
+                "change_pct": round(change_pct, 3),
+                "pm_gap_pct": round(change_pct, 3),
+
+                "freeze_price": round(freeze_close, 6),
+
+                # target_price is the level used for live TARGET HIT status.
+                "target_price": round(actionable_target, 6),
+
+                # frozen_target always preserves the actual +3 projection.
+                "frozen_target": round(full_target, 6),
+                "full_target_price": round(full_target, 6),
+
+                "t1_target_price": (
+                    round(t1_target, 6)
+                    if t1_target is not None
+                    else None
+                ),
+
+                "target_distance_pct": round(target_distance_pct, 3),
+                "action_target_distance_pct": round(
+                    actionable_distance_pct, 3
+                ),
+
+                "displacement_pct": round(displacement_pct, 3),
+                "displacement_range_pct": round(
+                    displacement_range_pct, 3
+                ),
+                "displacement_open": round(displacement_open, 6),
+                "displacement_high": round(displacement_high, 6),
+                "displacement_low": round(displacement_low, 6),
+                "displacement_close": round(displacement_close, 6),
+                "displacement_volume": int(
+                    _safe_float(event.get("volume"))
+                ),
+                "displacement_time": event.get("dt_et"),
+
+                "freeze_time": freeze_time,
+                "projection_peak_time": rows[
+                    int(projection["peak_idx"])
+                ].get("dt_et"),
+                "freeze_reason": projection.get("freeze_reason"),
+                "bars_to_freeze": int(
+                    projection.get("bars_to_freeze") or 0
+                ),
+
+                "score": base_score,
+                "runner_score": base_score,
+                "notes": notes,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            qualified.append(_status_from_rows(rows, row))
+
+        return qualified
 
     async def run(
         self,
@@ -606,7 +771,7 @@ class VWAP3TargetScanner(ScannerBase):
             trade_date = now_et.date().isoformat()
             semaphore = asyncio.Semaphore(5)
 
-            async def inspect(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            async def inspect(raw: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
                 symbol = str(raw.get("symbol") or raw.get("ticker") or "").upper().strip()
                 if not symbol:
                     return None
@@ -633,26 +798,34 @@ class VWAP3TargetScanner(ScannerBase):
                         scan_errors.append({"symbol": symbol, "error": str(exc)})
                         return None
 
-            candidates = await asyncio.gather(*(inspect(row) for row in top20))
-            for candidate in candidates:
-                if candidate is None:
+            candidate_groups = await asyncio.gather(*(inspect(row) for row in top20))
+
+            for candidate_group in candidate_groups:
+                if not candidate_group:
                     continue
-                key = str(candidate.get("setup_key") or "")
-                if not key:
-                    continue
-                existing = self._tracked.get(key)
-                if existing is None:
-                    newly_qualified += 1
-                else:
-                    # Rank@Freeze is historical context. Once captured, never
-                    # rewrite it with a later scan's live rank.
-                    candidate["rank_at_freeze"] = existing.get(
-                        "rank_at_freeze", candidate.get("rank_at_freeze")
-                    )
-                    candidate["created_at"] = existing.get(
-                        "created_at", candidate.get("created_at")
-                    )
-                self._tracked[key] = candidate
+
+                for candidate in candidate_group:
+                    key = str(candidate.get("setup_key") or "")
+                    if not key:
+                        continue
+
+                    existing = self._tracked.get(key)
+
+                    if existing is None:
+                        newly_qualified += 1
+                    else:
+                        # Rank@Freeze is historical context. Once captured,
+                        # never rewrite it with a later scan's live rank.
+                        candidate["rank_at_freeze"] = existing.get(
+                            "rank_at_freeze",
+                            candidate.get("rank_at_freeze"),
+                        )
+                        candidate["created_at"] = existing.get(
+                            "created_at",
+                            candidate.get("created_at"),
+                        )
+
+                    self._tracked[key] = candidate
 
         # Refresh existing signals even when they have left the live Top-20 or
         # the market has moved into RTH. This prevents a valid signal from
@@ -690,7 +863,7 @@ class VWAP3TargetScanner(ScannerBase):
             current_rank = rank_map.get(symbol)
             row["live_rank"] = current_rank
             row["is_live_top20_now"] = current_rank is not None
-            base_score = 92 if row.get("grade") == "A+" else 78
+            base_score = _grade_base_score(str(row.get("grade") or ""))
             if row.get("confirmation_status") == "CONFIRMED":
                 base_score += 3
             elif row.get("confirmation_status") == "STRONG CONFIRMED":
@@ -713,7 +886,7 @@ class VWAP3TargetScanner(ScannerBase):
         }
         rows.sort(
             key=lambda row: (
-                0 if row.get("grade") == "A+" else 1,
+                _grade_sort_order(str(row.get("grade") or "")),
                 status_order.get(str(row.get("confirmation_status") or ""), 9),
                 _safe_float(row.get("target_distance_pct")),
                 int(row.get("rank_at_freeze") or 999),
@@ -751,6 +924,23 @@ class VWAP3TargetScanner(ScannerBase):
                         A_PLUS_MAX_DISTANCE_PCT,
                         A_MAX_DISTANCE_PCT,
                     ],
+                    "pm_runner": {
+                        "target_distance_range_pct": [
+                            PM_RUNNER_MIN_DISTANCE_PCT,
+                            PM_RUNNER_MAX_DISTANCE_PCT,
+                        ],
+                        "min_displacement_range_pct": PM_RUNNER_MIN_RANGE_PCT,
+                    },
+                    "pm_extreme_runner_watch": {
+                        "target_distance_range_pct": [
+                            PM_EXTREME_MIN_DISTANCE_PCT,
+                            PM_EXTREME_MAX_DISTANCE_PCT,
+                        ],
+                        "min_displacement_body_pct": PM_EXTREME_MIN_BODY_PCT,
+                        "min_displacement_range_pct": PM_EXTREME_MIN_RANGE_PCT,
+                        "t1_from_freeze_pct": PM_EXTREME_T1_PCT,
+                        "t2": "actual frozen +3 projection",
+                    },
                     "confirmation": "5m close above displacement close/body",
                     "strong_confirmation": "5m close above displacement high/wick",
                 },
