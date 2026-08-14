@@ -101,6 +101,11 @@ type ScannerRow = {
   freeze_price?: number;
   target_price?: number;
   frozen_target?: number;
+  lower_3std_price?: number;
+  lower_3std_distance_pct?: number;
+  std_band_width?: number;
+  std_band_width_pct?: number;
+  target_method?: string;
   target_distance_pct?: number;
   displacement_pct?: number;
   displacement_open?: number;
@@ -1726,7 +1731,9 @@ export default function ScannerPanel({
                   ["confirmation_status", "Status"],
                   ["last_price", "Last"],
                   ["freeze_price", "Hist Freeze"],
-                  ["target_price", "TARGET"],
+                  ["target_price", "+3 TARGET"],
+                  ["lower_3std_price", "-3 STD"],
+                  ["std_band_width_pct", "+3/-3 Range"],
                   ["target_distance_pct", "Target Dist"],
                   ["displacement_pct", "Displacement"],
                   ["displacement_close", "Disp Close"],
@@ -1809,6 +1816,12 @@ export default function ScannerPanel({
                     <td style={{ ...cellRight, color: "#79c7ff", fontWeight: 900, fontSize: 14 }}>
                       {formatPrice(row.target_price ?? row.frozen_target)}
                     </td>
+                    <td style={{ ...cellRight, color: "#ff8a8a", fontWeight: 800 }}>
+                      {formatPrice(row.lower_3std_price)}
+                    </td>
+                    <td style={cellRight}>
+                      {formatMaybe(row.std_band_width_pct)}%
+                    </td>
                     <td style={cellRight}>
                       {formatMaybe(row.target_distance_pct)}%
                     </td>
@@ -1838,7 +1851,7 @@ export default function ScannerPanel({
               })}
               {!loading && vwap3DisplayedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={19} style={{ padding: 16, opacity: 0.7 }}>
+                  <td colSpan={21} style={{ padding: 16, opacity: 0.7 }}>
                     {vwap3ResultTab === "hits"
                       ? "No VWAP +3 targets have hit yet for this trade day."
                       : "No active VWAP +3 target setups are active right now."}

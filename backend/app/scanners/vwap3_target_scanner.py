@@ -23,8 +23,6 @@ PT = ZoneInfo("America/Los_Angeles")
 
 STD_LENGTH = 20
 MULTIPLIER = 3.0
-PROJECTION_CONTRACTION_BARS = 3
-PROJECTION_MAX_BARS = 36
 MIN_BODY_PCT = 3.0
 MIN_RANGE_PCT = 4.0
 MIN_VOLUME = 50_000.0
@@ -132,16 +130,19 @@ async def _send_pushover_setup_alert(record: Dict[str, Any]) -> Optional[str]:
 
     symbol = str(record.get("symbol") or "").upper().strip()
     grade = str(record.get("grade") or "SETUP")
-    title = f"VWAP +3 {grade} - {symbol}"
+    title = f"VWAP +3 DISPLACEMENT {grade} - {symbol}"
     message = (
-        f"{symbol} {grade} scanner ready\n"
+        f"{symbol} {grade} displacement detected\n"
         f"Disp {_format_pt_time(record.get('displacement_time'))} | "
-        f"Freeze {_format_pt_time(record.get('freeze_time'))}\n"
+        f"Close {_format_price(record.get('displacement_close'))} | "
+        f"High {_format_price(record.get('displacement_high'))}\n"
+        f"Frozen +3 {_format_price(record.get('frozen_target') or record.get('target_price'))} | "
+        f"Dist {_safe_float(record.get('target_distance_pct')):.2f}%\n"
+        f"Frozen -3 {_format_price(record.get('lower_3std_price'))} | "
+        f"Down {_safe_float(record.get('lower_3std_distance_pct')):.2f}% | "
+        f"Band {_safe_float(record.get('std_band_width_pct')):.2f}%\n"
         f"Last {_format_price(record.get('last_price') or record.get('price'))} | "
-        f"Hist Freeze {_format_price(record.get('freeze_price'))} | "
-        f"Target {_format_price(record.get('target_price') or record.get('frozen_target'))}\n"
-        f"Target Dist {_safe_float(record.get('target_distance_pct')):.2f}% | "
-        f"Rank@Freeze {record.get('rank_at_freeze') or '-'}"
+        f"Rank@Disp {record.get('rank_at_freeze') or '-'}"
     )
 
     def _post() -> bool:
@@ -339,84 +340,30 @@ def _session_indexes(
     ]
 
 
-def _find_projection(
-    rows: List[Dict[str, Any]],
+def _freeze_target_on_displacement(
     tps: List[float],
     vwaps: List[float],
     event_idx: int,
-    session_end_idx: int,
-    *,
-    session_has_ended: bool,
-) -> Optional[Dict[str, Any]]:
-    stop_idx = min(session_end_idx, event_idx + PROJECTION_MAX_BARS - 1)
-    peak_idx: Optional[int] = None
-    peak_target = -math.inf
-    peak_vwap = 0.0
-    peak_std = 0.0
-    previous_target: Optional[float] = None
-    consecutive_lower = 0
-    last_examined_idx: Optional[int] = None
-    freeze_idx: Optional[int] = None
-    freeze_reason: Optional[str] = None
-
-    for idx in range(event_idx, stop_idx + 1):
-        deviation = _rolling_std(tps, idx, STD_LENGTH)
-        if deviation is None:
-            continue
-
-        target = vwaps[idx] + MULTIPLIER * deviation
-        last_examined_idx = idx
-
-        if target > peak_target:
-            peak_target = target
-            peak_idx = idx
-            peak_vwap = vwaps[idx]
-            peak_std = deviation
-
-        if previous_target is not None and target < previous_target:
-            consecutive_lower += 1
-        else:
-            consecutive_lower = 0
-        previous_target = target
-
-        if (
-            peak_idx is not None
-            and idx > peak_idx
-            and consecutive_lower >= PROJECTION_CONTRACTION_BARS
-        ):
-            freeze_idx = idx
-            freeze_reason = "3_contractions"
-            break
-
-    if peak_idx is None or last_examined_idx is None or not math.isfinite(peak_target):
+) -> Optional[Dict[str, float]]:
+    """Freeze the +3 STD target on the completed displacement candle itself."""
+    deviation = _rolling_std(tps, event_idx, STD_LENGTH)
+    if deviation is None:
         return None
 
-    reached_max_window = last_examined_idx >= event_idx + PROJECTION_MAX_BARS - 1
-    if freeze_idx is None:
-        if session_has_ended or reached_max_window:
-            freeze_idx = last_examined_idx
-            freeze_reason = "window_end"
-        else:
-            # The projection is still expanding live. Do not freeze early.
-            return None
-
-    max_high_before_freeze = max(
-        _safe_float(rows[idx].get("high"))
-        for idx in range(event_idx, freeze_idx + 1)
-    )
+    vwap = float(vwaps[event_idx])
+    target = vwap + MULTIPLIER * deviation
+    lower_target = vwap - MULTIPLIER * deviation
+    if not math.isfinite(target) or target <= 0:
+        return None
+    if not math.isfinite(lower_target):
+        lower_target = 0.0
 
     return {
-        "peak_idx": peak_idx,
-        "freeze_idx": freeze_idx,
-        "target": peak_target,
-        "peak_vwap": peak_vwap,
-        "peak_std": peak_std,
-        "freeze_reason": freeze_reason,
-        "bars_to_freeze": freeze_idx - event_idx,
-        "max_high_before_freeze": max_high_before_freeze,
-        "already_reached_before_freeze": max_high_before_freeze >= peak_target,
+        "target": float(target),
+        "lower_target": float(lower_target),
+        "vwap": vwap,
+        "std": float(deviation),
     }
-
 
 def _first_index_at_or_after(rows: List[Dict[str, Any]], iso_time: str) -> Optional[int]:
     try:
@@ -486,7 +433,9 @@ class VWAP3TargetScanner(ScannerBase):
     id = "vwap3_target"
     name = "VWAP +3 Target"
     description = (
-        "Persistent hot-universe displacement scanner using continuous VWAP + 20-bar STD projection. "
+        "Persistent hot-universe displacement scanner using continuous VWAP + 20-bar STD. "
+        "The +3 STD target is frozen on the completed displacement candle and alerted immediately. "
+        "The matching -3 STD level from that same candle is frozen as a downside reference/range, not an execution stop. "
         "Watches saved AH runners plus live gainers/actives/losers and pins symbols after displacement. "
         "A+ is under 10%; A is 10-15%; validated premarket Runner classes are tracked separately."
     )
@@ -789,10 +738,6 @@ class VWAP3TargetScanner(ScannerBase):
         tps = [_typical_price(row) for row in rows]
         vwaps = _continuous_vwap(rows)
 
-        last_session_idx = indexes[-1]
-        hhmm_now = now_et.hour * 100 + now_et.minute
-        session_has_ended = hhmm_now >= session_end or str(now_et.date()) > trade_date
-
         qualified: List[Dict[str, Any]] = []
         seen_setup_keys = set()
 
@@ -804,42 +749,47 @@ class VWAP3TargetScanner(ScannerBase):
             if not _qualifies_displacement(event):
                 continue
 
-            if _rolling_std(tps, event_idx, STD_LENGTH) is None:
-                continue
-
-            projection = _find_projection(
-                rows,
-                tps,
-                vwaps,
-                event_idx,
-                last_session_idx,
-                session_has_ended=session_has_ended,
-            )
-
-            if projection is None:
-                continue
-
-            if projection["already_reached_before_freeze"]:
-                continue
-
-            freeze_idx = int(projection["freeze_idx"])
-            freeze = rows[freeze_idx]
-
-            full_target = float(projection["target"])
-            freeze_close = _safe_float(freeze.get("close"))
-
-            if freeze_close <= 0:
-                continue
-
-            target_distance_pct = _pct(full_target, freeze_close)
-
-            if target_distance_pct < 0:
-                continue
-
             displacement_open = _safe_float(event.get("open"))
             displacement_close = _safe_float(event.get("close"))
             displacement_high = _safe_float(event.get("high"))
             displacement_low = _safe_float(event.get("low"))
+
+            frozen = _freeze_target_on_displacement(tps, vwaps, event_idx)
+            if frozen is None:
+                continue
+
+            # New live rule: the completed displacement candle itself is the
+            # freeze candle. No 3-contraction wait. The +3 target is calculated
+            # from continuous VWAP + 3 x 20-bar STD on this exact candle.
+            freeze_idx = event_idx
+            freeze = event
+            freeze_close = displacement_close
+            full_target = float(frozen["target"])
+            lower_3std = float(frozen.get("lower_target", 0.0))
+
+            if freeze_close <= 0:
+                continue
+
+            # Preserve the original "untouched +3" requirement. The target must
+            # still be above the displacement candle high when it is frozen.
+            if displacement_high >= full_target:
+                continue
+
+            target_distance_pct = _pct(full_target, freeze_close)
+            if target_distance_pct < 0:
+                continue
+
+            lower_3std_distance_pct = (
+                ((freeze_close - lower_3std) / freeze_close) * 100.0
+                if freeze_close > 0
+                else 0.0
+            )
+            std_band_width = full_target - lower_3std
+            std_band_width_pct = (
+                (std_band_width / freeze_close) * 100.0
+                if freeze_close > 0
+                else 0.0
+            )
 
             displacement_pct = _pct(displacement_close, displacement_open)
             displacement_range_pct = _pct(displacement_high, displacement_low)
@@ -892,8 +842,8 @@ class VWAP3TargetScanner(ScannerBase):
             freeze_time = str(freeze.get("dt_et") or "")
             setup_key = f"{symbol}|{pool}|{freeze_time}"
 
-            # Several displacement candles can resolve to the same projection
-            # freeze. Keep one signal for that frozen projection.
+            # Each qualifying displacement candle gets its own frozen +3 target.
+            # This preserves multiple independent targets for the same symbol/day.
             if setup_key in seen_setup_keys:
                 continue
 
@@ -918,6 +868,12 @@ class VWAP3TargetScanner(ScannerBase):
                         ),
                         f"Full +3 distance {target_distance_pct:.2f}%",
                         (
+                            f"-3 STD ${lower_3std:.4f}"
+                            if 0 < lower_3std < 1
+                            else (f"-3 STD ${lower_3std:.2f}" if lower_3std > 0 else "-3 STD below $0")
+                        ),
+                        f"+3/-3 band {std_band_width_pct:.2f}%",
+                        (
                             f"Extreme displacement: body {displacement_pct:.2f}% "
                             f"| range {displacement_range_pct:.2f}%"
                         ),
@@ -932,6 +888,12 @@ class VWAP3TargetScanner(ScannerBase):
                             else f"Target ${full_target:.2f}"
                         ),
                         f"Target distance {target_distance_pct:.2f}%",
+                        (
+                            f"-3 STD ${lower_3std:.4f}"
+                            if 0 < lower_3std < 1
+                            else (f"-3 STD ${lower_3std:.2f}" if lower_3std > 0 else "-3 STD below $0")
+                        ),
+                        f"+3/-3 band {std_band_width_pct:.2f}%",
                     ]
                 )
 
@@ -975,6 +937,14 @@ class VWAP3TargetScanner(ScannerBase):
                 "frozen_target": round(full_target, 6),
                 "full_target_price": round(full_target, 6),
 
+                # Matching lower band frozen from the same displacement candle.
+                # Display/reference only for now; it is not an execution stop.
+                "lower_3std_price": round(lower_3std, 6),
+                "lower_3std_distance_pct": round(lower_3std_distance_pct, 3),
+                "std_band_width": round(std_band_width, 6),
+                "std_band_width_pct": round(std_band_width_pct, 3),
+                "target_method": "displacement_candle_vwap_plus_minus_3std",
+
                 "t1_target_price": (
                     round(t1_target, 6)
                     if t1_target is not None
@@ -1000,13 +970,13 @@ class VWAP3TargetScanner(ScannerBase):
                 "displacement_time": event.get("dt_et"),
 
                 "freeze_time": freeze_time,
-                "projection_peak_time": rows[
-                    int(projection["peak_idx"])
-                ].get("dt_et"),
-                "freeze_reason": projection.get("freeze_reason"),
-                "bars_to_freeze": int(
-                    projection.get("bars_to_freeze") or 0
-                ),
+                "projection_peak_time": freeze_time,
+                "freeze_reason": "displacement_candle",
+                "bars_to_freeze": 0,
+                "freeze_vwap": round(float(frozen["vwap"]), 6),
+                "freeze_std": round(float(frozen["std"]), 6),
+                "freeze_upper_3std": round(full_target, 6),
+                "freeze_lower_3std": round(lower_3std, 6),
 
                 "score": base_score,
                 "runner_score": base_score,
@@ -1017,10 +987,13 @@ class VWAP3TargetScanner(ScannerBase):
 
             try:
                 freeze_dt = datetime.fromisoformat(freeze_time).astimezone(ET)
+                displacement_completed_at = freeze_dt + timedelta(minutes=5)
+                row["displacement_completed_at"] = displacement_completed_at.isoformat()
                 row["detection_delay_minutes"] = round(
-                    max(0.0, (now_et - freeze_dt).total_seconds() / 60.0), 2
+                    max(0.0, (now_et - displacement_completed_at).total_seconds() / 60.0), 2
                 )
             except Exception:
+                row["displacement_completed_at"] = None
                 row["detection_delay_minutes"] = None
 
             qualified.append(_status_from_rows(rows, row))
@@ -1117,7 +1090,7 @@ class VWAP3TargetScanner(ScannerBase):
                         print(
                             f"[vwap3-published] {candidate.get('symbol')} "
                             f"grade={candidate.get('grade')} "
-                            f"freeze={candidate.get('freeze_time')} "
+                            f"displacement={candidate.get('displacement_time')} "
                             f"freeze_price={candidate.get('freeze_price')} "
                             f"target={candidate.get('target_price')} "
                             f"delay_min={candidate.get('detection_delay_minutes')} "
@@ -1261,8 +1234,10 @@ class VWAP3TargetScanner(ScannerBase):
                     "multiplier": MULTIPLIER,
                     "vwap_mode": "continuous",
                     "warmup_calendar_days": WARMUP_CALENDAR_DAYS,
-                    "projection_contraction_bars": PROJECTION_CONTRACTION_BARS,
-                    "projection_max_bars": PROJECTION_MAX_BARS,
+                    "target_freeze_mode": "displacement_candle",
+                    "target_freeze_rule": "continuous VWAP + 3 x 20-bar STD on completed displacement candle",
+                    "alert_timing": "first scanner cycle after completed displacement candle qualifies",
+                    "requires_3_contractions": False,
                     "a_plus_target_distance_lt_pct": A_PLUS_MAX_DISTANCE_PCT,
                     "a_target_distance_range_pct": [
                         A_PLUS_MAX_DISTANCE_PCT,
