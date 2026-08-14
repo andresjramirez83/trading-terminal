@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import requests
+
 from app.scanners.base import ScannerBase
 from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
@@ -53,6 +55,7 @@ VWAP3_ACTIVES_LIMIT = 100
 VWAP3_LOSERS_LIMIT = 50
 VWAP3_MAX_WATCH_SYMBOLS = 300
 VWAP3_SCAN_CONCURRENCY = 10
+VWAP3_PUSHOVER_MAX_DELAY_MINUTES = 10.0
 
 
 def _grade_base_score(grade: str) -> int:
@@ -79,6 +82,94 @@ def _state_path() -> Path:
         path = Path(raw)
         return path if path.is_absolute() else Path.cwd() / path
     return Path(__file__).resolve().parents[1] / "data" / "scanner_state" / "vwap3_target.json"
+
+
+def _hit_archive_dir() -> Path:
+    raw = os.getenv("VWAP3_TARGET_HIT_ARCHIVE_DIR", "").strip()
+    if raw:
+        path = Path(raw)
+        return path if path.is_absolute() else Path.cwd() / path
+    return (
+        Path(__file__).resolve().parents[1]
+        / "data"
+        / "scanner_history"
+        / "vwap3_target_hits"
+    )
+
+
+def _format_pt_time(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(PT)
+        return dt.strftime("%-m/%-d %-I:%M %p PT")
+    except Exception:
+        return raw
+
+
+def _format_price(value: Any) -> str:
+    number = _safe_float(value)
+    if number <= 0:
+        return "-"
+    return f"${number:.4f}" if number < 1 else f"${number:.2f}"
+
+
+async def _send_pushover_setup_alert(record: Dict[str, Any]) -> Optional[str]:
+    user_key = os.getenv("PUSHOVER_USER_KEY", "").strip()
+    app_token = os.getenv("PUSHOVER_APP_TOKEN", "").strip()
+    if not user_key or not app_token:
+        print("[vwap3-pushover] skipped reason=not_configured", flush=True)
+        return None
+
+    delay = _safe_float(record.get("detection_delay_minutes"))
+    if delay > VWAP3_PUSHOVER_MAX_DELAY_MINUTES:
+        print(
+            f"[vwap3-pushover] {record.get('symbol')} skipped=stale delay_min={delay:.2f}",
+            flush=True,
+        )
+        return None
+
+    symbol = str(record.get("symbol") or "").upper().strip()
+    grade = str(record.get("grade") or "SETUP")
+    title = f"VWAP +3 {grade} - {symbol}"
+    message = (
+        f"{symbol} {grade} scanner ready\n"
+        f"Disp {_format_pt_time(record.get('displacement_time'))} | "
+        f"Freeze {_format_pt_time(record.get('freeze_time'))}\n"
+        f"Last {_format_price(record.get('last_price') or record.get('price'))} | "
+        f"Hist Freeze {_format_price(record.get('freeze_price'))} | "
+        f"Target {_format_price(record.get('target_price') or record.get('frozen_target'))}\n"
+        f"Target Dist {_safe_float(record.get('target_distance_pct')):.2f}% | "
+        f"Rank@Freeze {record.get('rank_at_freeze') or '-'}"
+    )
+
+    def _post() -> bool:
+        response = requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "token": app_token,
+                "user": user_key,
+                "title": title,
+                "message": message,
+                "priority": 1,
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        return True
+
+    try:
+        await asyncio.to_thread(_post)
+        sent_at = datetime.now(timezone.utc).isoformat()
+        print(
+            f"[vwap3-pushover] sent symbol={symbol} grade={grade} delay_min={delay:.2f}",
+            flush=True,
+        )
+        return sent_at
+    except Exception as exc:
+        print(f"[vwap3-pushover] failed symbol={symbol} error={exc}", flush=True)
+        return None
 
 
 def _safe_float(value: Any) -> float:
@@ -446,6 +537,60 @@ class VWAP3TargetScanner(ScannerBase):
             path.write_text(json.dumps(payload, indent=2, sort_keys=True))
         except Exception as exc:
             print(f"[vwap3-target] state save failed: {exc}", flush=True)
+
+    def _archive_target_hits(self) -> None:
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for row in self._tracked.values():
+            if not row.get("target_hit"):
+                continue
+            trade_date = str(row.get("trade_date") or "").strip()
+            setup_key = str(row.get("setup_key") or "").strip()
+            if not trade_date or not setup_key:
+                continue
+            groups.setdefault(trade_date, []).append(dict(row))
+
+        archive_dir = _hit_archive_dir()
+        for trade_date, rows in groups.items():
+            path = archive_dir / f"{trade_date}.json"
+            merged: Dict[str, Dict[str, Any]] = {}
+            try:
+                if path.exists():
+                    existing = json.loads(path.read_text())
+                    for old in existing.get("rows") or []:
+                        if isinstance(old, dict):
+                            key = str(old.get("setup_key") or "")
+                            if key:
+                                merged[key] = dict(old)
+            except Exception as exc:
+                print(
+                    f"[vwap3-hit-archive] existing load failed date={trade_date} error={exc}",
+                    flush=True,
+                )
+
+            for row in rows:
+                key = str(row.get("setup_key") or "")
+                if key:
+                    merged[key] = row
+
+            archived_rows = list(merged.values())
+            archived_rows.sort(
+                key=lambda row: str(row.get("target_hit_time") or row.get("freeze_time") or "")
+            )
+            try:
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "scanner_id": self.id,
+                    "trade_date": trade_date,
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                    "count": len(archived_rows),
+                    "rows": archived_rows,
+                }
+                path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            except Exception as exc:
+                print(
+                    f"[vwap3-hit-archive] save failed date={trade_date} error={exc}",
+                    flush=True,
+                )
 
     def _cleanup_state(self, now_et: datetime) -> None:
         remove: List[str] = []
@@ -979,6 +1124,9 @@ class VWAP3TargetScanner(ScannerBase):
                             f"sources={','.join(candidate.get('discovery_sources') or [])}",
                             flush=True,
                         )
+                        sent_at = await _send_pushover_setup_alert(candidate)
+                        if sent_at:
+                            candidate["pushover_notified_at"] = sent_at
                     else:
                         # Historical context is captured at first scanner detection.
                         for field in (
@@ -987,6 +1135,7 @@ class VWAP3TargetScanner(ScannerBase):
                             "scanner_detected_at",
                             "detection_delay_minutes",
                             "discovery_sources",
+                            "pushover_notified_at",
                         ):
                             if field in existing:
                                 candidate[field] = existing.get(field)
@@ -1041,6 +1190,7 @@ class VWAP3TargetScanner(ScannerBase):
             row["runner_score"] = row["score"]
             self._tracked[key] = row
 
+        self._archive_target_hits()
         self._cleanup_state(now_et)
         self._save_state()
 
@@ -1061,7 +1211,16 @@ class VWAP3TargetScanner(ScannerBase):
         )
 
         max_rows = max(20, min(100, int(kwargs.get("max_symbols", 25) or 25)))
-        rows = rows[:max_rows]
+        current_trade_date = now_et.date().isoformat()
+        current_rows = [
+            row for row in rows
+            if str(row.get("trade_date") or "") == current_trade_date
+        ]
+        active_rows = [row for row in current_rows if not row.get("target_hit")]
+        target_hit_rows = [row for row in current_rows if row.get("target_hit")]
+        # The live scanner list contains active setups only. Completed targets are
+        # returned separately for the Target Hits review tab.
+        rows = active_rows[:max_rows]
         elapsed_ms = round((time_module.perf_counter() - started) * 1000.0, 1)
 
         source_counts: Dict[str, int] = {}
@@ -1077,6 +1236,7 @@ class VWAP3TargetScanner(ScannerBase):
             "trade_day": now_et.date().isoformat(),
             "count": len(rows),
             "rows": rows,
+            "target_hits": target_hit_rows,
             "meta": {
                 "watch_universe_count": len(watch_items),
                 "watch_source_counts": source_counts,
@@ -1085,6 +1245,13 @@ class VWAP3TargetScanner(ScannerBase):
                 "scanned_count": scanned_count,
                 "newly_qualified": newly_qualified,
                 "tracked_count": len(self._tracked),
+                "active_count": len(active_rows),
+                "target_hit_count": len(target_hit_rows),
+                "target_hit_archive_dir": str(_hit_archive_dir()),
+                "pushover_configured": bool(
+                    os.getenv("PUSHOVER_USER_KEY", "").strip()
+                    and os.getenv("PUSHOVER_APP_TOKEN", "").strip()
+                ),
                 "scan_errors": scan_errors[:10],
                 "elapsed_ms": elapsed_ms,
                 "display_timezone": "America/Los_Angeles",
