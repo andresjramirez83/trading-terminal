@@ -6,6 +6,7 @@ import math
 import os
 import statistics
 import time as time_module
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +17,7 @@ from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 
 ET = ZoneInfo("America/New_York")
+PT = ZoneInfo("America/Los_Angeles")
 
 STD_LENGTH = 20
 MULTIPLIER = 3.0
@@ -42,6 +44,15 @@ WARMUP_CALENDAR_DAYS = 30
 MAX_NATIVE_5M_BARS = 5000
 TRACKED_MAX_AGE_DAYS = 14
 COMPLETED_KEEP_DAYS = 1
+
+# VWAP3 discovery is intentionally broader than the old Top-20-only gate.
+# Saved AH runners are especially important because they let the scanner watch
+# a symbol before it becomes a top premarket mover.
+VWAP3_GAINERS_LIMIT = 50
+VWAP3_ACTIVES_LIMIT = 100
+VWAP3_LOSERS_LIMIT = 50
+VWAP3_MAX_WATCH_SYMBOLS = 300
+VWAP3_SCAN_CONCURRENCY = 10
 
 
 def _grade_base_score(grade: str) -> int:
@@ -384,12 +395,14 @@ class VWAP3TargetScanner(ScannerBase):
     id = "vwap3_target"
     name = "VWAP +3 Target"
     description = (
-        "Live Top-20 displacement scanner using continuous VWAP + 20-bar STD projection. "
+        "Persistent hot-universe displacement scanner using continuous VWAP + 20-bar STD projection. "
+        "Watches saved AH runners plus live gainers/actives/losers and pins symbols after displacement. "
         "A+ is under 10%; A is 10-15%; validated premarket Runner classes are tracked separately."
     )
 
     def __init__(self) -> None:
         self._tracked: Dict[str, Dict[str, Any]] = {}
+        self._watch_pool: Dict[str, Dict[str, Any]] = {}
         self._bars_cache: Dict[str, Tuple[int, List[Dict[str, Any]]]] = {}
         self._load_state()
 
@@ -407,6 +420,17 @@ class VWAP3TargetScanner(ScannerBase):
                     key = str(row.get("setup_key") or "")
                     if key:
                         self._tracked[key] = dict(row)
+
+            watch_pool = payload.get("watch_pool") or []
+            if isinstance(watch_pool, dict):
+                watch_pool = list(watch_pool.values())
+            if isinstance(watch_pool, list):
+                for row in watch_pool:
+                    if not isinstance(row, dict):
+                        continue
+                    symbol = str(row.get("symbol") or "").upper().strip()
+                    if symbol:
+                        self._watch_pool[symbol] = dict(row)
         except Exception as exc:
             print(f"[vwap3-target] state load failed: {exc}", flush=True)
 
@@ -417,6 +441,7 @@ class VWAP3TargetScanner(ScannerBase):
             payload = {
                 "saved_at": datetime.now(timezone.utc).isoformat(),
                 "tracked": list(self._tracked.values()),
+                "watch_pool": list(self._watch_pool.values()),
             }
             path.write_text(json.dumps(payload, indent=2, sort_keys=True))
         except Exception as exc:
@@ -439,6 +464,118 @@ class VWAP3TargetScanner(ScannerBase):
 
         for key in remove:
             self._tracked.pop(key, None)
+
+        # A pin is a same-trading-day monitoring aid, not a permanent watchlist.
+        trade_date = now_et.date().isoformat()
+        self._watch_pool = {
+            symbol: row
+            for symbol, row in self._watch_pool.items()
+            if str(row.get("trade_date") or "") == trade_date
+        }
+
+    @staticmethod
+    def _row_symbol(row: Dict[str, Any]) -> str:
+        return str(row.get("symbol") or row.get("ticker") or "").upper().strip()
+
+    @staticmethod
+    def _snapshot_price(row: Dict[str, Any]) -> float:
+        return _safe_float(
+            row.get("price", (row.get("lastTrade") or {}).get("p"))
+        )
+
+    @staticmethod
+    def _snapshot_change_pct(row: Dict[str, Any]) -> float:
+        return _safe_float(row.get("percent_change", row.get("todaysChangePerc")))
+
+    @staticmethod
+    def _session_has_displacement(
+        rows: List[Dict[str, Any]],
+        trade_date: str,
+        session_start: int,
+        session_end: int,
+    ) -> Optional[str]:
+        indexes = _session_indexes(rows, trade_date, session_start, session_end)
+        for idx in reversed(indexes):
+            if _qualifies_displacement(rows[idx]):
+                return str(rows[idx].get("dt_et") or "")
+        return None
+
+    async def _build_watch_universe(
+        self,
+        market: MarketDataProvider,
+        snapshot_store: ScannerSnapshotStore,
+        now_et: datetime,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[str, List[str]]]:
+        async def safe_call(name: str, limit: int) -> List[Dict[str, Any]]:
+            fn = getattr(market, name, None)
+            if not callable(fn):
+                return []
+            try:
+                rows = await fn(limit=limit)
+                return [dict(row) for row in rows or [] if isinstance(row, dict)]
+            except Exception as exc:
+                print(f"[vwap3-universe] {name} failed: {exc}", flush=True)
+                return []
+
+        gainers, actives, losers = await asyncio.gather(
+            safe_call("get_snapshot_gainers", VWAP3_GAINERS_LIMIT),
+            safe_call("get_snapshot_actives", VWAP3_ACTIVES_LIMIT),
+            safe_call("get_snapshot_losers", VWAP3_LOSERS_LIMIT),
+        )
+
+        rank_map: Dict[str, int] = {}
+        for index, row in enumerate(gainers):
+            symbol = self._row_symbol(row)
+            if symbol and symbol not in rank_map:
+                rank_map[symbol] = index + 1
+
+        merged: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        sources: Dict[str, List[str]] = {}
+
+        def add(symbol: str, source: str, row: Optional[Dict[str, Any]] = None) -> None:
+            symbol = str(symbol or "").upper().strip()
+            if not symbol:
+                return
+            sources.setdefault(symbol, [])
+            if source not in sources[symbol]:
+                sources[symbol].append(source)
+            if symbol not in merged:
+                merged[symbol] = dict(row or {})
+                merged[symbol]["symbol"] = symbol
+            elif row:
+                # Prefer live snapshot fields when they become available.
+                for key, value in row.items():
+                    if value not in (None, ""):
+                        merged[symbol][key] = value
+
+        # The prior evening AH snapshot is the critical early-discovery source.
+        try:
+            ah_snapshot = snapshot_store.load_latest_snapshot("overnight_runner", "ah")
+            for row in (ah_snapshot or {}).get("rows") or []:
+                if isinstance(row, dict):
+                    add(self._row_symbol(row), "saved_ah", row)
+        except Exception as exc:
+            print(f"[vwap3-universe] saved AH load failed: {exc}", flush=True)
+
+        # Persistent symbols are added before the live lists so a hard universe cap
+        # can never push out a displacement we already committed to monitoring.
+        for symbol, pin in self._watch_pool.items():
+            add(symbol, "pinned_displacement", pin)
+
+        for row in self._tracked.values():
+            symbol = self._row_symbol(row)
+            if symbol:
+                add(symbol, "tracked_setup", row)
+
+        for row in gainers:
+            add(self._row_symbol(row), "gainers", row)
+        for row in actives:
+            add(self._row_symbol(row), "actives", row)
+        for row in losers:
+            add(self._row_symbol(row), "losers", row)
+
+        items = list(merged.values())[:VWAP3_MAX_WATCH_SYMBOLS]
+        return items, rank_map, sources
 
     async def _load_native_5m(
         self,
@@ -492,10 +629,11 @@ class VWAP3TargetScanner(ScannerBase):
         *,
         pool: str,
         trade_date: str,
-        live_rank: int,
+        live_rank: Optional[int],
         change_pct: float,
         last_price: float,
         now_et: datetime,
+        discovery_sources: Optional[List[str]] = None,
         session_start: int,
         session_end: int,
     ) -> List[Dict[str, Any]]:
@@ -668,7 +806,8 @@ class VWAP3TargetScanner(ScannerBase):
                 "setup_class": grade,
                 "live_rank": live_rank,
                 "rank_at_freeze": live_rank,
-                "rank_source": "alpaca_live_movers",
+                "rank_source": "alpaca_gainers_top50",
+                "discovery_sources": list(discovery_sources or []),
                 "session": "PM" if pool == "premarket" else "AH",
                 "pool": pool,
                 "trade_date": trade_date,
@@ -728,7 +867,16 @@ class VWAP3TargetScanner(ScannerBase):
                 "runner_score": base_score,
                 "notes": notes,
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "scanner_detected_at": datetime.now(timezone.utc).isoformat(),
             }
+
+            try:
+                freeze_dt = datetime.fromisoformat(freeze_time).astimezone(ET)
+                row["detection_delay_minutes"] = round(
+                    max(0.0, (now_et - freeze_dt).total_seconds() / 60.0), 2
+                )
+            except Exception:
+                row["detection_delay_minutes"] = None
 
             qualified.append(_status_from_rows(rows, row))
 
@@ -740,65 +888,73 @@ class VWAP3TargetScanner(ScannerBase):
         snapshot_store: ScannerSnapshotStore,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        del snapshot_store  # This scanner keeps its own tiny persistent signal state.
         started = time_module.perf_counter()
         now_et = datetime.now(ET)
+        now_pt = now_et.astimezone(PT)
         self._cleanup_state(now_et)
 
-        movers = await market.get_snapshot_gainers(limit=50)
-        top20: List[Dict[str, Any]] = []
-        seen = set()
-        for raw in movers or []:
-            symbol = str(raw.get("symbol") or raw.get("ticker") or "").upper().strip()
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            top20.append(dict(raw))
-            if len(top20) >= 20:
-                break
-
-        rank_map = {
-            str(row.get("symbol") or row.get("ticker") or "").upper().strip(): index + 1
-            for index, row in enumerate(top20)
-        }
+        watch_items, rank_map, source_map = await self._build_watch_universe(
+            market, snapshot_store, now_et
+        )
 
         session = _session_for_now(now_et)
         scan_errors: List[Dict[str, str]] = []
         newly_qualified = 0
+        scanned_count = 0
 
-        if session is not None and top20:
+        if session is not None and watch_items:
             pool, session_start, session_end = session
             trade_date = now_et.date().isoformat()
-            semaphore = asyncio.Semaphore(5)
+            semaphore = asyncio.Semaphore(VWAP3_SCAN_CONCURRENCY)
 
             async def inspect(raw: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-                symbol = str(raw.get("symbol") or raw.get("ticker") or "").upper().strip()
+                nonlocal scanned_count
+                symbol = self._row_symbol(raw)
                 if not symbol:
                     return None
                 async with semaphore:
                     try:
                         rows = await self._load_native_5m(market, symbol, now_et)
+                        scanned_count += 1
+
+                        displacement_time = self._session_has_displacement(
+                            rows, trade_date, session_start, session_end
+                        )
+                        if displacement_time:
+                            existing_pin = self._watch_pool.get(symbol)
+                            if existing_pin is None:
+                                self._watch_pool[symbol] = {
+                                    "symbol": symbol,
+                                    "trade_date": trade_date,
+                                    "pinned_at": datetime.now(timezone.utc).isoformat(),
+                                    "displacement_time": displacement_time,
+                                    "source": "qualifying_displacement",
+                                }
+                                print(
+                                    f"[vwap3-watch] {symbol} pinned=true "
+                                    f"displacement={displacement_time} "
+                                    f"pt={now_pt.strftime('%H:%M:%S')}",
+                                    flush=True,
+                                )
+
                         return self._analyze_candidate(
                             symbol,
                             rows,
                             pool=pool,
                             trade_date=trade_date,
-                            live_rank=rank_map.get(symbol, 999),
-                            change_pct=_safe_float(
-                                raw.get("percent_change", raw.get("todaysChangePerc"))
-                            ),
-                            last_price=_safe_float(
-                                raw.get("price", (raw.get("lastTrade") or {}).get("p"))
-                            ),
+                            live_rank=rank_map.get(symbol),
+                            change_pct=self._snapshot_change_pct(raw),
+                            last_price=self._snapshot_price(raw),
                             now_et=now_et,
                             session_start=session_start,
                             session_end=session_end,
+                            discovery_sources=source_map.get(symbol, []),
                         )
                     except Exception as exc:
                         scan_errors.append({"symbol": symbol, "error": str(exc)})
                         return None
 
-            candidate_groups = await asyncio.gather(*(inspect(row) for row in top20))
+            candidate_groups = await asyncio.gather(*(inspect(row) for row in watch_items))
 
             for candidate_group in candidate_groups:
                 if not candidate_group:
@@ -813,23 +969,32 @@ class VWAP3TargetScanner(ScannerBase):
 
                     if existing is None:
                         newly_qualified += 1
+                        print(
+                            f"[vwap3-published] {candidate.get('symbol')} "
+                            f"grade={candidate.get('grade')} "
+                            f"freeze={candidate.get('freeze_time')} "
+                            f"freeze_price={candidate.get('freeze_price')} "
+                            f"target={candidate.get('target_price')} "
+                            f"delay_min={candidate.get('detection_delay_minutes')} "
+                            f"sources={','.join(candidate.get('discovery_sources') or [])}",
+                            flush=True,
+                        )
                     else:
-                        # Rank@Freeze is historical context. Once captured,
-                        # never rewrite it with a later scan's live rank.
-                        candidate["rank_at_freeze"] = existing.get(
+                        # Historical context is captured at first scanner detection.
+                        for field in (
                             "rank_at_freeze",
-                            candidate.get("rank_at_freeze"),
-                        )
-                        candidate["created_at"] = existing.get(
                             "created_at",
-                            candidate.get("created_at"),
-                        )
+                            "scanner_detected_at",
+                            "detection_delay_minutes",
+                            "discovery_sources",
+                        ):
+                            if field in existing:
+                                candidate[field] = existing.get(field)
 
                     self._tracked[key] = candidate
 
-        # Refresh existing signals even when they have left the live Top-20 or
-        # the market has moved into RTH. This prevents a valid signal from
-        # disappearing before its target/confirmation resolves.
+        # Refresh existing signals even when they have left the discovery universe
+        # or the market has moved into RTH.
         tracked_symbols = sorted(
             {
                 str(row.get("symbol") or "").upper().strip()
@@ -839,7 +1004,7 @@ class VWAP3TargetScanner(ScannerBase):
         )
         tracked_rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
         if tracked_symbols:
-            semaphore = asyncio.Semaphore(5)
+            semaphore = asyncio.Semaphore(VWAP3_SCAN_CONCURRENCY)
 
             async def refresh_symbol(symbol: str) -> None:
                 async with semaphore:
@@ -862,7 +1027,9 @@ class VWAP3TargetScanner(ScannerBase):
 
             current_rank = rank_map.get(symbol)
             row["live_rank"] = current_rank
-            row["is_live_top20_now"] = current_rank is not None
+            row["is_live_top20_now"] = current_rank is not None and current_rank <= 20
+            row["is_live_top50_now"] = current_rank is not None and current_rank <= 50
+            row["last_updated_at"] = datetime.now(timezone.utc).isoformat()
             base_score = _grade_base_score(str(row.get("grade") or ""))
             if row.get("confirmation_status") == "CONFIRMED":
                 base_score += 3
@@ -897,6 +1064,11 @@ class VWAP3TargetScanner(ScannerBase):
         rows = rows[:max_rows]
         elapsed_ms = round((time_module.perf_counter() - started) * 1000.0, 1)
 
+        source_counts: Dict[str, int] = {}
+        for symbol, sources in source_map.items():
+            for source in sources:
+                source_counts[source] = source_counts.get(source, 0) + 1
+
         return {
             "scanner_id": self.id,
             "scanner_name": self.name,
@@ -906,11 +1078,16 @@ class VWAP3TargetScanner(ScannerBase):
             "count": len(rows),
             "rows": rows,
             "meta": {
-                "live_top20_count": len(top20),
+                "watch_universe_count": len(watch_items),
+                "watch_source_counts": source_counts,
+                "pinned_displacement_count": len(self._watch_pool),
+                "gainers_ranked_count": len(rank_map),
+                "scanned_count": scanned_count,
                 "newly_qualified": newly_qualified,
                 "tracked_count": len(self._tracked),
                 "scan_errors": scan_errors[:10],
                 "elapsed_ms": elapsed_ms,
+                "display_timezone": "America/Los_Angeles",
                 "strategy": {
                     "timeframe": "5m",
                     "std_length": STD_LENGTH,
@@ -944,7 +1121,11 @@ class VWAP3TargetScanner(ScannerBase):
                     "confirmation": "5m close above displacement close/body",
                     "strong_confirmation": "5m close above displacement high/wick",
                 },
-                "ranking_source": "Alpaca live movers Top-20 at scan/freeze detection",
+                "discovery": (
+                    "saved AH + live gainers + live actives + live losers + "
+                    "pinned displacement symbols + tracked setups"
+                ),
+                "ranking_source": "Alpaca gainers Top-50 for context only; rank is not a discovery gate",
             },
         }
 

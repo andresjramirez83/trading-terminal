@@ -82,6 +82,7 @@ type ScannerRow = {
   has_saved_ah?: boolean;
   notes?: string[];
   source?: string;
+  created_at?: string;
   setup_stage?: string;
   direction?: "bullish" | "bearish";
   liquidity_level?: number;
@@ -111,6 +112,11 @@ type ScannerRow = {
   freeze_reason?: string;
   bars_to_freeze?: number;
   is_live_top20_now?: boolean;
+  is_live_top50_now?: boolean;
+  scanner_detected_at?: string;
+  detection_delay_minutes?: number | null;
+  last_updated_at?: string;
+  discovery_sources?: string[];
 };
 
 type ScannerResponse = {
@@ -145,6 +151,28 @@ function formatPrice(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "-";
   const digits = Math.abs(value) < 1 ? 4 : 2;
   return `$${value.toFixed(digits)}`;
+}
+
+function formatPacificDateTime(value?: string | null): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("en-US", {
+    timeZone: "America/Los_Angeles",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatDelayMinutes(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return "-";
+  if (value < 1) return "<1m";
+  if (value < 60) return `${Math.round(value)}m`;
+  const hours = Math.floor(value / 60);
+  const minutes = Math.round(value % 60);
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
 function arraysEqual(a: string[], b: string[]): boolean {
@@ -1639,13 +1667,15 @@ export default function ScannerPanel({
                   ["session", "Session"],
                   ["confirmation_status", "Status"],
                   ["last_price", "Last"],
-                  ["freeze_price", "Freeze"],
+                  ["freeze_price", "Hist Freeze"],
                   ["target_price", "TARGET"],
                   ["target_distance_pct", "Target Dist"],
                   ["displacement_pct", "Displacement"],
                   ["displacement_close", "Disp Close"],
                   ["displacement_high", "Disp High"],
-                  ["freeze_time", "Freeze Time"],
+                  ["freeze_time", "Freeze Time PT"],
+                  ["scanner_detected_at", "Detected PT"],
+                  ["detection_delay_minutes", "Delay"],
                   ["notes", "Notes"],
                 ].map(([key, header], index) => (
                   <th
@@ -1728,14 +1758,13 @@ export default function ScannerPanel({
                     <td style={cellRight}>{formatPrice(row.displacement_close)}</td>
                     <td style={cellRight}>{formatPrice(row.displacement_high)}</td>
                     <td style={cellRight}>
-                      {row.freeze_time
-                        ? new Date(row.freeze_time).toLocaleString([], {
-                            month: "numeric",
-                            day: "numeric",
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })
-                        : "-"}
+                      {formatPacificDateTime(row.freeze_time)}
+                    </td>
+                    <td style={cellRight}>
+                      {formatPacificDateTime(row.scanner_detected_at ?? row.created_at)}
+                    </td>
+                    <td style={cellRight}>
+                      {formatDelayMinutes(row.detection_delay_minutes)}
                     </td>
                     <td style={cellLeft}>{(row.notes ?? []).join(", ") || "-"}</td>
                   </tr>
@@ -1743,7 +1772,7 @@ export default function ScannerPanel({
               })}
               {!loading && filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={15} style={{ padding: 16, opacity: 0.7 }}>
+                  <td colSpan={17} style={{ padding: 16, opacity: 0.7 }}>
                     No A+/A VWAP +3 target setups are active right now.
                   </td>
                 </tr>
