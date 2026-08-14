@@ -96,7 +96,6 @@ type ScannerRow = {
   confirmed?: boolean;
   strong_confirmed?: boolean;
   target_hit?: boolean;
-  target_hit_time?: string;
   freeze_price?: number;
   target_price?: number;
   frozen_target?: number;
@@ -128,7 +127,6 @@ type ScannerResponse = {
   trade_day?: string;
   count?: number;
   rows?: ScannerRow[];
-  target_hits?: ScannerRow[];
   meta?: ScannerMeta;
 };
 
@@ -409,7 +407,6 @@ export default function ScannerPanel({
 
   const [sortKey, setSortKey] = useState<keyof ScannerRow>("runner_score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [vwap3ResultTab, setVwap3ResultTab] = useState<"active" | "hits">("active");
 
   const lastPushedWatchlistRef = useRef<string[]>([]);
   const scannerLoadRequestRef = useRef(0);
@@ -873,32 +870,6 @@ export default function ScannerPanel({
     return sorted;
   }, [rows, runnerTypeFilter, sortKey, sortDir, isVwap3TargetScanner]);
 
-  const vwap3ActiveRows = useMemo(
-    () => filteredRows.filter((row) => String(row.confirmation_status ?? "") !== "TARGET HIT"),
-    [filteredRows],
-  );
-
-  const vwap3TargetHitRows = useMemo(() => {
-    const hitRows = dedupeScannerRows(data?.target_hits ?? []);
-    return [...hitRows].sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
-      const aNum = typeof av === "number" ? av : Number(av ?? -Infinity);
-      const bNum = typeof bv === "number" ? bv : Number(bv ?? -Infinity);
-      if (Number.isFinite(aNum) && Number.isFinite(bNum)) {
-        return sortDir === "asc" ? aNum - bNum : bNum - aNum;
-      }
-      const aStr = String(av ?? "");
-      const bStr = String(bv ?? "");
-      return sortDir === "asc"
-        ? aStr.localeCompare(bStr)
-        : bStr.localeCompare(aStr);
-    });
-  }, [data?.target_hits, sortKey, sortDir]);
-
-  const vwap3DisplayedRows =
-    vwap3ResultTab === "hits" ? vwap3TargetHitRows : vwap3ActiveRows;
-
   const runnerCounts = useMemo(() => {
     const momentum = rows.filter(
       (row) => String(row.runner_type ?? "").toLowerCase() === "momentum",
@@ -1046,9 +1017,9 @@ export default function ScannerPanel({
   ]);
 
   const lastRunText = cacheStatus?.last_run
-    ? formatPacificDateTime(cacheStatus.last_run)
+    ? new Date(cacheStatus.last_run).toLocaleTimeString()
     : "waiting";
-  const cacheSummary = `Cache: ${cacheStatus?.status ?? "loading"} | Last PT: ${lastRunText} | Count: ${data?.count ?? rows.length}`;
+  const cacheSummary = `Cache: ${cacheStatus?.status ?? "loading"} | Last: ${lastRunText} | Count: ${data?.count ?? rows.length}`;
 
   const summaryText = isWorkspace
     ? `Trade day: ${data?.trade_day ?? "--"} | ${cacheSummary}`
@@ -1582,25 +1553,7 @@ export default function ScannerPanel({
               </button>
             </div>
             ) : (
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  onClick={() => setVwap3ResultTab("active")}
-                  style={vwap3ResultTab === "active" ? activeButtonStyle : buttonStyle}
-                >
-                  Active Targets ({vwap3ActiveRows.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setVwap3ResultTab("hits")}
-                  style={vwap3ResultTab === "hits" ? activeButtonStyle : buttonStyle}
-                >
-                  Target Hits ({vwap3TargetHitRows.length})
-                </button>
-                <span style={{ fontSize: 12, opacity: 0.72 }}>
-                  Hits are removed from Active Targets and archived by trade date.
-                </span>
-              </div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>Live validated target setups</div>
             )}
             <div style={{ fontSize: 12, opacity: 0.8 }}>
               Sort: {String(sortKey)} ({sortDir})
@@ -1722,7 +1675,6 @@ export default function ScannerPanel({
                   ["displacement_high", "Disp High"],
                   ["displacement_time", "Disp Time PT"],
                   ["freeze_time", "Freeze Time PT"],
-                  ["target_hit_time", "Hit Time PT"],
                   ["scanner_detected_at", "Detected PT"],
                   ["detection_delay_minutes", "Delay"],
                   ["notes", "Notes"],
@@ -1759,7 +1711,7 @@ export default function ScannerPanel({
               </tr>
             </thead>
             <tbody>
-              {vwap3DisplayedRows.map((row, index) => {
+              {filteredRows.map((row, index) => {
                 const symbol = normalizeSymbol(row.symbol);
                 const isSelected = symbol === currentSelectedSymbol;
                 const statusText = String(row.confirmation_status ?? "WAITING");
@@ -1813,9 +1765,6 @@ export default function ScannerPanel({
                       {formatPacificDateTime(row.freeze_time)}
                     </td>
                     <td style={cellRight}>
-                      {formatPacificDateTime(row.target_hit_time)}
-                    </td>
-                    <td style={cellRight}>
                       {formatPacificDateTime(row.scanner_detected_at ?? row.created_at)}
                     </td>
                     <td style={cellRight}>
@@ -1825,12 +1774,10 @@ export default function ScannerPanel({
                   </tr>
                 );
               })}
-              {!loading && vwap3DisplayedRows.length === 0 ? (
+              {!loading && filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={19} style={{ padding: 16, opacity: 0.7 }}>
-                    {vwap3ResultTab === "hits"
-                      ? "No VWAP +3 targets have hit yet for this trade day."
-                      : "No active VWAP +3 target setups are active right now."}
+                  <td colSpan={18} style={{ padding: 16, opacity: 0.7 }}>
+                    No A+/A VWAP +3 target setups are active right now.
                   </td>
                 </tr>
               ) : null}
