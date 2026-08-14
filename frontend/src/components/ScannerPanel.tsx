@@ -1673,6 +1673,7 @@ export default function ScannerPanel({
                   ["displacement_pct", "Displacement"],
                   ["displacement_close", "Disp Close"],
                   ["displacement_high", "Disp High"],
+                  ["displacement_time", "Disp Time PT"],
                   ["freeze_time", "Freeze Time PT"],
                   ["scanner_detected_at", "Detected PT"],
                   ["detection_delay_minutes", "Delay"],
@@ -1758,6 +1759,9 @@ export default function ScannerPanel({
                     <td style={cellRight}>{formatPrice(row.displacement_close)}</td>
                     <td style={cellRight}>{formatPrice(row.displacement_high)}</td>
                     <td style={cellRight}>
+                      {formatPacificDateTime(row.displacement_time)}
+                    </td>
+                    <td style={cellRight}>
                       {formatPacificDateTime(row.freeze_time)}
                     </td>
                     <td style={cellRight}>
@@ -1772,7 +1776,7 @@ export default function ScannerPanel({
               })}
               {!loading && filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={17} style={{ padding: 16, opacity: 0.7 }}>
+                  <td colSpan={18} style={{ padding: 16, opacity: 0.7 }}>
                     No A+/A VWAP +3 target setups are active right now.
                   </td>
                 </tr>
