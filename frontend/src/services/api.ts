@@ -373,6 +373,25 @@ export async function refreshScannerCache(
   return parseJson<ScannerCacheResponse>(res);
 }
 
+export type Vwap3TargetHitHistoryResponse = {
+  trade_date: string;
+  pacific_today: string;
+  count: number;
+  rows: Record<string, unknown>[];
+};
+
+export async function fetchVwap3TargetHitHistory(
+  tradeDate?: string,
+): Promise<Vwap3TargetHitHistoryResponse> {
+  const qs = new URLSearchParams();
+  if (tradeDate) qs.set("trade_date", tradeDate);
+  const res = await fetch(
+    `${API_BASE}/scanner-v2/vwap3/target-hits${qs.toString() ? `?${qs.toString()}` : ""}`,
+    { cache: "no-store" },
+  );
+  return parseJson<Vwap3TargetHitHistoryResponse>(res);
+}
+
 export async function fetchScannerDefinitions(): Promise<ScannerDefinition[]> {
   const res = await fetch(`${API_BASE}/scanner-v2/list`);
   return parseJson<ScannerDefinition[]>(res);

@@ -34,8 +34,13 @@ try:
         ET = ZoneInfo("America/New_York")
     except Exception:
         ET = timezone(timedelta(hours=-4))
+    try:
+        PT = ZoneInfo("America/Los_Angeles")
+    except Exception:
+        PT = timezone(timedelta(hours=-7))
 except Exception:
     ET = timezone(timedelta(hours=-4))
+    PT = timezone(timedelta(hours=-7))
 
 from app.scanners.registry import ScannerRegistry
 from app.services.alpaca_service import AlpacaService
@@ -3817,6 +3822,58 @@ async def scanner_cache_refresh(
         print("[scanner/cache/refresh] error:", exc, flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+VWAP3_TARGET_HIT_ARCHIVE_DIR = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "scanner_history"
+    / "vwap3_target_hits"
+)
+
+
+def _normalize_vwap3_history_date(value: Optional[str]) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return datetime.now(PT).date().isoformat()
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="trade_date must be YYYY-MM-DD",
+        )
+
+
+@app.get("/scanner-v2/vwap3/target-hits")
+async def scanner_v2_vwap3_target_hits(
+    trade_date: Optional[str] = Query(None),
+):
+    selected_date = _normalize_vwap3_history_date(trade_date)
+    path = VWAP3_TARGET_HIT_ARCHIVE_DIR / f"{selected_date}.json"
+    rows: List[Dict[str, Any]] = []
+
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text())
+            rows = [
+                dict(row)
+                for row in (payload.get("rows") or [])
+                if isinstance(row, dict)
+            ]
+        except Exception as exc:
+            print(
+                f"[vwap3-hit-history] load failed date={selected_date} error={exc}",
+                flush=True,
+            )
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return {
+        "trade_date": selected_date,
+        "pacific_today": datetime.now(PT).date().isoformat(),
+        "count": len(rows),
+        "rows": rows,
+    }
 
 
 @app.get("/scanner-v2/list")

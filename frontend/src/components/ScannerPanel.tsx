@@ -11,6 +11,7 @@ import {
   fetchSelectedAlertSymbols,
   saveSelectedAlertSymbols,
   toggleSelectedAlertSymbol,
+  fetchVwap3TargetHitHistory,
   type ScannerCacheResponse,
 } from "../services/api";
 
@@ -172,6 +173,28 @@ function formatPacificDateTime(value?: string | null): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function pacificTodayIso(): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function shiftIsoDate(value: string, days: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return pacificTodayIso();
+  const date = new Date(
+    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12),
+  );
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function formatDelayMinutes(value?: number | null): string {
@@ -426,6 +449,11 @@ export default function ScannerPanel({
   const [sortKey, setSortKey] = useState<keyof ScannerRow>("runner_score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [vwap3ResultTab, setVwap3ResultTab] = useState<"active" | "hits">("active");
+  const [vwap3HitDate, setVwap3HitDate] = useState(() => pacificTodayIso());
+  const [vwap3ArchivedHitRows, setVwap3ArchivedHitRows] = useState<ScannerRow[]>([]);
+  const [vwap3HitsLoading, setVwap3HitsLoading] = useState(false);
+  const [vwap3HistoryError, setVwap3HistoryError] = useState("");
+  const vwap3PacificToday = pacificTodayIso();
 
   const lastPushedWatchlistRef = useRef<string[]>([]);
   const scannerLoadRequestRef = useRef(0);
@@ -861,6 +889,44 @@ export default function ScannerPanel({
     lowFloatOnly,
   ]);
 
+  useEffect(() => {
+    if (!isWorkspace || !isVwap3TargetScanner || vwap3ResultTab !== "hits") {
+      return;
+    }
+
+    let cancelled = false;
+    setVwap3HitsLoading(true);
+    setVwap3HistoryError("");
+
+    fetchVwap3TargetHitHistory(vwap3HitDate)
+      .then((payload) => {
+        if (cancelled) return;
+        setVwap3ArchivedHitRows((payload.rows ?? []) as ScannerRow[]);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setVwap3ArchivedHitRows([]);
+        setVwap3HistoryError(
+          err instanceof Error
+            ? err.message
+            : "Failed to load VWAP +3 target-hit history",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setVwap3HitsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isWorkspace,
+    isVwap3TargetScanner,
+    vwap3ResultTab,
+    vwap3HitDate,
+    data?.target_hits,
+  ]);
+
   const rows = useMemo(() => dedupeScannerRows(data?.rows ?? []), [data]);
 
   const filteredRows = useMemo(() => {
@@ -895,7 +961,7 @@ export default function ScannerPanel({
   );
 
   const vwap3TargetHitRows = useMemo(() => {
-    const hitRows = dedupeScannerRows(data?.target_hits ?? []);
+    const hitRows = dedupeScannerRows(vwap3ArchivedHitRows);
     return [...hitRows].sort((a, b) => {
       const av = a[sortKey];
       const bv = b[sortKey];
@@ -910,7 +976,7 @@ export default function ScannerPanel({
         ? aStr.localeCompare(bStr)
         : bStr.localeCompare(aStr);
     });
-  }, [data?.target_hits, sortKey, sortDir]);
+  }, [vwap3ArchivedHitRows, sortKey, sortDir]);
 
   const vwap3DisplayedRows =
     vwap3ResultTab === "hits" ? vwap3TargetHitRows : vwap3ActiveRows;
@@ -1067,7 +1133,9 @@ export default function ScannerPanel({
   const cacheSummary = `Cache: ${cacheStatus?.status ?? "loading"} | Last PT: ${lastRunText} | Count: ${data?.count ?? rows.length}`;
 
   const summaryText = isWorkspace
-    ? `Trade day: ${data?.trade_day ?? "--"} | ${cacheSummary}`
+    ? isVwap3TargetScanner && vwap3ResultTab === "hits"
+      ? `History PT: ${vwap3HitDate} | ${cacheSummary}`
+      : `Trade day: ${data?.trade_day ?? "--"} | ${cacheSummary}`
     : cacheSummary;
 
   return (
@@ -1613,11 +1681,59 @@ export default function ScannerPanel({
                 >
                   Target Hits ({vwap3TargetHitRows.length})
                 </button>
+                {vwap3ResultTab === "hits" ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVwap3HitDate((current) => shiftIsoDate(current, -1))
+                      }
+                      style={buttonStyle}
+                    >
+                      ← Previous Day
+                    </button>
+                    <input
+                      type="date"
+                      value={vwap3HitDate}
+                      max={vwap3PacificToday}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        if (next) setVwap3HitDate(next);
+                      }}
+                      style={{ ...inputStyle, width: 150, minWidth: 150 }}
+                      title="VWAP +3 target-hit history date in Pacific Time"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setVwap3HitDate(vwap3PacificToday)}
+                      disabled={vwap3HitDate === vwap3PacificToday}
+                      style={
+                        vwap3HitDate === vwap3PacificToday
+                          ? { ...buttonStyle, opacity: 0.5, cursor: "default" }
+                          : buttonStyle
+                      }
+                    >
+                      Today PT
+                    </button>
+                    <span style={{ fontSize: 12, opacity: 0.72 }}>
+                      {vwap3HitsLoading
+                        ? "Loading PT history..."
+                        : `Review date: ${vwap3HitDate} PT`}
+                    </span>
+                  </>
+                ) : null}
                 <span style={{ fontSize: 12, opacity: 0.72 }}>
-                  Hits are removed from Active Targets and archived by trade date.
+                  Hits are removed from Active Targets and archived by date.
                 </span>
               </div>
             )}
+            {isVwap3TargetScanner &&
+            vwap3ResultTab === "hits" &&
+            vwap3HistoryError ? (
+              <div style={{ color: "#ff7b7b", fontSize: 12, marginTop: 8 }}>
+                {vwap3HistoryError}
+              </div>
+            ) : null}
             <div style={{ fontSize: 12, opacity: 0.8 }}>
               Sort: {String(sortKey)} ({sortDir})
             </div>
@@ -1853,7 +1969,7 @@ export default function ScannerPanel({
                 <tr>
                   <td colSpan={21} style={{ padding: 16, opacity: 0.7 }}>
                     {vwap3ResultTab === "hits"
-                      ? "No VWAP +3 targets have hit yet for this trade day."
+                      ? `No VWAP +3 target hits saved for ${vwap3HitDate} PT.`
                       : "No active VWAP +3 target setups are active right now."}
                   </td>
                 </tr>
