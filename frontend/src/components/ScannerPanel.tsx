@@ -890,7 +890,9 @@ export default function ScannerPanel({
   ]);
 
   useEffect(() => {
-    if (!isWorkspace || !isVwap3TargetScanner || vwap3ResultTab !== "hits") {
+    // Preload VWAP3 archived hits whenever the VWAP3 scanner is selected.
+    // This keeps the Target Hits count accurate even while Active Targets is open.
+    if (!isWorkspace || !isVwap3TargetScanner) {
       return;
     }
 
@@ -922,7 +924,6 @@ export default function ScannerPanel({
   }, [
     isWorkspace,
     isVwap3TargetScanner,
-    vwap3ResultTab,
     vwap3HitDate,
     data?.target_hits,
   ]);
