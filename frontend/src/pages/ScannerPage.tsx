@@ -157,8 +157,9 @@ export default function ScannerPage() {
 
       <div
         style={{
-          height: "calc(100vh - 120px)",
-          minHeight: 0,
+          width: "100%",
+          minWidth: 0,
+          minHeight: "calc(100vh - 140px)",
         }}
       >
         <ScannerPanel

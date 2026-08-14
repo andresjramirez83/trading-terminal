@@ -1143,12 +1143,14 @@ export default function ScannerPanel({
     <div
       style={{
         display: "grid",
-        gridTemplateRows: isWorkspace
-          ? "auto auto auto auto auto 1fr"
-          : "auto auto 1fr",
+        gridTemplateRows: isWorkspace ? undefined : "auto auto 1fr",
+        gridAutoRows: isWorkspace ? "auto" : undefined,
         gap: 12,
-        height: "100%",
+        height: isWorkspace ? "auto" : "100%",
         minHeight: 0,
+        width: "100%",
+        minWidth: 0,
+        alignContent: "start",
       }}
     >
       <div style={panelStyle}>
@@ -1248,8 +1250,7 @@ export default function ScannerPanel({
           style={{
             ...panelStyle,
             display: "grid",
-            gridTemplateColumns:
-              "minmax(220px,300px) minmax(170px,220px) minmax(170px,220px) 1fr auto",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
             gap: 12,
             alignItems: "end",
           }}
@@ -1325,6 +1326,8 @@ export default function ScannerPanel({
               background: "#0b0f14",
               fontSize: 13,
               opacity: 0.95,
+              minWidth: 0,
+              gridColumn: isVwap3TargetScanner ? "span 2" : undefined,
             }}
           >
             <div style={{ fontWeight: 700, marginBottom: 6 }}>
@@ -1770,7 +1773,12 @@ export default function ScannerPanel({
       <div
         style={{
           ...panelStyle,
-          overflow: "auto",
+          overflowX: "auto",
+          overflowY: "visible",
+          WebkitOverflowScrolling: "touch",
+          width: "100%",
+          maxWidth: "100%",
+          minWidth: 0,
           minHeight: 0,
           padding: isWorkspace ? 0 : 10,
         }}
@@ -1828,7 +1836,12 @@ export default function ScannerPanel({
           </div>
         ) : isVwap3TargetScanner ? (
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
+            style={{
+              width: "max-content",
+              minWidth: "100%",
+              borderCollapse: "collapse",
+              fontSize: 13,
+            }}
           >
             <thead
               style={{
@@ -1979,7 +1992,12 @@ export default function ScannerPanel({
           </table>
         ) : (
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
+            style={{
+              width: "max-content",
+              minWidth: "100%",
+              borderCollapse: "collapse",
+              fontSize: 13,
+            }}
           >
             <thead
               style={{
