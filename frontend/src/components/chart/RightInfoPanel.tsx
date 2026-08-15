@@ -17,9 +17,9 @@ type Props = {
 };
 
 const WORKSPACES: { id: RightPanelWorkspace; label: string }[] = [
-  { id: "chart", label: "Chart" },
   { id: "trade", label: "Trading" },
   { id: "watchlists", label: "Lists" },
+  { id: "chart", label: "Chart" },
   { id: "scanner", label: "Scanner" },
   { id: "news", label: "News" },
 ];
@@ -30,7 +30,7 @@ export default function RightInfoPanel({
   onToggleCollapsed,
   chartState,
 }: Props) {
-  const [workspace, setWorkspace] = useState<RightPanelWorkspace>("chart");
+  const [workspace, setWorkspace] = useState<RightPanelWorkspace>("trade");
 
   if (collapsed) {
     return (

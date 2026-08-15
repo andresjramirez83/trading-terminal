@@ -7,7 +7,9 @@ export type ExecutionModeListener = (
   previousMode: ExecutionMode,
 ) => void;
 
-const STORAGE_KEY = "trading.executionMode";
+// v2 intentionally resets the old PAPER-first preference once.
+// The new default is LIVE, while later user choices still persist normally.
+const STORAGE_KEY = "trading.executionMode.v2";
 
 function isExecutionMode(value: unknown): value is ExecutionMode {
   return (
@@ -19,12 +21,12 @@ function isExecutionMode(value: unknown): value is ExecutionMode {
 
 function loadInitialMode(): ExecutionMode {
   if (typeof window === "undefined") {
-    return "paper";
+    return "live";
   }
 
   const saved = window.localStorage.getItem(STORAGE_KEY);
 
-  return isExecutionMode(saved) ? saved : "paper";
+  return isExecutionMode(saved) ? saved : "live";
 }
 
 export class ExecutionModeRuntime {
@@ -81,7 +83,7 @@ export class ExecutionModeRuntime {
   }
 
   reset(): void {
-    this.setMode("paper");
+    this.setMode("live");
   }
 
   destroy(): void {
