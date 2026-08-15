@@ -62,10 +62,9 @@ export async function loadHistoricalBars(params: {
     lookback: cleanDate ? undefined : params.lookback ?? "5d",
     session: "extended",
     limit: params.limit ?? 500,
-    forceRefresh: true,
+    forceRefresh: false,
   });
 
-  console.log("V2 bars response", response);
 
   const rawBars = Array.isArray(response) ? response : response?.bars ?? [];
 

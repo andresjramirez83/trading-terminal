@@ -432,23 +432,35 @@ export class StudyRenderer {
   }
 
   private renderOverlay(): void {
-    this.clear();
-
-    if (!this.latestContext?.bars.length) return;
+    if (!this.latestContext?.bars.length) {
+      this.clear();
+      return;
+    }
 
     const fragment = document.createDocumentFragment();
     const timeScale = this.chart.timeScale();
+    const measuredWidth = (
+      timeScale as unknown as { width?: () => number }
+    ).width?.();
+    const viewportWidth =
+      measuredWidth != null && Number.isFinite(measuredWidth)
+        ? measuredWidth
+        : this.overlay.clientWidth;
+    const minVisibleX = -48;
+    const maxVisibleX = Math.max(0, viewportWidth) + 48;
+    const isVisibleX = (x: number): boolean =>
+      x >= minVisibleX && x <= maxVisibleX;
+    const intersectsVisibleX = (left: number, right: number): boolean =>
+      Math.max(left, right) >= minVisibleX &&
+      Math.min(left, right) <= maxVisibleX;
 
     const lastBar = this.latestContext.bars[this.latestContext.bars.length - 1];
     const lastBarX = lastBar
       ? timeScale.timeToCoordinate(lastBar.time as Time)
       : null;
-    const timeScaleWidth = (
-      timeScale as unknown as { width?: () => number }
-    ).width?.();
     const zoneEndX =
-      timeScaleWidth != null && Number.isFinite(timeScaleWidth)
-        ? timeScaleWidth
+      viewportWidth > 0
+        ? viewportWidth
         : lastBarX;
 
     if (zoneEndX != null && Number.isFinite(zoneEndX)) {
@@ -477,11 +489,18 @@ export class StudyRenderer {
           continue;
         }
 
+        const zoneLeft = Math.min(startX, endX);
+        const zoneRight = Math.max(startX, endX);
+
+        if (!intersectsVisibleX(zoneLeft, zoneRight)) {
+          continue;
+        }
+
         fragment.appendChild(
           createDemandZoneElement(
             zone,
-            Math.min(startX, endX),
-            Math.max(startX, endX),
+            zoneLeft,
+            zoneRight,
             Math.min(topY, bottomY),
             Math.max(topY, bottomY),
           ),
@@ -508,13 +527,21 @@ export class StudyRenderer {
       const left = Math.min(startX, endX);
       const right = Math.max(startX, endX);
 
+      if (!intersectsVisibleX(left, right)) {
+        continue;
+      }
+
       fragment.appendChild(
         createStructureLineElement(line, left, right, y),
       );
 
       const pointX = timeScale.timeToCoordinate(line.pointTime as Time);
 
-      if (pointX != null && Number.isFinite(pointX)) {
+      if (
+        pointX != null &&
+        Number.isFinite(pointX) &&
+        isVisibleX(pointX)
+      ) {
         fragment.appendChild(
           createStructureLabelElement(line, pointX, y),
         );
@@ -533,7 +560,8 @@ export class StudyRenderer {
         x == null ||
         y == null ||
         !Number.isFinite(x) ||
-        !Number.isFinite(y)
+        !Number.isFinite(y) ||
+        !isVisibleX(x)
       ) {
         continue;
       }
@@ -549,7 +577,8 @@ export class StudyRenderer {
         x == null ||
         y == null ||
         !Number.isFinite(x) ||
-        !Number.isFinite(y)
+        !Number.isFinite(y) ||
+        !isVisibleX(x)
       ) {
         continue;
       }
@@ -561,6 +590,8 @@ export class StudyRenderer {
       fragment.appendChild(element);
     }
 
-    this.overlay.appendChild(fragment);
+    // Swap the overlay in one DOM mutation. Combined with viewport culling,
+    // this avoids rebuilding hundreds of off-screen labels while panning.
+    this.overlay.replaceChildren(fragment);
   }
 }

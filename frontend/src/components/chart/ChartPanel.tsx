@@ -79,6 +79,7 @@ const CHART_SETTINGS_STORAGE_KEY = "chartv2.chartSettings";
 const MARKET_DATA_MODE_STORAGE_KEY = "chartv2.marketDataMode";
 const CHART_PREFERENCES_POLL_MS = 15_000;
 const CHART_PREFERENCES_SAVE_DELAY_MS = 180;
+const LIVE_CHART_STATE_THROTTLE_MS = 250;
 
 const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
   vwap: true,
@@ -306,6 +307,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     return localStorage.getItem(RIGHT_PANEL_COLLAPSED_KEY) === "true";
   });
   const [chartState, setChartState] = useState<ChartState | null>(null);
+  const liveChartStateTimerRef = useRef<number | null>(null);
+  const lastLiveChartStateCommitRef = useRef(0);
+  const pendingLiveChartStateEngineRef = useRef<ChartEngine | null>(null);
   const replayRuntime = getSharedReplayRuntime();
   const [marketDataMode, setMarketDataMode] = useState<MarketDataMode>(() => {
     return localStorage.getItem(MARKET_DATA_MODE_STORAGE_KEY) === "replay"
@@ -340,6 +344,41 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
     setChartState(nextState);
     chartIntelligenceBridgeRef.current?.update(nextState, reason);
+  }
+
+  function commitLiveChartState(engine: ChartEngine): void {
+    pendingLiveChartStateEngineRef.current = engine;
+
+    const now = performance.now();
+    const elapsed = now - lastLiveChartStateCommitRef.current;
+
+    const flush = () => {
+      liveChartStateTimerRef.current = null;
+      const pendingEngine = pendingLiveChartStateEngineRef.current;
+      pendingLiveChartStateEngineRef.current = null;
+
+      if (!pendingEngine) return;
+
+      lastLiveChartStateCommitRef.current = performance.now();
+      commitChartState(pendingEngine, "live-bar-updated");
+    };
+
+    if (elapsed >= LIVE_CHART_STATE_THROTTLE_MS) {
+      if (liveChartStateTimerRef.current != null) {
+        window.clearTimeout(liveChartStateTimerRef.current);
+        liveChartStateTimerRef.current = null;
+      }
+
+      flush();
+      return;
+    }
+
+    if (liveChartStateTimerRef.current != null) return;
+
+    liveChartStateTimerRef.current = window.setTimeout(
+      flush,
+      Math.max(0, LIVE_CHART_STATE_THROTTLE_MS - elapsed),
+    );
   }
 
   function handleSymbolChange(nextSymbol: string) {
@@ -1590,14 +1629,21 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
         engine.setMarketContext(symbol, timeframe);
         engine.updateBar(bar);
-        commitChartState(engine, "live-bar-updated");
-        engine.setStudyVisibility(studyVisibility);
+        commitLiveChartState(engine);
 
         setCrosshairInfo((current) => current ?? engine.getLastBarInfo());
       },
     });
 
-    return cleanup;
+    return () => {
+      cleanup();
+      pendingLiveChartStateEngineRef.current = null;
+
+      if (liveChartStateTimerRef.current != null) {
+        window.clearTimeout(liveChartStateTimerRef.current);
+        liveChartStateTimerRef.current = null;
+      }
+    };
   }, [marketDataMode, symbol, timeframe]);
 
   useEffect(() => {

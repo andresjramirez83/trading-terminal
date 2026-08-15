@@ -254,6 +254,8 @@ function buildVwapBars(bars: CleanBar[]): LineData<Time>[] {
     .filter(Boolean) as LineData<Time>[];
 }
 
+const LIVE_STUDY_THROTTLE_MS = 750;
+
 export class ChartEngine {
   readonly chart: IChartApi;
   readonly series: ChartSeriesBundle;
@@ -281,6 +283,27 @@ export class ChartEngine {
   private unsubscribeAnalysisStore: (() => void) | null = null;
   private fxAutoScaleRangeKey = "none";
   private forceNextFxAutoScale = false;
+
+  // Live candle updates can arrive many times per second. Keep the expensive
+  // study algorithms off the hot path and update EMA/VWAP from cached prefix
+  // state instead of rebuilding every historical value on each tick.
+  private vwapPrefixPriceVolume = 0;
+  private vwapPrefixVolume = 0;
+  private ema9PreviousValue: number | null = null;
+  private ema20PreviousValue: number | null = null;
+  private currentVwapValue: number | null = null;
+  private currentEma9Value: number | null = null;
+  private currentEma20Value: number | null = null;
+  private lastLiveStudyRenderAt = 0;
+  private liveStudyRenderTimer: number | null = null;
+
+  // Decision Center / intelligence can request ChartState on every live tick.
+  // Structure, compression and momentum only need a full recalculation when a
+  // new bar arrives (or historical data/context is replaced).
+  private derivedStateCacheKey = "";
+  private cachedStructure: ReturnType<typeof buildMarketStructure> | null = null;
+  private cachedCompression: ReturnType<typeof buildCompression> | null = null;
+  private cachedMomentum: ReturnType<typeof buildMomentum> | null = null;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -749,6 +772,135 @@ export class ChartEngine {
   }
 
 
+  private rebuildLiveIndicatorState(): void {
+    this.vwapPrefixPriceVolume = 0;
+    this.vwapPrefixVolume = 0;
+    this.ema9PreviousValue = null;
+    this.ema20PreviousValue = null;
+    this.currentVwapValue = null;
+    this.currentEma9Value = null;
+    this.currentEma20Value = null;
+
+    if (!this.bars.length) return;
+
+    const ema9Multiplier = 2 / 10;
+    const ema20Multiplier = 2 / 21;
+    let ema9: number | null = null;
+    let ema20: number | null = null;
+
+    for (let index = 0; index < this.bars.length - 1; index += 1) {
+      const bar = this.bars[index];
+      const typicalPrice = (bar.high + bar.low + bar.close) / 3;
+
+      this.vwapPrefixPriceVolume += typicalPrice * bar.volume;
+      this.vwapPrefixVolume += bar.volume;
+
+      ema9 =
+        ema9 == null
+          ? bar.close
+          : bar.close * ema9Multiplier + ema9 * (1 - ema9Multiplier);
+      ema20 =
+        ema20 == null
+          ? bar.close
+          : bar.close * ema20Multiplier + ema20 * (1 - ema20Multiplier);
+    }
+
+    this.ema9PreviousValue = ema9;
+    this.ema20PreviousValue = ema20;
+    this.updateLiveIndicatorValues(this.bars[this.bars.length - 1]);
+  }
+
+  private updateLiveIndicatorValues(bar: CleanBar): void {
+    const ema9Multiplier = 2 / 10;
+    const ema20Multiplier = 2 / 21;
+
+    this.currentEma9Value =
+      this.ema9PreviousValue == null
+        ? bar.close
+        : bar.close * ema9Multiplier +
+          this.ema9PreviousValue * (1 - ema9Multiplier);
+
+    this.currentEma20Value =
+      this.ema20PreviousValue == null
+        ? bar.close
+        : bar.close * ema20Multiplier +
+          this.ema20PreviousValue * (1 - ema20Multiplier);
+
+    const typicalPrice = (bar.high + bar.low + bar.close) / 3;
+    const cumulativePriceVolume =
+      this.vwapPrefixPriceVolume + typicalPrice * bar.volume;
+    const cumulativeVolume = this.vwapPrefixVolume + bar.volume;
+
+    this.currentVwapValue =
+      cumulativeVolume > 0
+        ? cumulativePriceVolume / cumulativeVolume
+        : null;
+  }
+
+  private scheduleLiveStudiesRender(force = false): void {
+    const now = performance.now();
+
+    if (force || now - this.lastLiveStudyRenderAt >= LIVE_STUDY_THROTTLE_MS) {
+      if (this.liveStudyRenderTimer != null) {
+        window.clearTimeout(this.liveStudyRenderTimer);
+        this.liveStudyRenderTimer = null;
+      }
+
+      this.lastLiveStudyRenderAt = now;
+      this.renderStudies();
+      return;
+    }
+
+    if (this.liveStudyRenderTimer != null) return;
+
+    const delay = Math.max(0, LIVE_STUDY_THROTTLE_MS - (now - this.lastLiveStudyRenderAt));
+
+    this.liveStudyRenderTimer = window.setTimeout(() => {
+      this.liveStudyRenderTimer = null;
+      this.lastLiveStudyRenderAt = performance.now();
+      this.renderStudies();
+    }, delay);
+  }
+
+  private invalidateDerivedStateCache(): void {
+    this.derivedStateCacheKey = "";
+    this.cachedStructure = null;
+    this.cachedCompression = null;
+    this.cachedMomentum = null;
+  }
+
+  private getDerivedStateAnalysis(): {
+    structure: ReturnType<typeof buildMarketStructure>;
+    compression: ReturnType<typeof buildCompression>;
+    momentum: ReturnType<typeof buildMomentum>;
+  } {
+    const lastBar = this.bars[this.bars.length - 1];
+    const cacheKey = [
+      this.symbol ?? "",
+      this.timeframe ?? "",
+      this.bars.length,
+      lastBar ? String(lastBar.time) : "none",
+    ].join("|");
+
+    if (
+      cacheKey !== this.derivedStateCacheKey ||
+      !this.cachedStructure ||
+      !this.cachedCompression ||
+      !this.cachedMomentum
+    ) {
+      this.derivedStateCacheKey = cacheKey;
+      this.cachedStructure = buildMarketStructure(this.bars);
+      this.cachedCompression = buildCompression(this.bars);
+      this.cachedMomentum = buildMomentum(this.bars);
+    }
+
+    return {
+      structure: this.cachedStructure!,
+      compression: this.cachedCompression!,
+      momentum: this.cachedMomentum!,
+    };
+  }
+
   private buildCandleSeriesData(): CandlestickData<Time>[] {
     return this.bars.map((bar) => ({
       time: bar.time,
@@ -760,6 +912,7 @@ export class ChartEngine {
   }
 
   private renderStudies(): void {
+    this.lastLiveStudyRenderAt = performance.now();
     this.studyRenderer.render({
       bars: this.bars,
       settings: this.chartSettings,
@@ -907,6 +1060,8 @@ export class ChartEngine {
 
   setBars(bars: CleanBar[]): void {
     this.bars = trimBarsForTimeframe(bars, this.timeframe);
+    this.invalidateDerivedStateCache();
+    this.rebuildLiveIndicatorState();
     this.lastCrosshairInfo = this.getLastBarInfo();
 
     const newestBar = this.bars[this.bars.length - 1];
@@ -934,14 +1089,26 @@ export class ChartEngine {
 
   updateBar(bar: CleanBar): void {
     const lastBar = this.bars[this.bars.length - 1];
+    const isSameBar =
+      Boolean(lastBar) && Number(lastBar?.time) === Number(bar.time);
 
-    if (lastBar && Number(lastBar.time) === Number(bar.time)) {
+    if (isSameBar) {
       this.bars[this.bars.length - 1] = bar;
     } else {
       this.bars.push(bar);
     }
 
     this.bars = trimBarsForTimeframe(this.bars, this.timeframe);
+
+    if (isSameBar) {
+      this.updateLiveIndicatorValues(bar);
+    } else {
+      // Rebuild once per completed candle so any timeframe trimming remains
+      // exactly consistent with the historical calculation.
+      this.invalidateDerivedStateCache();
+      this.rebuildLiveIndicatorState();
+    }
+
     this.lastCrosshairInfo = buildCrosshairInfoFromBar(bar);
     this.positionOverlayEngine.updateMarketPrice(bar.close);
 
@@ -953,36 +1120,41 @@ export class ChartEngine {
       close: bar.close,
     });
 
-    this.renderStudies();
-
     this.series.volume.update({
       time: bar.time,
       value: bar.volume,
       color: volumeColor(bar),
     });
 
-    const vwapBars = buildVwapBars(this.bars);
-    const newestVwap = vwapBars[vwapBars.length - 1];
-
-    if (newestVwap) {
-      this.series.vwap.update(newestVwap);
+    if (this.currentVwapValue != null) {
+      this.series.vwap.update({
+        time: bar.time,
+        value: this.currentVwapValue,
+      });
     }
 
-    const ema9Bars = buildEmaBars(this.bars, 9);
-    const newestEma9 = ema9Bars[ema9Bars.length - 1];
-
-    if (newestEma9) {
-      this.series.ema9.update(newestEma9);
+    if (this.currentEma9Value != null) {
+      this.series.ema9.update({
+        time: bar.time,
+        value: this.currentEma9Value,
+      });
     }
 
-    const ema20Bars = buildEmaBars(this.bars, 20);
-    const newestEma20 = ema20Bars[ema20Bars.length - 1];
-
-    if (newestEma20) {
-      this.series.ema20.update(newestEma20);
+    if (this.currentEma20Value != null) {
+      this.series.ema20.update({
+        time: bar.time,
+        value: this.currentEma20Value,
+      });
     }
 
-    this.scheduleSessionBandsRender();
+    // Structure, demand-zone and liquidity calculations are expensive. Run
+    // immediately on a new candle, but throttle repeated updates to the same
+    // live candle.
+    this.scheduleLiveStudiesRender(!isSameBar);
+
+    if (!isSameBar) {
+      this.scheduleSessionBandsRender();
+    }
   }
 
   setStudyVisibility(visibility: StudyVisibility): void {
@@ -1129,6 +1301,7 @@ setMarketContext(symbol?: string, timeframe?: string): void {
 
   this.symbol = nextSymbol;
   this.timeframe = nextTimeframe;
+  this.invalidateDerivedStateCache();
 
   this.autoScaleManager.clearFocusedPriceRange();
   this.autoScaleManager.clearVerticalPan();
@@ -1186,15 +1359,14 @@ setMarketContext(symbol?: string, timeframe?: string): void {
           recentVolumeBars.length
         : undefined;
 
-    const ema9 = getCurrentEMA(this.bars, 9);
-    const ema20 = getCurrentEMA(this.bars, 20);
+    const ema9 = this.currentEma9Value ?? getCurrentEMA(this.bars, 9);
+    const ema20 = this.currentEma20Value ?? getCurrentEMA(this.bars, 20);
     const ema50 = getCurrentEMA(this.bars, 50);
     const ema200 = getCurrentEMA(this.bars, 200);
-    const vwap = getCurrentVWAP(this.bars);
+    const vwap = this.currentVwapValue ?? getCurrentVWAP(this.bars);
     const atr = getCurrentATR(this.bars);
-    const structure = buildMarketStructure(this.bars);
-    const compression = buildCompression(this.bars);
-    const momentum = buildMomentum(this.bars);
+    const { structure, compression, momentum } =
+      this.getDerivedStateAnalysis();
 
 
     return {
@@ -1458,6 +1630,12 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     this.unsubscribePositionOverlay = null;
     this.positionOverlayRenderer.destroy();
     this.positionOverlayEngine.destroy();
+
+    if (this.liveStudyRenderTimer != null) {
+      window.clearTimeout(this.liveStudyRenderTimer);
+      this.liveStudyRenderTimer = null;
+    }
+
     this.studyRenderer.destroy();
     this.clearSessionBands();
 

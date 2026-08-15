@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { lazy, Suspense, useState, type CSSProperties } from "react";
 import AccountWidget from "./AccountWidget";
 import QuickOrderWidget from "./QuickOrderWidget";
 import TradePlanWidget from "./TradePlanWidget";
@@ -8,7 +8,6 @@ import FilledOrdersWidget from "./FilledOrdersWidget";
 import AutoTradeWidget from "./AutoTradeWidget";
 import TradeJournalWidget from "./TradeJournalWidget";
 import PerformanceWidget from "./PerformanceWidget";
-import DailyPracticeUniverseWidget from "./DailyPracticeUniverseWidget";
 import { useTradeEngineStore } from "../../../../../trading/hooks/useTradeEngineStore";
 import { useTradeHistoryStore } from "../../../../../trading/hooks/useTradeHistoryStore";
 
@@ -18,6 +17,10 @@ type TradingWorkspacePanelProps = {
   symbol: string;
   currentPrice: number;
 };
+
+const DailyPracticeUniverseWidget = lazy(
+  () => import("./DailyPracticeUniverseWidget"),
+);
 
 const TABS: { id: TradingTab; label: string }[] = [
   { id: "quick", label: "Quick Trade" },
@@ -74,6 +77,7 @@ export default function TradingWorkspacePanel({
   currentPrice,
 }: TradingWorkspacePanelProps) {
   const [activeTab, setActiveTab] = useState<TradingTab>("quick");
+  const [practiceCenterOpen, setPracticeCenterOpen] = useState(false);
 
   const safeSymbol = symbol || "—";
   const safePrice = Number.isFinite(currentPrice) ? currentPrice : 0;
@@ -353,7 +357,36 @@ export default function TradingWorkspacePanel({
 
       <FilledOrdersWidget orders={historyStore.filledOrders} />
 
-      <DailyPracticeUniverseWidget />
+      <section style={styles.practiceToggleCard}>
+        <div>
+          <div style={styles.statusLabel}>Practice Center</div>
+          <div style={styles.practiceToggleText}>
+            {practiceCenterOpen
+              ? "Practice tools are loaded."
+              : "Load practice analysis only when you need it."}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setPracticeCenterOpen((current) => !current)}
+          style={styles.practiceToggleButton}
+        >
+          {practiceCenterOpen ? "Close" : "Open"}
+        </button>
+      </section>
+
+      {practiceCenterOpen && (
+        <Suspense
+          fallback={
+            <section style={styles.practiceLoadingCard}>
+              Loading Practice Center…
+            </section>
+          }
+        >
+          <DailyPracticeUniverseWidget />
+        </Suspense>
+      )}
 
       <PerformanceWidget
         symbol={safeSymbol}
@@ -380,6 +413,41 @@ function StatusMetric({ label, value }: { label: string; value: string }) {
 }
 
 const styles: Record<string, CSSProperties> = {
+  practiceToggleCard: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: 12,
+    border: "1px solid rgba(148,163,184,.18)",
+    borderRadius: 12,
+    background: "rgba(15,23,42,.62)",
+  },
+  practiceToggleText: {
+    marginTop: 4,
+    fontSize: 11,
+    color: "#94a3b8",
+    lineHeight: 1.4,
+  },
+  practiceToggleButton: {
+    minWidth: 72,
+    padding: "7px 10px",
+    borderRadius: 9,
+    border: "1px solid rgba(96,165,250,.4)",
+    background: "rgba(37,99,235,.18)",
+    color: "#bfdbfe",
+    fontSize: 11,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  practiceLoadingCard: {
+    padding: 12,
+    border: "1px solid rgba(148,163,184,.14)",
+    borderRadius: 12,
+    background: "rgba(15,23,42,.5)",
+    color: "#94a3b8",
+    fontSize: 11,
+  },
   panel: {
     display: "flex",
     flexDirection: "column",
