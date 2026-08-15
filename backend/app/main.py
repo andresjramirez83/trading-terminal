@@ -1473,7 +1473,11 @@ SCANNER_MIN_PRICE = float(os.getenv("SCANNER_MIN_PRICE", "0.5") or "0.5")
 SCANNER_MAX_PRICE = float(os.getenv("SCANNER_MAX_PRICE", "20.0") or "20.0")
 SCANNER_MIN_VOLUME = max(0, int(os.getenv("SCANNER_MIN_VOLUME", "500000") or "500000"))
 SCANNER_MIN_CHANGE_PCT = float(os.getenv("SCANNER_MIN_CHANGE_PCT", "3.0") or "3.0")
-SCANNER_ID = os.getenv("BACKGROUND_SCANNER_ID", "overnight_runner").strip() or "overnight_runner"
+# Performance profile: VWAP +3 Target is the only active background scanner.
+# The other scanner implementations remain registered for compatibility, but
+# they are not executed by the background loop.
+SCANNER_ID = "vwap3_target"
+SCANNER_BACKGROUND_IDS = (SCANNER_ID,)
 SCANNER_WORKFLOW = os.getenv("BACKGROUND_SCANNER_WORKFLOW", "auto").strip().lower() or "auto"
 SCANNER_MIN_PM_RANGE_PCT = float(os.getenv("BACKGROUND_SCANNER_MIN_PM_RANGE_PCT", "4.5") or "4.5")
 SCANNER_MIN_PM_DOLLAR_VOLUME = float(os.getenv("BACKGROUND_SCANNER_MIN_PM_DOLLAR_VOLUME", "500000") or "500000")
@@ -2728,7 +2732,8 @@ async def run_background_scanner_loop() -> None:
                 continue
 
             scanner_last_status = "scanning"
-            await maybe_auto_save_afterhours_snapshot()
+            if "overnight_runner" in SCANNER_BACKGROUND_IDS:
+                await maybe_auto_save_afterhours_snapshot()
             market = get_market_data_provider()
             async def run_registered_scanner(definition: Dict[str, Any]):
                 scanner_id = str(definition.get("id") or "")
@@ -2755,8 +2760,13 @@ async def run_background_scanner_loop() -> None:
                 except Exception as exc:
                     return scanner_id, None, str(exc)
 
+            background_definitions = [
+                item
+                for item in registry.list()
+                if str(item.get("id") or "") in SCANNER_BACKGROUND_IDS
+            ]
             completed = await asyncio.gather(
-                *(run_registered_scanner(item) for item in registry.list())
+                *(run_registered_scanner(item) for item in background_definitions)
             )
             completed_at = datetime.now(timezone.utc)
             cycle_errors: List[str] = []

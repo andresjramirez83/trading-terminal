@@ -82,7 +82,7 @@ const WatchlistContext = createContext<WatchlistContextValue | null>(null);
 
 const WATCHLIST_STORAGE_KEY = "trading.workstation.watchlists.v1";
 const ACTIVE_WATCHLIST_STORAGE_KEY = "trading.workstation.activeWatchlist.v1";
-const MANUAL_WATCHLIST_POLL_MS = 2_000;
+const MANUAL_WATCHLIST_POLL_MS = 10_000;
 const SCANNER_WATCHLIST_POLL_MS = 45_000;
 
 type CachedScannerRow = {

@@ -77,7 +77,7 @@ const FX_ANALYSIS_TOOL_STORAGE_KEY = "chartv2.fxAnalysisTool";
 const FX_ANALYSIS_SETTINGS_STORAGE_KEY = "chartv2.fxAnalysisSettings";
 const CHART_SETTINGS_STORAGE_KEY = "chartv2.chartSettings";
 const MARKET_DATA_MODE_STORAGE_KEY = "chartv2.marketDataMode";
-const CHART_PREFERENCES_POLL_MS = 3_000;
+const CHART_PREFERENCES_POLL_MS = 15_000;
 const CHART_PREFERENCES_SAVE_DELAY_MS = 180;
 
 const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
@@ -1215,7 +1215,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     void refreshAutoTradeStatus();
     const autoTradeTimer = window.setInterval(
       () => void refreshAutoTradeStatus(),
-      2_000,
+      5_000,
     );
 
     return () => {

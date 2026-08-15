@@ -392,9 +392,12 @@ export async function fetchVwap3TargetHitHistory(
   return parseJson<Vwap3TargetHitHistoryResponse>(res);
 }
 
+const ENABLED_SCANNER_IDS = new Set(["vwap3_target"]);
+
 export async function fetchScannerDefinitions(): Promise<ScannerDefinition[]> {
   const res = await fetch(`${API_BASE}/scanner-v2/list`);
-  return parseJson<ScannerDefinition[]>(res);
+  const definitions = await parseJson<ScannerDefinition[]>(res);
+  return definitions.filter((definition) => ENABLED_SCANNER_IDS.has(definition.id));
 }
 
 export async function fetchOvernightSnapshots(
@@ -924,9 +927,46 @@ export type AutoTradeStatus = {
 
 export type AutoTradeConfigUpdate = Partial<AutoTradeConfig>;
 
+const AUTO_TRADE_STATUS_CACHE_MS = 4_500;
+let autoTradeStatusCache: AutoTradeStatus | null = null;
+let autoTradeStatusCacheAt = 0;
+let autoTradeStatusInFlight: Promise<AutoTradeStatus> | null = null;
+
+function rememberAutoTradeStatus(status: AutoTradeStatus): AutoTradeStatus {
+  autoTradeStatusCache = status;
+  autoTradeStatusCacheAt = Date.now();
+  return status;
+}
+
+function clearAutoTradeStatusCache(): void {
+  autoTradeStatusCache = null;
+  autoTradeStatusCacheAt = 0;
+}
+
 export async function fetchAutoTradeStatus(): Promise<AutoTradeStatus> {
-  const res = await fetch(`${API_BASE}/auto-trade/status`);
-  return parseJson<AutoTradeStatus>(res);
+  const now = Date.now();
+  if (
+    autoTradeStatusCache &&
+    now - autoTradeStatusCacheAt < AUTO_TRADE_STATUS_CACHE_MS
+  ) {
+    return autoTradeStatusCache;
+  }
+
+  if (autoTradeStatusInFlight) {
+    return autoTradeStatusInFlight;
+  }
+
+  autoTradeStatusInFlight = (async () => {
+    const res = await fetch(`${API_BASE}/auto-trade/status`);
+    const status = await parseJson<AutoTradeStatus>(res);
+    return rememberAutoTradeStatus(status);
+  })();
+
+  try {
+    return await autoTradeStatusInFlight;
+  } finally {
+    autoTradeStatusInFlight = null;
+  }
 }
 
 export async function updateAutoTradeConfig(
@@ -938,7 +978,9 @@ export async function updateAutoTradeConfig(
     body: JSON.stringify(payload),
   });
 
-  return parseJson<AutoTradeStatus>(res);
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
 }
 
 export async function startAutoTrade(
@@ -950,7 +992,9 @@ export async function startAutoTrade(
     body: JSON.stringify(payload),
   });
 
-  return parseJson<AutoTradeStatus>(res);
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
 }
 
 export async function stopAutoTrade(): Promise<AutoTradeStatus> {
@@ -958,7 +1002,9 @@ export async function stopAutoTrade(): Promise<AutoTradeStatus> {
     method: "POST",
   });
 
-  return parseJson<AutoTradeStatus>(res);
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
 }
 
 export async function checkAutoTradeOnce(): Promise<any> {
@@ -999,7 +1045,9 @@ export async function queueOvernightProtectedOrder(
     }),
   });
 
-  return parseJson<AutoTradeStatus>(res);
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
 }
 
 export type ProtectedOrderChartLevel = "entry" | "stop" | "target";
@@ -1019,7 +1067,9 @@ export async function updateOvernightProtectedOrderPrice(
     },
   );
 
-  return parseJson<AutoTradeStatus>(res);
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
 }
 
 export type ProtectedPositionAction =
@@ -1042,7 +1092,9 @@ export async function requestOvernightProtectedPositionAction(
     },
   );
 
-  return parseJson<AutoTradeStatus>(res);
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
 }
 
 /** @deprecated Use queueOvernightProtectedOrder. */
@@ -1061,7 +1113,9 @@ export async function queueManualTradePlan(
     body: JSON.stringify(payload),
   });
 
-  return parseJson<AutoTradeStatus>(res);
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
 }
 
 export type SharedChartRange = {

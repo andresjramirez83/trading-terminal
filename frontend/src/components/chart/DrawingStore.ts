@@ -6,7 +6,7 @@ import type { ChartDrawing } from "./DrawingTypes";
 const STORAGE_PREFIX = "chart.drawings.v1";
 const MARKET_STRUCTURE_STORAGE_PREFIX = "chart.market-structure.v1";
 const SHARED_SCOPE = "shared";
-const REMOTE_POLL_MS = 1_500;
+const REMOTE_POLL_MS = 10_000;
 const REMOTE_SAVE_DELAY_MS = 120;
 
 type DrawingScope = "timeframe" | "shared";

@@ -18,7 +18,7 @@ export type FxAnalysisHit = {
 
 const STORAGE_PREFIX = "chart.fxAnalysis.v1";
 const REMOTE_SCOPE = "analysis";
-const REMOTE_POLL_MS = 1_500;
+const REMOTE_POLL_MS = 10_000;
 const REMOTE_SAVE_DELAY_MS = 120;
 
 type RemoteAnalysisDocument = {
