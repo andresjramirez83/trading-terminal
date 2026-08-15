@@ -12,41 +12,39 @@ import type {
 export function resolveApiBaseUrl(): string {
   const envBase = String(import.meta.env.VITE_API_BASE_URL || "").trim();
   const configBase = String(API_BASE_URL || "").trim();
-  const rawBase = envBase || configBase;
+  const rawBase = envBase || configBase || "/api";
 
-  const normalize = (value: string): string => {
+  const normalizePath = (value: string): string => {
     const trimmed = value.trim().replace(/\/$/, "");
-    if (!trimmed || trimmed === "/") {
-      throw new Error("empty api base");
-    }
-
-    try {
-      const url = new URL(trimmed);
-      const hasExplicitPort = Boolean(url.port);
-      const isBareOrigin = url.pathname === "/" || url.pathname === "";
-
-      if (!hasExplicitPort && isBareOrigin) {
-        url.port = "8000";
-      }
-
-      return url.toString().replace(/\/$/, "");
-    } catch {
-      return trimmed;
-    }
+    if (!trimmed || trimmed === "/") return "/api";
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
   };
 
-  if (typeof window !== "undefined") {
-    const host = window.location.hostname;
-    const protocol = window.location.protocol;
-
-    if (!rawBase || rawBase === "/" || rawBase === window.location.origin) {
-      return `${protocol}//${host}:8000`;
-    }
+  // Relative API bases intentionally stay same-origin so the browser can reuse
+  // the nginx connection that served the app instead of opening a second public
+  // connection to FastAPI on :8000.
+  if (rawBase.startsWith("/")) {
+    return normalizePath(rawBase);
   }
 
-  return normalize(rawBase);
-}
+  try {
+    const url = new URL(rawBase);
 
+    // If an older build-time value still points at this same host on :8000,
+    // transparently migrate it to the nginx /api route in production.
+    if (
+      typeof window !== "undefined" &&
+      url.hostname === window.location.hostname &&
+      url.port === "8000"
+    ) {
+      return "/api";
+    }
+
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return normalizePath(rawBase);
+  }
+}
 export const API_BASE = resolveApiBaseUrl();
 
 async function parseJson<T>(res: Response): Promise<T> {
@@ -1203,9 +1201,19 @@ export type LiveBarMessage = {
 
 export function resolveWsBaseUrl(): string {
   const apiBase = API_BASE.replace(/\/$/, "");
-  return apiBase.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-}
 
+  if (/^https?:\/\//i.test(apiBase)) {
+    return apiBase.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const path = apiBase.startsWith("/") ? apiBase : `/${apiBase}`;
+    return `${protocol}//${window.location.host}${path}`;
+  }
+
+  return "ws://127.0.0.1:8000";
+}
 export function connectChartV2BarsSocket(params: {
   symbol: string;
   timeframe: string;

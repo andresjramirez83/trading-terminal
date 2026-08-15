@@ -27,49 +27,28 @@ const MAX_RECONNECT_DELAY_MS = 12_000;
 function resolveWsBaseUrl(): string {
   const envWs = String(import.meta.env.VITE_WS_URL || "").trim();
   const configWs = String(WS_BASE_URL || "").trim();
-  const rawWs = envWs || configWs;
+  const explicitWs = envWs || configWs;
 
-  const normalizeWs = (value: string): string => {
-    const trimmed = value.trim().replace(/\/$/, "");
-    if (!trimmed || trimmed === "/") {
-      throw new Error("empty ws base");
+  if (explicitWs) {
+    const trimmed = explicitWs.replace(/\/$/, "");
+    if (/^wss?:\/\//i.test(trimmed)) return trimmed;
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
     }
-
-    const withProtocol = trimmed.startsWith("ws://") || trimmed.startsWith("wss://")
-      ? trimmed
-      : trimmed.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-
-    try {
-      const url = new URL(withProtocol);
-      const hasExplicitPort = Boolean(url.port);
-      const isBareOrigin = url.pathname === "/" || url.pathname === "";
-      if (!hasExplicitPort && isBareOrigin) {
-        url.port = "8000";
-      }
-      return url.toString().replace(/\/$/, "");
-    } catch {
-      return withProtocol;
-    }
-  };
-
-  try {
-    if (rawWs && rawWs !== "/") {
-      return normalizeWs(rawWs);
-    }
-
-    const apiUrl = new URL(API_BASE);
-    apiUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
-    if (!apiUrl.port && (apiUrl.pathname === "/" || apiUrl.pathname === "")) {
-      apiUrl.port = "8000";
-    }
-    return apiUrl.toString().replace(/\/$/, "");
-  } catch {
-    if (typeof window !== "undefined") {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      return `${protocol}//${window.location.hostname}:8000`;
-    }
-    return "ws://127.0.0.1:8000";
   }
+
+  const apiBase = API_BASE.replace(/\/$/, "");
+  if (/^https?:\/\//i.test(apiBase)) {
+    return apiBase.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const path = apiBase.startsWith("/") ? apiBase : `/${apiBase}`;
+    return `${protocol}//${window.location.host}${path}`;
+  }
+
+  return "ws://127.0.0.1:8000";
 }
 
 const MARKET_WS_BASE = resolveWsBaseUrl();
