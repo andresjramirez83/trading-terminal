@@ -220,6 +220,7 @@ export class TradeExecutionService {
   private refreshTimer: number | null = null;
   private refreshInFlight: Promise<TradeExecutionSnapshot> | null = null;
   private queuedRefresh = false;
+  private queuedForceRefresh = false;
   private historyEngine = getSharedTradeHistoryEngine();
   private tradeEngine = getSharedTradeEngine();
 
@@ -271,7 +272,7 @@ export class TradeExecutionService {
       lastMessage: `Switched to ${mode} mode.`,
     });
 
-    this.queueRefresh();
+    this.queueRefresh(true);
   }
 
   subscribe(listener: TradeExecutionListener): () => void {
@@ -307,25 +308,28 @@ export class TradeExecutionService {
     }
   }
 
-  queueRefresh(): void {
+  queueRefresh(forceRefresh = false): void {
     if (this.refreshInFlight) {
       this.queuedRefresh = true;
+      this.queuedForceRefresh ||= forceRefresh;
       return;
     }
 
-    this.refreshInFlight = this.refreshAll()
+    this.refreshInFlight = this.refreshAll(forceRefresh)
       .catch(() => this.snapshot)
       .finally(() => {
         this.refreshInFlight = null;
 
         if (this.queuedRefresh) {
+          const forceQueuedRefresh = this.queuedForceRefresh;
           this.queuedRefresh = false;
-          this.queueRefresh();
+          this.queuedForceRefresh = false;
+          this.queueRefresh(forceQueuedRefresh);
         }
       });
   }
 
-  async refreshAll(): Promise<TradeExecutionSnapshot> {
+  async refreshAll(forceRefresh = false): Promise<TradeExecutionSnapshot> {
     this.setSnapshot({
       status: "loading",
       action: "refreshing",
@@ -348,6 +352,7 @@ export class TradeExecutionService {
           this.mode,
           "all",
           true,
+          forceRefresh,
         );
         rawAccount = brokerSnapshot.account;
         rawPositions = brokerSnapshot.positions;
@@ -522,7 +527,7 @@ export class TradeExecutionService {
         ],
       });
 
-      this.queueRefresh();
+      this.queueRefresh(true);
 
       return {
         ok: true,
@@ -604,7 +609,7 @@ export class TradeExecutionService {
         lastMessage: `Close order submitted for ${qty} ${safeSymbol}.`,
       });
 
-      this.queueRefresh();
+      this.queueRefresh(true);
 
       return {
         ok: true,
@@ -732,7 +737,7 @@ export class TradeExecutionService {
         : "One or more flatten orders failed.",
     });
 
-    this.queueRefresh();
+    this.queueRefresh(true);
 
     return {
       ok,
@@ -763,7 +768,7 @@ export class TradeExecutionService {
         lastMessage: "Order canceled.",
       });
 
-      this.queueRefresh();
+      this.queueRefresh(true);
       return true;
     } catch (error) {
       this.setSnapshot({
@@ -842,7 +847,7 @@ export class TradeExecutionService {
         lastMessage: "Order updated.",
       });
 
-      this.queueRefresh();
+      this.queueRefresh(true);
       return updated;
     } catch (error) {
       this.setSnapshot({

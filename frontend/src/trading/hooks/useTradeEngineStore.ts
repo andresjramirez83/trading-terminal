@@ -1232,7 +1232,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   }, []);
 
   const refreshTradingData = useCallback(() => {
-    executionService.queueRefresh();
+    executionService.queueRefresh(true);
   }, [executionService]);
 
   const switchTradingMode = useCallback(
@@ -1241,7 +1241,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
 
       await executionService.switchMode(mode);
       setExecutionMode(mode);
-      await executionService.refreshAll();
+      await executionService.refreshAll(true);
     },
     [executionService],
   );

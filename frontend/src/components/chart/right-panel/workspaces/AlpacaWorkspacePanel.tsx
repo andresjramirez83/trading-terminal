@@ -30,6 +30,22 @@ type OrderFormState = {
   extendedHours: boolean;
 };
 
+const TERMINAL_ORDER_STATUSES = new Set([
+  "filled",
+  "canceled",
+  "cancelled",
+  "expired",
+  "rejected",
+  "done_for_day",
+  "replaced",
+]);
+
+function isOpenOrder(order: OrderData): boolean {
+  return !TERMINAL_ORDER_STATUSES.has(
+    String(order.status ?? "").trim().toLowerCase(),
+  );
+}
+
 function normalizeSymbol(value: unknown): string {
   return String(value ?? "")
     .trim()
@@ -257,13 +273,13 @@ export default function AlpacaWorkspacePanel() {
     return positions.find((position) => normalizeSymbol(position.symbol) === orderSymbol) ?? null;
   }, [orderSymbol, positions]);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError("");
 
     try {
       const [brokerSnapshot, nextAutoTradeStatus] = await Promise.all([
-        fetchAlpacaSnapshot(mode, "open", true),
+        fetchAlpacaSnapshot(mode, "all", true, forceRefresh),
         fetchAutoTradeStatus().catch(() => null),
       ]);
 
@@ -275,7 +291,7 @@ export default function AlpacaWorkspacePanel() {
       );
       setOrders(
         Array.isArray(brokerSnapshot.orders)
-          ? (brokerSnapshot.orders as OrderData[])
+          ? (brokerSnapshot.orders as OrderData[]).filter(isOpenOrder)
           : [],
       );
       setAutoTradeStatus(nextAutoTradeStatus);
@@ -348,7 +364,7 @@ export default function AlpacaWorkspacePanel() {
 
         setActiveSymbol(symbol);
         setMessage(`${side.toUpperCase()} order sent for ${symbol}.`);
-        await loadData();
+        await loadData(true);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Order failed.");
       } finally {
@@ -369,7 +385,7 @@ export default function AlpacaWorkspacePanel() {
       try {
         await cancelAlpacaOrder(orderId, mode);
         setMessage(`Canceled ${symbol ? `${symbol} ` : ""}order.`);
-        await loadData();
+        await loadData(true);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Cancel failed.");
       } finally {
@@ -409,7 +425,7 @@ export default function AlpacaWorkspacePanel() {
       });
 
       setMessage(`Flatten order sent for ${orderSymbol}.`);
-      await loadData();
+      await loadData(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Flatten failed.");
     } finally {
@@ -509,7 +525,7 @@ export default function AlpacaWorkspacePanel() {
       <section style={styles.card}>
         <div style={styles.cardHeader}>
           <div style={styles.cardTitle}>Account</div>
-          <button onClick={() => void loadData()} style={{ ...styles.button, width: 74 }} disabled={loading || busy}>
+          <button onClick={() => void loadData(true)} style={{ ...styles.button, width: 74 }} disabled={loading || busy}>
             {loading ? "Loading" : "Refresh"}
           </button>
         </div>

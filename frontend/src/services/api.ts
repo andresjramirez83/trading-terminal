@@ -725,18 +725,22 @@ export type AlpacaSnapshotResponse = {
   positions: unknown[];
   orders: unknown[];
   fetched_at?: string;
+  cache_hit?: boolean;
+  cache_age_ms?: number;
 };
 
 export async function fetchAlpacaSnapshot(
   mode: AlpacaMode = "paper",
   status: "open" | "closed" | "all" = "all",
   nested = true,
+  forceRefresh = false,
 ): Promise<AlpacaSnapshotResponse> {
   const params = new URLSearchParams({
     mode,
     status,
     nested: String(nested),
     limit: "500",
+    force_refresh: String(forceRefresh),
     _ts: String(Date.now()),
   });
 

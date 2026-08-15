@@ -96,23 +96,25 @@ export class ExecutionGateway {
     getSharedTradeExecutionService(this.alpacaMode).stopPolling();
   }
 
-  queueRefresh(): void {
+  queueRefresh(forceRefresh = false): void {
     if (this.getMode() === "practice") {
       void this.refreshAll();
       return;
     }
 
-    getSharedTradeExecutionService(this.getAlpacaMode()).queueRefresh();
+    getSharedTradeExecutionService(this.getAlpacaMode()).queueRefresh(
+      forceRefresh,
+    );
   }
 
-  async refreshAll(): Promise<TradeExecutionSnapshot> {
+  async refreshAll(forceRefresh = false): Promise<TradeExecutionSnapshot> {
     if (this.getMode() === "practice") {
       return getReplayExecutionProvider().refresh();
     }
 
     return getSharedTradeExecutionService(
       this.getAlpacaMode(),
-    ).refreshAll();
+    ).refreshAll(forceRefresh);
   }
 
   async submitQuickOrder(

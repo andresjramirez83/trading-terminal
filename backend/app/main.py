@@ -2907,6 +2907,7 @@ async def on_startup() -> None:
             print(f"[startup] daily manual watchlist archive failed: {archive_exc}", flush=True)
         start_backend_alert_task_if_needed()
         start_scanner_task_if_needed()
+        start_alpaca_snapshot_task_if_needed()
         # Auto-trade execution moved to dedicated trading-autotrade.service.
         # Do not start an in-Gunicorn auto-trade loop here.
 
@@ -2916,6 +2917,7 @@ async def on_shutdown() -> None:
     if BACKGROUND_LOCK_HELD:
         await stop_backend_alert_task()
         await stop_scanner_task()
+        await stop_alpaca_snapshot_task()
         # Dedicated auto-trade worker is stopped by systemd, not the web backend.
         release_background_worker_lock()
     try:
@@ -4466,12 +4468,58 @@ async def auto_trade_check_once():
         results.append(await asyncio.to_thread(_auto_trade_try_execute, symbol))
     return {"symbols": symbols, "results": results, "status": _auto_trade_status_payload()}
 
-# Very short broker-snapshot cache. This only deduplicates mounts/manual
-# refreshes that arrive together; the normal 8-second UI refresh still reaches
-# Alpaca, so trading/account data does not become meaningfully stale.
-ALPACA_SNAPSHOT_CACHE_TTL_SECONDS = 2.0
+# Fast broker-snapshot cache. The browser reads account/positions/orders from
+# memory while one backend task keeps the active trading mode warm. Forced
+# refreshes are still available for manual refreshes and post-order actions.
+ALPACA_SNAPSHOT_CACHE_TTL_SECONDS = 10.0
+ALPACA_SNAPSHOT_BACKGROUND_INTERVAL_SECONDS = 5.0
+ALPACA_SNAPSHOT_ACTIVE_MODE_SECONDS = 180.0
+ALPACA_SNAPSHOT_CANONICAL_STATUS = "all"
+ALPACA_SNAPSHOT_CANONICAL_LIMIT = 500
+ALPACA_SNAPSHOT_CANONICAL_NESTED = True
 ALPACA_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
-ALPACA_SNAPSHOT_IN_FLIGHT: Dict[str, asyncio.Task] = {}
+ALPACA_SNAPSHOT_IN_FLIGHT: Dict[str, Dict[str, Any]] = {}
+ALPACA_SNAPSHOT_GENERATION: Dict[str, int] = {"paper": 0, "live": 0}
+ALPACA_SNAPSHOT_ACTIVE_MODES: Dict[str, float] = {"paper": time.monotonic()}
+alpaca_snapshot_task: Optional[asyncio.Task] = None
+alpaca_snapshot_last_error: Optional[str] = None
+alpaca_snapshot_last_refresh: Dict[str, datetime] = {}
+
+
+def _normalize_alpaca_mode(mode: str) -> str:
+    normalized = (mode or "paper").strip().lower()
+    return "live" if normalized == "live" else "paper"
+
+
+def _alpaca_snapshot_cache_key(
+    mode: str,
+    status: str,
+    limit: int,
+    nested: bool,
+) -> str:
+    return f"{_normalize_alpaca_mode(mode)}:{status}:{limit}:{int(bool(nested))}"
+
+
+def _mark_alpaca_snapshot_mode_active(mode: str) -> str:
+    normalized = _normalize_alpaca_mode(mode)
+    ALPACA_SNAPSHOT_ACTIVE_MODES[normalized] = time.monotonic()
+    return normalized
+
+
+def _invalidate_alpaca_snapshot_cache(mode: str) -> None:
+    """Invalidate only one broker mode after an order mutation.
+
+    A generation counter prevents an older in-flight broker response from
+    repopulating the cache after a place/cancel/replace action.
+    """
+    normalized = _mark_alpaca_snapshot_mode_active(mode)
+    ALPACA_SNAPSHOT_GENERATION[normalized] = (
+        ALPACA_SNAPSHOT_GENERATION.get(normalized, 0) + 1
+    )
+    prefix = f"{normalized}:"
+    for key in list(ALPACA_SNAPSHOT_CACHE):
+        if key.startswith(prefix):
+            ALPACA_SNAPSHOT_CACHE.pop(key, None)
 
 
 async def _fetch_alpaca_snapshot_from_broker(
@@ -4500,7 +4548,7 @@ async def _fetch_alpaca_snapshot_from_broker(
     )
 
     return {
-        "mode": (mode or "paper").strip().lower(),
+        "mode": _normalize_alpaca_mode(mode),
         "account": account,
         "positions": positions if isinstance(positions, list) else [],
         "orders": orders if isinstance(orders, list) else [],
@@ -4508,32 +4556,32 @@ async def _fetch_alpaca_snapshot_from_broker(
     }
 
 
-@app.get("/alpaca/snapshot")
-async def alpaca_snapshot(
-    mode: str = Query("paper"),
-    status: str = Query("all"),
-    limit: int = Query(500, ge=1, le=500),
-    nested: bool = Query(True),
-):
-    """Fetch account, positions, and orders in one browser request.
+async def _refresh_alpaca_snapshot_cache(
+    mode: str,
+    status: str = ALPACA_SNAPSHOT_CANONICAL_STATUS,
+    limit: int = ALPACA_SNAPSHOT_CANONICAL_LIMIT,
+    nested: bool = ALPACA_SNAPSHOT_CANONICAL_NESTED,
+) -> Dict[str, Any]:
+    normalized_mode = _normalize_alpaca_mode(mode)
+    cache_key = _alpaca_snapshot_cache_key(
+        normalized_mode,
+        status,
+        limit,
+        nested,
+    )
+    generation = ALPACA_SNAPSHOT_GENERATION.get(normalized_mode, 0)
 
-    The broker calls run concurrently. A two-second in-process cache also
-    deduplicates simultaneous consumers without slowing the normal UI refresh.
-    """
-    normalized_mode = (mode or "paper").strip().lower()
-    cache_key = f"{normalized_mode}:{status}:{limit}:{int(bool(nested))}"
-    now = time.monotonic()
+    in_flight = ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key)
+    task: Optional[asyncio.Task] = None
+    if (
+        in_flight is not None
+        and int(in_flight.get("generation", -1)) == generation
+    ):
+        existing_task = in_flight.get("task")
+        if isinstance(existing_task, asyncio.Task) and not existing_task.done():
+            task = existing_task
 
-    cached = ALPACA_SNAPSHOT_CACHE.get(cache_key)
-    if cached is not None:
-        age = now - float(cached.get("stored_at") or 0.0)
-        if age <= ALPACA_SNAPSHOT_CACHE_TTL_SECONDS:
-            payload = copy.deepcopy(cached["payload"])
-            payload["cache_hit"] = True
-            return payload
-
-    task = ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key)
-    if task is None or task.done():
+    if task is None:
         task = asyncio.create_task(
             _fetch_alpaca_snapshot_from_broker(
                 normalized_mode,
@@ -4542,16 +4590,151 @@ async def alpaca_snapshot(
                 nested,
             )
         )
-        ALPACA_SNAPSHOT_IN_FLIGHT[cache_key] = task
+        ALPACA_SNAPSHOT_IN_FLIGHT[cache_key] = {
+            "generation": generation,
+            "task": task,
+        }
 
     try:
         payload = await task
-        ALPACA_SNAPSHOT_CACHE[cache_key] = {
-            "stored_at": time.monotonic(),
-            "payload": copy.deepcopy(payload),
-        }
+        if ALPACA_SNAPSHOT_GENERATION.get(normalized_mode, 0) == generation:
+            ALPACA_SNAPSHOT_CACHE[cache_key] = {
+                "stored_at": time.monotonic(),
+                "payload": copy.deepcopy(payload),
+            }
+            alpaca_snapshot_last_refresh[normalized_mode] = datetime.now(timezone.utc)
+        return payload
+    finally:
+        current = ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key)
+        if current is not None and current.get("task") is task:
+            ALPACA_SNAPSHOT_IN_FLIGHT.pop(cache_key, None)
+
+
+async def run_alpaca_snapshot_loop() -> None:
+    """Keep recently-used broker modes warm for near-instant UI snapshots."""
+    global alpaca_snapshot_last_error
+
+    print("[alpaca-snapshot-loop] started", flush=True)
+
+    while True:
+        try:
+            now = time.monotonic()
+            active_modes = [
+                mode
+                for mode, last_seen in ALPACA_SNAPSHOT_ACTIVE_MODES.items()
+                if now - last_seen <= ALPACA_SNAPSHOT_ACTIVE_MODE_SECONDS
+            ]
+
+            # Paper is the safe default and keeps the initial Trading page warm.
+            if not active_modes:
+                active_modes = ["paper"]
+
+            for mode in active_modes:
+                try:
+                    await _refresh_alpaca_snapshot_cache(mode)
+                    alpaca_snapshot_last_error = None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    alpaca_snapshot_last_error = str(exc)
+                    if DEBUG_BACKGROUND:
+                        print(
+                            f"[alpaca-snapshot-loop] {mode} refresh failed: {exc}",
+                            flush=True,
+                        )
+
+            await asyncio.sleep(ALPACA_SNAPSHOT_BACKGROUND_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            print("[alpaca-snapshot-loop] cancelled", flush=True)
+            raise
+        except Exception as exc:
+            alpaca_snapshot_last_error = str(exc)
+            print(f"[alpaca-snapshot-loop] error: {exc}", flush=True)
+            await asyncio.sleep(ALPACA_SNAPSHOT_BACKGROUND_INTERVAL_SECONDS)
+
+
+def start_alpaca_snapshot_task_if_needed() -> None:
+    global alpaca_snapshot_task
+
+    if alpaca_snapshot_task and not alpaca_snapshot_task.done():
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+        alpaca_snapshot_task = loop.create_task(run_alpaca_snapshot_loop())
+    except RuntimeError:
+        if BACKGROUND_EVENT_LOOP is None:
+            return
+
+        def _start() -> None:
+            global alpaca_snapshot_task
+            if alpaca_snapshot_task and not alpaca_snapshot_task.done():
+                return
+            alpaca_snapshot_task = BACKGROUND_EVENT_LOOP.create_task(
+                run_alpaca_snapshot_loop()
+            )
+
+        BACKGROUND_EVENT_LOOP.call_soon_threadsafe(_start)
+
+
+async def stop_alpaca_snapshot_task() -> None:
+    global alpaca_snapshot_task
+
+    task = alpaca_snapshot_task
+    alpaca_snapshot_task = None
+    if task is None or task.done():
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@app.get("/alpaca/snapshot")
+async def alpaca_snapshot(
+    mode: str = Query("paper"),
+    status: str = Query("all"),
+    limit: int = Query(500, ge=1, le=500),
+    nested: bool = Query(True),
+    force_refresh: bool = Query(False),
+):
+    """Return a warm account/positions/orders snapshot.
+
+    Normal UI polls return from memory when the background snapshot is fresh.
+    Manual refreshes and post-order reconciliation can set force_refresh=true
+    to await a broker-fresh snapshot.
+    """
+    normalized_mode = _mark_alpaca_snapshot_mode_active(mode)
+    cache_key = _alpaca_snapshot_cache_key(
+        normalized_mode,
+        status,
+        limit,
+        nested,
+    )
+    now = time.monotonic()
+
+    if not force_refresh:
+        cached = ALPACA_SNAPSHOT_CACHE.get(cache_key)
+        if cached is not None:
+            age = now - float(cached.get("stored_at") or 0.0)
+            if age <= ALPACA_SNAPSHOT_CACHE_TTL_SECONDS:
+                payload = copy.deepcopy(cached["payload"])
+                payload["cache_hit"] = True
+                payload["cache_age_ms"] = round(age * 1000)
+                return payload
+
+    try:
+        payload = await _refresh_alpaca_snapshot_cache(
+            normalized_mode,
+            status,
+            limit,
+            nested,
+        )
         result = copy.deepcopy(payload)
         result["cache_hit"] = False
+        result["cache_age_ms"] = 0
         return result
     except HTTPException:
         raise
@@ -4559,9 +4742,6 @@ async def alpaca_snapshot(
         print("ALPACA SNAPSHOT ERROR:", repr(exc), flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=502, detail=str(exc))
-    finally:
-        if ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key) is task:
-            ALPACA_SNAPSHOT_IN_FLIGHT.pop(cache_key, None)
 
 
 @app.get("/alpaca/account")
@@ -4597,6 +4777,7 @@ def cancel_alpaca_order(order_id: str, mode: str = Query("paper")):
     try:
         service = get_alpaca_service(mode)
         service.cancel_order(order_id)
+        _invalidate_alpaca_snapshot_cache(mode)
         return {"ok": True, "order_id": order_id}
     except Exception as exc:
         print("ALPACA CANCEL ORDER ERROR:", repr(exc), flush=True)
@@ -4637,6 +4818,7 @@ def update_order(order_id: str, request: dict, mode: str = Query("paper")):
             stop_price=request.get("stop_price"),
             time_in_force=request.get("time_in_force"),
         )
+        _invalidate_alpaca_snapshot_cache(mode)
 
         return updated
 
@@ -4703,6 +4885,7 @@ def alpaca_order(request: AlpacaOrderRequest):
             take_profit=take_profit,
             stop_loss=stop_loss,
         )
+        _invalidate_alpaca_snapshot_cache(request.mode)
         print("ALPACA ORDER SUCCESS", flush=True)
         return order
     except Exception as exc:
