@@ -1000,6 +1000,26 @@ export async function queueOvernightProtectedOrder(
   return parseJson<AutoTradeStatus>(res);
 }
 
+export type ProtectedOrderChartLevel = "entry" | "stop" | "target";
+
+export async function updateOvernightProtectedOrderPrice(
+  symbol: string,
+  level: ProtectedOrderChartLevel,
+  price: number,
+): Promise<AutoTradeStatus> {
+  const safeSymbol = String(symbol ?? "").trim().toUpperCase();
+  const res = await fetch(
+    `${API_BASE}/auto-trade/overnight-protected-order/${encodeURIComponent(safeSymbol)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level, price }),
+    },
+  );
+
+  return parseJson<AutoTradeStatus>(res);
+}
+
 /** @deprecated Use queueOvernightProtectedOrder. */
 export async function queueOverniteHailMaryPlan(
   payload: ManualTradePlanRequest,

@@ -6,8 +6,13 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Body, HTTPException
 
-from app.autotrade.models import AutoTradeConfigUpdate, ManualTradePlan
+from app.autotrade.models import (
+    AutoTradeConfigUpdate,
+    ManualTradePlan,
+    ProtectedOrderPriceUpdate,
+)
 from app.autotrade.state import AutoTradeStore
+from app.services.alpaca_service import AlpacaService
 from app.strategies.registry import StrategyRegistry
 
 router = APIRouter(prefix="/auto-trade", tags=["auto-trade"])
@@ -138,6 +143,165 @@ def auto_trade_overnight_protected_order(plan: ManualTradePlan):
             detail="The auto-trade worker is offline. Start trading-autotrade before placing a protected overnight order.",
         )
     return _queue_manual_plan(_normalize_protected_plan(plan))
+
+
+def _protected_levels(payload: dict, update: ProtectedOrderPriceUpdate) -> tuple[float, float, float]:
+    entry = float(payload.get("entry_price") or 0)
+    stop = float(payload.get("stop_price") or 0)
+    target = float(payload.get("target_price") or 0)
+    price = float(update.price or 0)
+
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="Price must be greater than zero.")
+
+    if update.level == "entry":
+        entry = price
+    elif update.level == "stop":
+        stop = price
+    else:
+        target = price
+
+    if entry <= 0 or stop <= 0 or target <= 0:
+        raise HTTPException(status_code=400, detail="Entry, stop, and target prices must be greater than zero.")
+    if not stop < entry < target:
+        raise HTTPException(status_code=400, detail="For a long order, prices must remain Stop < Entry < Target.")
+
+    return entry, stop, target
+
+
+def _is_protected_strategy(value: object) -> bool:
+    return str(value or "") in {"overnight_protected_order", "overnite_hail_mary"}
+
+
+@router.patch("/overnight-protected-order/{symbol}")
+def auto_trade_move_overnight_protected_order_level(
+    symbol: str,
+    update: ProtectedOrderPriceUpdate,
+):
+    """Move entry/stop/target without detaching the server protection worker."""
+    safe_symbol = str(symbol or "").strip().upper()
+    if not safe_symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required.")
+
+    states = store.get_runner_states()
+    runner = states.get(safe_symbol)
+    if isinstance(runner, dict) and _is_protected_strategy(runner.get("strategy_id")):
+        phase = str(runner.get("phase") or "")
+        if phase == "exit_submitted":
+            raise HTTPException(status_code=409, detail="The protected exit is already submitted and can no longer be moved.")
+        if update.level == "entry" and phase == "active_synthetic":
+            raise HTTPException(status_code=409, detail="The entry is already filled. Move only the stop or target.")
+
+        entry, stop, target = _protected_levels(runner, update)
+        next_state = dict(runner)
+        next_state.update({
+            "entry_price": entry,
+            "stop_price": stop,
+            "target_price": target,
+            "profit_range": max(0.0, target - entry),
+            "chart_level_updated_at": datetime.now(timezone.utc).isoformat(),
+            "chart_level_updated": update.level,
+        })
+
+        old_order_id = str(runner.get("order_id") or runner.get("entry_order_id") or "").strip()
+        pending_item = next(
+            (
+                item
+                for item in store.list_pending_entries()
+                if str(item.get("symbol") or "").strip().upper() == safe_symbol
+                and _is_protected_strategy(item.get("strategy_id"))
+            ),
+            None,
+        )
+
+        if update.level == "entry" and phase in {"entry_submitted", "entry_cancel_requested"}:
+            if not old_order_id:
+                raise HTTPException(status_code=409, detail="The working entry order ID is unavailable.")
+
+            mode = "live" if str(runner.get("mode") or "paper").lower() == "live" else "paper"
+            try:
+                replacement = AlpacaService(mode=mode).update_order(
+                    old_order_id,
+                    limit_price=entry,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Alpaca could not move the entry order: {exc}") from exc
+
+            new_order_id = str((replacement or {}).get("id") or old_order_id).strip()
+            next_state["order_id"] = new_order_id
+            next_state["entry_order_id"] = new_order_id
+            if new_order_id != old_order_id:
+                next_state["replaced_order_id"] = old_order_id
+
+            pending_payload = dict((pending_item or {}).get("payload") or runner)
+            pending_payload.update(next_state)
+            if new_order_id != old_order_id:
+                store.delete_pending_entry(old_order_id)
+            store.upsert_pending_entry(new_order_id, pending_payload)
+        elif pending_item is not None and phase in {"entry_submitted", "entry_cancel_requested"}:
+            pending_order_id = str(pending_item.get("order_id") or old_order_id).strip()
+            if pending_order_id:
+                pending_payload = dict(pending_item.get("payload") or {})
+                pending_payload.update(next_state)
+                store.upsert_pending_entry(pending_order_id, pending_payload)
+
+        store.upsert_runner_state(safe_symbol, next_state)
+        store.log_event(
+            "protected_order_chart_level_moved",
+            {
+                "level": update.level,
+                "price": float(update.price),
+                "phase": phase,
+                "entry_price": entry,
+                "stop_price": stop,
+                "target_price": target,
+                "order_id": next_state.get("order_id"),
+            },
+            safe_symbol,
+            str(runner.get("strategy_id") or "overnight_protected_order"),
+        )
+        return store.status_payload() | {"ok": True, "updated_level": update.level, "updated_price": float(update.price)}
+
+    queued_plan = next(
+        (
+            item
+            for item in store.list_manual_trade_plans()
+            if str(item.get("symbol") or "").strip().upper() == safe_symbol
+            and _is_protected_strategy(item.get("strategy_id"))
+        ),
+        None,
+    )
+    if queued_plan is not None:
+        payload = dict(queued_plan.get("payload") or {})
+        entry, stop, target = _protected_levels(payload, update)
+        payload.update({
+            "entry_price": entry,
+            "stop_price": stop,
+            "target_price": target,
+            "profit_range": max(0.0, target - entry),
+            "chart_level_updated_at": datetime.now(timezone.utc).isoformat(),
+            "chart_level_updated": update.level,
+        })
+        plan_id = str(queued_plan.get("plan_id") or payload.get("plan_id") or "").strip()
+        if not plan_id:
+            raise HTTPException(status_code=409, detail="The queued protected order ID is unavailable.")
+        store.enqueue_manual_trade_plan(plan_id, payload)
+        store.log_event(
+            "queued_protected_order_chart_level_moved",
+            {
+                "plan_id": plan_id,
+                "level": update.level,
+                "price": float(update.price),
+                "entry_price": entry,
+                "stop_price": stop,
+                "target_price": target,
+            },
+            safe_symbol,
+            str(queued_plan.get("strategy_id") or "overnight_protected_order"),
+        )
+        return store.status_payload() | {"ok": True, "updated_level": update.level, "updated_price": float(update.price)}
+
+    raise HTTPException(status_code=404, detail=f"No editable Overnight Protected Order was found for {safe_symbol}.")
 
 
 @router.post("/overnite-hail-mary")

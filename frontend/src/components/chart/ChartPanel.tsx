@@ -65,6 +65,7 @@ import {
 import {
   API_BASE,
   fetchAutoTradeStatus,
+  updateOvernightProtectedOrderPrice,
   type AutoTradeStatus,
 } from "../../services/api";
 
@@ -250,6 +251,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const tradeEngineRef = useRef<TradeEngine | null>(null);
   const tradeControllerRef = useRef<TradeController | null>(null);
   const positionOverlayRef = useRef<PositionOverlayManager | null>(null);
+  const overnightProtectedOverlayRef = useRef<{
+    symbol: string;
+    phase: string;
+  } | null>(null);
   const fxAnalysisToolRef = useRef<FxAnalysisToolId>("none");
   const drawingToolRef = useRef<DrawingTool>("cursor");
   const drawingStyleRef = useRef<DrawingStyle>(loadDrawingStyle());
@@ -619,6 +624,27 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     const positionOverlay = new PositionOverlayManager(engine.series.candles, {
       container,
       onCommit: async (change: PositionOverlayCommit) => {
+        const overnightContext = overnightProtectedOverlayRef.current;
+        if (
+          overnightContext &&
+          overnightContext.symbol === change.symbol.trim().toUpperCase()
+        ) {
+          try {
+            await updateOvernightProtectedOrderPrice(
+              change.symbol,
+              change.level,
+              change.price,
+            );
+            return true;
+          } catch (error) {
+            console.error(
+              `[PositionOverlay] failed to move Overnight Protected Order ${change.level}`,
+              error,
+            );
+            return false;
+          }
+        }
+
         if (!change.isLive || !change.orderId) {
           console.warn(
             `[PositionOverlay] ${change.level} is local and cannot be sent to Alpaca.`,
@@ -999,10 +1025,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       // Overnight Protected Orders are intentionally submitted to Alpaca as a
       // simple extended-hours limit entry. Their stop/target live in the
       // AutoTrade worker, so the normal broker snapshot cannot reconstruct the
-      // full overlay after a chart interaction or refresh. Give the worker
-      // state precedence and keep these lines read-only on the chart; modifying
-      // the broker order directly would replace its id behind the worker.
+      // full overlay after a chart interaction or refresh. Give worker state
+      // precedence. Chart drags are routed through the protected-order API so
+      // entry replacements and synthetic stop/target edits remain attached to
+      // the worker instead of becoming local-only chart changes.
       const overnightPlan = getOvernightPlan();
+      overnightProtectedOverlayRef.current = overnightPlan
+        ? { symbol: overnightPlan.symbol, phase: overnightPlan.phase }
+        : null;
       if (overnightPlan) {
         const actualEntry =
           protection && protection.position.entry > 0
@@ -1016,10 +1046,16 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           stop: overnightPlan.stop,
           target: overnightPlan.target,
           entryIsLive: overnightPlan.entryIsLive,
-          entryCanDrag: false,
+          entryCanDrag: ["queued", "entry_submitted", "entry_cancel_requested"].includes(
+            overnightPlan.phase,
+          ),
           entryCanCancel: false,
-          stopCanDrag: false,
-          targetCanDrag: false,
+          stopCanDrag: ["queued", "entry_submitted", "entry_cancel_requested", "active_synthetic"].includes(
+            overnightPlan.phase,
+          ),
+          targetCanDrag: ["queued", "entry_submitted", "entry_cancel_requested", "active_synthetic"].includes(
+            overnightPlan.phase,
+          ),
         });
         return;
       }
@@ -1100,6 +1136,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       active = false;
       window.clearInterval(autoTradeTimer);
       unsubscribe();
+      if (overnightProtectedOverlayRef.current?.symbol === safeSymbol) {
+        overnightProtectedOverlayRef.current = null;
+      }
       positionOverlayRef.current?.clear();
     };
   }, [symbol]);

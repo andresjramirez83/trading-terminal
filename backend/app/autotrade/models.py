@@ -131,3 +131,10 @@ class ManualTradePlan(BaseModel):
     trade_amount: Optional[float] = None
     fixed_shares: int = 0
     extended_hours: bool = True
+
+
+class ProtectedOrderPriceUpdate(BaseModel):
+    """Move one chart level for a server-managed Overnight Protected Order."""
+
+    level: Literal["entry", "stop", "target"]
+    price: float
