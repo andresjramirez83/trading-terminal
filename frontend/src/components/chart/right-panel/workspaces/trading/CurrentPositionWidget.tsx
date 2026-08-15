@@ -11,6 +11,9 @@ type CurrentPositionWidgetProps = {
   stats: CurrentPositionStats;
   currentPrice: number;
   protection?: PositionProtectionState | null;
+  positionStage?: "flat" | "working" | "live";
+  protectionOwner?: "alpaca" | "server" | null;
+  workingOrderStatus?: string | null;
   executionLoading?: boolean;
   onChange: (patch: Partial<CurrentPositionState>) => void;
   onMoveStopToBreakEven: () => void | Promise<void>;
@@ -19,13 +22,23 @@ type CurrentPositionWidgetProps = {
   onFlattenAllPositions?: () => void | Promise<void>;
 };
 
-type ProtectionTone = "live" | "local" | "missing";
+type ProtectionTone = "live" | "server" | "working" | "local" | "missing";
 
 function money(value: number): string {
   return value.toLocaleString(undefined, {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 2,
+  });
+}
+
+function price(value: number): string {
+  const digits = Math.abs(value) < 1 ? 4 : 2;
+  return value.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   });
 }
 
@@ -36,6 +49,8 @@ function pct(value: number): string {
 
 function protectionLabel(tone: ProtectionTone): string {
   if (tone === "live") return "LIVE";
+  if (tone === "server") return "SERVER";
+  if (tone === "working") return "ORDER";
   if (tone === "local") return "LOCAL";
   return "MISSING";
 }
@@ -57,6 +72,22 @@ function protectionToneStyle(tone: ProtectionTone): React.CSSProperties {
     };
   }
 
+  if (tone === "server") {
+    return {
+      color: "#a5f3fc",
+      borderColor: "rgba(34,211,238,.42)",
+      background: "rgba(8,145,178,.14)",
+    };
+  }
+
+  if (tone === "working") {
+    return {
+      color: "#bfdbfe",
+      borderColor: "rgba(96,165,250,.42)",
+      background: "rgba(37,99,235,.14)",
+    };
+  }
+
   return {
     color: "#fecaca",
     borderColor: "rgba(248,113,113,.38)",
@@ -69,6 +100,9 @@ export default function CurrentPositionWidget({
   stats,
   currentPrice,
   protection,
+  positionStage = "flat",
+  protectionOwner = null,
+  workingOrderStatus = null,
   executionLoading = false,
   onChange,
   onMoveStopToBreakEven,
@@ -76,7 +110,9 @@ export default function CurrentPositionWidget({
   onClosePositionPercent,
   onFlattenAllPositions,
 }: CurrentPositionWidgetProps) {
-  const hasPosition = position.shares > 0;
+  const hasLivePosition = positionStage === "live" && position.shares > 0;
+  const hasWorkingOrder = positionStage === "working" && position.shares > 0;
+  const hasManagedTrade = hasLivePosition || hasWorkingOrder;
   const pnlPositive = stats.unrealizedPnl >= 0;
 
   const liveStop = Boolean(protection?.stopOrderId);
@@ -84,41 +120,77 @@ export default function CurrentPositionWidget({
   const hasStopValue = position.stop > 0;
   const hasTargetValue = position.target > 0;
 
-  const stopTone: ProtectionTone = liveStop
-    ? "live"
-    : hasStopValue
-      ? "local"
-      : "missing";
+  const stopTone: ProtectionTone =
+    protectionOwner === "server" && hasStopValue
+      ? "server"
+      : hasLivePosition && liveStop
+        ? "live"
+        : hasWorkingOrder && hasStopValue
+          ? "working"
+          : hasStopValue
+            ? "local"
+            : "missing";
 
-  const targetTone: ProtectionTone = liveTarget
-    ? "live"
-    : hasTargetValue
-      ? "local"
-      : "missing";
+  const targetTone: ProtectionTone =
+    protectionOwner === "server" && hasTargetValue
+      ? "server"
+      : hasLivePosition && liveTarget
+        ? "live"
+        : hasWorkingOrder && hasTargetValue
+          ? "working"
+          : hasTargetValue
+            ? "local"
+            : "missing";
 
-  const fullyProtected = liveStop && liveTarget;
-  const partiallyProtected = liveStop || liveTarget;
+  const fullyProtected = hasLivePosition
+    ? protectionOwner === "server"
+      ? hasStopValue && hasTargetValue
+      : liveStop && liveTarget
+    : hasWorkingOrder
+      ? hasStopValue && hasTargetValue
+      : false;
+
+  const partiallyProtected = hasStopValue || hasTargetValue;
 
   const pnlPct =
-    hasPosition && stats.activeEntry > 0
+    hasLivePosition && stats.activeEntry > 0
       ? (stats.pnlPerShare / stats.activeEntry) * 100
       : 0;
 
   const rewardRemaining =
-    hasPosition && position.target > 0
+    hasLivePosition && position.target > 0
       ? position.side === "long"
         ? Math.max(0, position.target - currentPrice) * position.shares
         : Math.max(0, currentPrice - position.target) * position.shares
       : 0;
 
   const riskRemaining =
-    hasPosition && position.stop > 0
+    hasLivePosition && position.stop > 0
       ? position.side === "long"
         ? Math.max(0, currentPrice - position.stop) * position.shares
         : Math.max(0, position.stop - currentPrice) * position.shares
       : 0;
 
-  const controlsDisabled = !hasPosition || executionLoading;
+  const plannedRiskPerShare =
+    position.entry > 0 && position.stop > 0
+      ? position.side === "long"
+        ? Math.max(0, position.entry - position.stop)
+        : Math.max(0, position.stop - position.entry)
+      : 0;
+
+  const plannedRewardPerShare =
+    position.entry > 0 && position.target > 0
+      ? position.side === "long"
+        ? Math.max(0, position.target - position.entry)
+        : Math.max(0, position.entry - position.target)
+      : 0;
+
+  const plannedRisk = plannedRiskPerShare * position.shares;
+  const plannedReward = plannedRewardPerShare * position.shares;
+  const plannedRMultiple =
+    plannedRiskPerShare > 0 ? plannedRewardPerShare / plannedRiskPerShare : 0;
+
+  const controlsDisabled = !hasLivePosition || executionLoading;
 
   return (
     <section
@@ -130,31 +202,47 @@ export default function CurrentPositionWidget({
       <div style={styles.top}>
         <div>
           <div style={styles.kicker}>Position Manager</div>
-          <div style={styles.title}>Live Position</div>
+          <div style={styles.title}>
+            {hasLivePosition
+              ? "Live Position"
+              : hasWorkingOrder
+                ? workingOrderStatus === "QUEUED"
+                  ? "Queued Order"
+                  : "Accepted Order"
+                : "Live Position"}
+          </div>
         </div>
 
         <div
           style={{
             ...styles.statusBadge,
-            color: hasPosition
+            color: hasLivePosition
               ? pnlPositive
                 ? "#22c55e"
                 : "#ef4444"
+              : hasWorkingOrder
+                ? "#facc15"
               : "#94a3b8",
-            borderColor: hasPosition
+            borderColor: hasLivePosition
               ? pnlPositive
                 ? "rgba(34,197,94,.45)"
                 : "rgba(239,68,68,.45)"
+              : hasWorkingOrder
+                ? "rgba(250,204,21,.45)"
               : "rgba(148,163,184,.25)",
-            background: hasPosition
+            background: hasLivePosition
               ? pnlPositive
                 ? "rgba(34,197,94,.12)"
                 : "rgba(239,68,68,.12)"
+              : hasWorkingOrder
+                ? "rgba(113,63,18,.22)"
               : "rgba(15,23,42,.75)",
           }}
         >
-          {hasPosition
+          {hasLivePosition
             ? `${pnlPositive ? "+" : ""}${money(stats.unrealizedPnl)}`
+            : hasWorkingOrder
+              ? workingOrderStatus ?? "WORKING"
             : "FLAT"}
         </div>
       </div>
@@ -163,8 +251,10 @@ export default function CurrentPositionWidget({
         <div>
           <div style={styles.heroSymbol}>{position.symbol}</div>
           <div style={styles.heroSide}>
-            {hasPosition
+            {hasLivePosition
               ? `${position.side.toUpperCase()} ${position.shares} SHARES`
+              : hasWorkingOrder
+                ? `${position.side.toUpperCase()} ${position.shares} SHARES · ${workingOrderStatus ?? "WORKING"}`
               : "NO LIVE POSITION"}
           </div>
         </div>
@@ -172,29 +262,41 @@ export default function CurrentPositionWidget({
         <div style={styles.heroPnl}>
           <strong
             style={{
-              color: hasPosition
+              color: hasLivePosition
                 ? pnlPositive
                   ? "#22c55e"
                   : "#ef4444"
+                : hasWorkingOrder
+                  ? "#facc15"
                 : "#94a3b8",
             }}
           >
-            {hasPosition
+            {hasLivePosition
               ? `${pnlPositive ? "+" : ""}${money(stats.unrealizedPnl)}`
+              : hasWorkingOrder
+                ? "WAITING FOR FILL"
               : "—"}
           </strong>
-          <span>{hasPosition ? pct(pnlPct) : "—"}</span>
+          <span>{hasLivePosition ? pct(pnlPct) : "—"}</span>
         </div>
       </div>
 
-      {hasPosition ? (
+      {hasManagedTrade ? (
         <div style={styles.protectionCard}>
           <div style={styles.protectionHeader}>
             <div>
-              <div style={styles.protectionKicker}>Alpaca Protection</div>
+              <div style={styles.protectionKicker}>
+                {protectionOwner === "server"
+                  ? "Server Protection"
+                  : hasWorkingOrder
+                    ? "Accepted Order Protection"
+                    : "Alpaca Protection"}
+              </div>
               <div style={styles.protectionTitle}>
                 {fullyProtected
-                  ? "Position Protected"
+                  ? hasWorkingOrder
+                    ? "Protection Ready"
+                    : "Position Protected"
                   : partiallyProtected
                     ? "Partially Protected"
                     : "Protection Missing"}
@@ -205,14 +307,22 @@ export default function CurrentPositionWidget({
               style={{
                 ...styles.protectionSummaryBadge,
                 ...(fullyProtected
-                  ? protectionToneStyle("live")
+                  ? protectionToneStyle(
+                      protectionOwner === "server"
+                        ? "server"
+                        : hasWorkingOrder
+                          ? "working"
+                          : "live",
+                    )
                   : partiallyProtected
                     ? protectionToneStyle("local")
                     : protectionToneStyle("missing")),
               }}
             >
               {fullyProtected
-                ? "PROTECTED"
+                ? hasWorkingOrder
+                  ? "READY"
+                  : "PROTECTED"
                 : partiallyProtected
                   ? "PARTIAL"
                   : "UNPROTECTED"}
@@ -222,20 +332,26 @@ export default function CurrentPositionWidget({
           <div style={styles.protectionGrid}>
             <ProtectionMetric
               label="Stop"
-              value={position.stop > 0 ? money(position.stop) : "—"}
+              value={position.stop > 0 ? price(position.stop) : "—"}
               tone={stopTone}
             />
             <ProtectionMetric
               label="Target"
-              value={position.target > 0 ? money(position.target) : "—"}
+              value={position.target > 0 ? price(position.target) : "—"}
               tone={targetTone}
             />
           </div>
 
           <div style={styles.protectionNote}>
-            {liveStop || liveTarget
-              ? "LIVE values are matched to active Alpaca closing orders. Editing a LIVE field sends an order replacement to Alpaca."
-              : "No active Alpaca protective order was matched. Values entered below remain local until a live stop or target order exists."}
+            {hasWorkingOrder && protectionOwner === "server"
+              ? "This accepted order is protected by the AutoTrade server. Entry, stop, target, shares, risk, and reward stay visible here while the entry waits to fill."
+              : hasWorkingOrder
+                ? "These are the accepted Alpaca order levels. After the entry fills, this panel automatically switches to live position P/L and remaining risk/reward."
+                : protectionOwner === "server"
+                  ? "The AutoTrade server owns this position's synthetic stop and target protection."
+                  : liveStop || liveTarget
+                    ? "LIVE values are matched to active Alpaca closing orders. Editing a LIVE field sends an order replacement to Alpaca."
+                    : "No active Alpaca protective order was matched. Values entered below remain local until a live stop or target order exists."}
           </div>
         </div>
       ) : (
@@ -250,37 +366,58 @@ export default function CurrentPositionWidget({
           active={position.side === "long"}
           label="Long"
           side="long"
-          disabled={hasPosition}
+          disabled={hasManagedTrade}
           onClick={() => onChange({ side: "long" })}
         />
         <SideButton
           active={position.side === "short"}
           label="Short"
           side="short"
-          disabled={hasPosition}
+          disabled={hasManagedTrade}
           onClick={() => onChange({ side: "short" })}
         />
       </div>
 
       <div style={styles.mainGrid}>
-        <Metric label="Entry" value={position.entry > 0 ? money(position.entry) : "—"} />
-        <Metric label="Current" value={currentPrice > 0 ? money(currentPrice) : "—"} />
+        <Metric label="Entry" value={position.entry > 0 ? price(position.entry) : "—"} />
+        <Metric label="Current" value={currentPrice > 0 ? price(currentPrice) : "—"} />
         <Metric
           label="Open P/L"
-          value={hasPosition ? `${pnlPositive ? "+" : ""}${money(stats.unrealizedPnl)}` : "—"}
-          good={hasPosition && pnlPositive}
-          danger={hasPosition && !pnlPositive}
-        />
-        <Metric label="Current R" value={hasPosition ? `${stats.currentR.toFixed(2)}R` : "—"} />
-        <Metric
-          label="Risk Left"
-          value={hasPosition && position.stop > 0 ? money(riskRemaining) : "—"}
-          danger={hasPosition && position.stop > 0}
+          value={hasLivePosition ? `${pnlPositive ? "+" : ""}${money(stats.unrealizedPnl)}` : "—"}
+          good={hasLivePosition && pnlPositive}
+          danger={hasLivePosition && !pnlPositive}
         />
         <Metric
-          label="Reward Left"
-          value={hasPosition && position.target > 0 ? money(rewardRemaining) : "—"}
-          good={hasPosition && position.target > 0}
+          label={hasWorkingOrder ? "Planned R:R" : "Current R"}
+          value={
+            hasWorkingOrder && plannedRiskPerShare > 0
+              ? `${plannedRMultiple.toFixed(2)}R`
+              : hasLivePosition
+                ? `${stats.currentR.toFixed(2)}R`
+                : "—"
+          }
+        />
+        <Metric
+          label={hasWorkingOrder ? "Planned Risk" : "Risk Left"}
+          value={
+            hasWorkingOrder && position.stop > 0
+              ? money(plannedRisk)
+              : hasLivePosition && position.stop > 0
+                ? money(riskRemaining)
+                : "—"
+          }
+          danger={hasManagedTrade && position.stop > 0}
+        />
+        <Metric
+          label={hasWorkingOrder ? "Planned Reward" : "Reward Left"}
+          value={
+            hasWorkingOrder && position.target > 0
+              ? money(plannedReward)
+              : hasLivePosition && position.target > 0
+                ? money(rewardRemaining)
+                : "—"
+          }
+          good={hasManagedTrade && position.target > 0}
         />
       </div>
 
@@ -288,26 +425,26 @@ export default function CurrentPositionWidget({
         <Field
           label="Shares"
           value={position.shares}
-          disabled={hasPosition}
+          disabled={hasManagedTrade}
           onChange={(shares) => onChange({ shares })}
         />
         <Field
           label="Entry"
           value={position.entry}
-          disabled={hasPosition}
+          disabled={hasManagedTrade}
           onChange={(entry) => onChange({ entry })}
         />
         <Field
           label={`Target · ${protectionLabel(targetTone)}`}
           value={position.target}
-          disabled={executionLoading}
+          disabled={executionLoading || hasWorkingOrder || protectionOwner === "server"}
           tone={targetTone}
           onChange={(target) => onChange({ target })}
         />
         <Field
           label={`Stop · ${protectionLabel(stopTone)}`}
           value={position.stop}
-          disabled={executionLoading}
+          disabled={executionLoading || hasWorkingOrder || protectionOwner === "server"}
           tone={stopTone}
           onChange={(stop) => onChange({ stop })}
         />
@@ -317,7 +454,7 @@ export default function CurrentPositionWidget({
         <div style={styles.progressHeader}>
           <span>Target Progress</span>
           <strong>
-            {hasPosition && position.target > 0
+            {hasLivePosition && position.target > 0
               ? `${stats.progressToTarget.toFixed(0)}%`
               : "—"}
           </strong>
@@ -327,7 +464,7 @@ export default function CurrentPositionWidget({
           <div
             style={{
               ...styles.progressFill,
-              width: `${hasPosition && position.target > 0 ? stats.progressToTarget : 0}%`,
+              width: `${hasLivePosition && position.target > 0 ? stats.progressToTarget : 0}%`,
             }}
           />
         </div>
@@ -418,8 +555,9 @@ export default function CurrentPositionWidget({
       </div>
 
       <div style={styles.footer}>
-        Shares and entry are synchronized from Alpaca. LIVE stop and target
-        fields replace matched Alpaca orders when edited.
+        Accepted orders populate this manager before fill. After fill, shares
+        and entry synchronize from Alpaca and the panel switches to live
+        position risk, reward, P/L, and protection state.
       </div>
     </section>
   );

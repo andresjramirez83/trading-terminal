@@ -75,6 +75,28 @@ export function normalizeOrderType(order: any): OpenOrderState["type"] {
   return "market";
 }
 
+function normalizeOpenOrderStatus(order: any): OpenOrderState["status"] {
+  const status = String(order?.status ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (
+    ["new", "accepted", "accepted_for_bidding", "held"].includes(status)
+  ) {
+    return "accepted";
+  }
+
+  if (
+    ["pending_new", "pending_replace", "pending_cancel", "partially_filled"].includes(
+      status,
+    )
+  ) {
+    return "pending";
+  }
+
+  return "open";
+}
+
 export function findNestedTarget(order: any): number | undefined {
   const legs = Array.isArray(order?.legs) ? order.legs : [];
 
@@ -152,7 +174,7 @@ export function normalizeOpenOrder(raw: any): OpenOrderState {
     limitPrice: limitPrice > 0 ? limitPrice : undefined,
     stopPrice: stopPrice && stopPrice > 0 ? stopPrice : undefined,
     targetPrice: targetPrice && targetPrice > 0 ? targetPrice : undefined,
-    status: "open",
+    status: normalizeOpenOrderStatus(raw),
     createdAt: getOrderCreatedAt(raw),
   };
 }

@@ -330,6 +330,9 @@ export default function TradingWorkspacePanel({
         stats={store.currentPositionStats}
         currentPrice={safePrice}
         protection={store.positionProtection}
+        positionStage={store.positionStage}
+        protectionOwner={store.positionProtectionOwner}
+        workingOrderStatus={store.workingOrderStatus}
         executionLoading={store.executionLoading}
         onChange={store.updateCurrentPosition}
         onMoveStopToBreakEven={store.moveStopToBreakEven}

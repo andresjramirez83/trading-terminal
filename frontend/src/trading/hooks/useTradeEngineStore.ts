@@ -8,6 +8,10 @@ import type { ExecutionMode } from "../execution/router/ExecutionModeRuntime";
 import type { TradeExecutionSnapshot } from "../services/execution/TradeExecutionTypes";
 import { calculateQuickOrderEstimate } from "../../components/chart/right-panel/workspaces/trading/OrderCalculator";
 import { getSharedPositionProtectionEngine } from "../position/PositionProtectionEngine";
+import {
+  fetchAutoTradeStatus,
+  type AutoTradeStatus,
+} from "../../services/api";
 import type {
   CurrentPositionState,
   CurrentPositionStats,
@@ -30,6 +34,132 @@ function safeNumber(value: unknown): number {
 function nullableNumber(value: unknown): number | null {
   const next = Number(value);
   return Number.isFinite(next) && next > 0 ? next : null;
+}
+
+type PositionStage = "flat" | "working" | "live";
+type PositionProtectionOwner = "alpaca" | "server" | null;
+
+type ManagedOrderPreview = {
+  position: CurrentPositionState;
+  status: string;
+  protectionOwner: Exclude<PositionProtectionOwner, null>;
+};
+
+function positiveNumber(value: unknown): number {
+  const next = Number(value);
+  return Number.isFinite(next) && next > 0 ? next : 0;
+}
+
+function phaseDisplayStatus(phase: string): string {
+  switch (phase) {
+    case "queued":
+      return "QUEUED";
+    case "entry_submitted":
+      return "ACCEPTED";
+    case "entry_cancel_requested":
+      return "CANCELING";
+    case "active_synthetic":
+      return "ACTIVE";
+    case "exit_submitted":
+      return "EXITING";
+    default:
+      return phase ? phase.replaceAll("_", " ").toUpperCase() : "WORKING";
+  }
+}
+
+function sharesFromAutoPayload(payload: Record<string, unknown>, entry: number): number {
+  const directShares = Math.floor(
+    positiveNumber(
+      payload.filled_qty ?? payload.qty ?? payload.fixed_shares,
+    ),
+  );
+
+  if (directShares > 0) return directShares;
+
+  const tradeAmount = positiveNumber(payload.trade_amount);
+  return entry > 0 && tradeAmount > 0
+    ? Math.max(0, Math.floor(tradeAmount / entry))
+    : 0;
+}
+
+function buildAutoManagedOrder(
+  status: AutoTradeStatus | null,
+  symbol: string,
+): ManagedOrderPreview | null {
+  if (!status || !symbol || symbol === "—") return null;
+
+  const runner = status.runner_states?.[symbol];
+  if (runner && typeof runner === "object") {
+    const payload = runner as Record<string, unknown>;
+    const strategyId = String(payload.strategy_id ?? "");
+    const entry = positiveNumber(payload.entry_price);
+    const stop = positiveNumber(payload.stop_price);
+    const target = positiveNumber(payload.target_price);
+
+    if (
+      ["overnight_protected_order", "overnite_hail_mary"].includes(strategyId) &&
+      entry > 0 &&
+      stop > 0 &&
+      target > 0
+    ) {
+      return {
+        position: {
+          symbol,
+          side: "long",
+          shares: sharesFromAutoPayload(payload, entry),
+          entry,
+          stop,
+          target,
+        },
+        status: phaseDisplayStatus(String(payload.phase ?? "working")),
+        protectionOwner: "server",
+      };
+    }
+  }
+
+  const plans = status.queued_manual_plans ?? status.manual_trade_plans ?? [];
+  for (const item of plans) {
+    const record = item && typeof item === "object"
+      ? (item as Record<string, unknown>)
+      : {};
+    const rawPayload = record.payload;
+    const payload = rawPayload && typeof rawPayload === "object"
+      ? (rawPayload as Record<string, unknown>)
+      : record;
+    const planSymbol = String(record.symbol ?? payload.symbol ?? "")
+      .trim()
+      .toUpperCase();
+    const strategyId = String(
+      record.strategy_id ?? payload.strategy_id ?? "",
+    );
+
+    if (
+      planSymbol !== symbol ||
+      !["overnight_protected_order", "overnite_hail_mary"].includes(strategyId)
+    ) {
+      continue;
+    }
+
+    const entry = positiveNumber(payload.entry_price);
+    const stop = positiveNumber(payload.stop_price);
+    const target = positiveNumber(payload.target_price);
+    if (entry <= 0 || stop <= 0 || target <= 0) continue;
+
+    return {
+      position: {
+        symbol,
+        side: "long",
+        shares: sharesFromAutoPayload(payload, entry),
+        entry,
+        stop,
+        target,
+      },
+      status: "QUEUED",
+      protectionOwner: "server",
+    };
+  }
+
+  return null;
 }
 
 function collectAlpacaOrderIds(order: unknown): string[] {
@@ -241,6 +371,9 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     emptyPosition(safeSymbol),
   );
 
+  const [autoTradeStatus, setAutoTradeStatus] =
+    useState<AutoTradeStatus | null>(null);
+
   const [journalTrades] = useState<JournalTradeState[]>([]);
 
   useEffect(() => {
@@ -320,6 +453,30 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   }, [executionService]);
 
   useEffect(() => {
+    let active = true;
+
+    const refreshAutoTradeStatus = async () => {
+      try {
+        const nextStatus = await fetchAutoTradeStatus();
+        if (active) setAutoTradeStatus(nextStatus);
+      } catch {
+        // Keep the last known worker state during a temporary API failure.
+      }
+    };
+
+    void refreshAutoTradeStatus();
+    const timer = window.setInterval(
+      () => void refreshAutoTradeStatus(),
+      5000,
+    );
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     setQuickOrder((current) => ({
       ...current,
       symbol: safeSymbol,
@@ -338,23 +495,109 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
 
   const tradePlan = tradePlanDraft;
 
+  const openOrders = useMemo<OpenOrderState[]>(
+    () =>
+      executionSnapshot.openOrders.filter(
+        (order) => order.symbol === safeSymbol || safeSymbol === "—",
+      ),
+    [executionSnapshot.openOrders, safeSymbol],
+  );
+
   const livePosition = useMemo(
     () => findPositionForSymbol(executionSnapshot.positions, safeSymbol),
     [executionSnapshot.positions, safeSymbol],
   );
 
+  const autoManagedOrder = useMemo(
+    () => buildAutoManagedOrder(autoTradeStatus, safeSymbol),
+    [autoTradeStatus, safeSymbol],
+  );
+
+  const brokerWorkingOrder = useMemo(() => {
+    if (openOrders.length === 0) return null;
+
+    const linkedOrderIds = new Set(selectedTrade?.links.alpacaOrderIds ?? []);
+    const linked = openOrders.find((order) => linkedOrderIds.has(order.id));
+    if (linked) return linked;
+
+    const protectedOrder = openOrders.find(
+      (order) =>
+        order.type === "bracket" ||
+        (order.stopPrice ?? 0) > 0 ||
+        (order.targetPrice ?? 0) > 0,
+    );
+
+    return protectedOrder ?? openOrders[0] ?? null;
+  }, [openOrders, selectedTrade?.links.alpacaOrderIds]);
+
+  const brokerManagedOrder = useMemo<ManagedOrderPreview | null>(() => {
+    if (!brokerWorkingOrder) return null;
+
+    const fallbackEntry =
+      positiveNumber(selectedTrade?.entry) ||
+      positiveNumber(tradePlan.entry) ||
+      positiveNumber(currentPrice);
+    const entry = positiveNumber(brokerWorkingOrder.limitPrice) || fallbackEntry;
+    const stop =
+      positiveNumber(brokerWorkingOrder.stopPrice) ||
+      positiveNumber(selectedTrade?.stop) ||
+      positiveNumber(tradePlan.stop);
+    const target =
+      positiveNumber(brokerWorkingOrder.targetPrice) ||
+      positiveNumber(selectedTrade?.targets[0]?.price) ||
+      positiveNumber(tradePlan.target);
+    const shares =
+      positiveNumber(brokerWorkingOrder.shares) ||
+      positiveNumber(selectedTrade?.shares) ||
+      positiveNumber(tradePlan.shares);
+
+    return {
+      position: {
+        symbol: safeSymbol,
+        side: brokerWorkingOrder.side === "sell" ? "short" : "long",
+        shares,
+        entry,
+        stop,
+        target,
+      },
+      status: String(brokerWorkingOrder.status || "working").toUpperCase(),
+      protectionOwner: "alpaca",
+    };
+  }, [
+    brokerWorkingOrder,
+    currentPrice,
+    safeSymbol,
+    selectedTrade?.entry,
+    selectedTrade?.shares,
+    selectedTrade?.stop,
+    selectedTrade?.targets,
+    tradePlan.entry,
+    tradePlan.shares,
+    tradePlan.stop,
+    tradePlan.target,
+  ]);
+
+  const workingManagedOrder = autoManagedOrder ?? brokerManagedOrder;
+
   const positionProtection = useMemo(() => {
     if (livePosition.shares <= 0) return null;
+
+    const managedStop =
+      autoManagedOrder?.position.stop ?? positionDraft.stop;
+    const managedTarget =
+      autoManagedOrder?.position.target ?? positionDraft.target;
 
     return protectionEngine.buildProtection(
       {
         ...livePosition,
-        stop: positionDraft.stop,
-        target: positionDraft.target,
+        stop: managedStop,
+        target: managedTarget,
       },
       executionSnapshot.openOrders,
     );
   }, [
+    autoManagedOrder?.position.stop,
+    autoManagedOrder?.position.target,
     executionSnapshot.openOrders,
     livePosition,
     positionDraft.stop,
@@ -363,23 +606,60 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   ]);
 
   const currentPosition = useMemo<CurrentPositionState>(() => {
-    if (positionProtection) {
+    if (livePosition.shares > 0 && positionProtection) {
       return positionProtection.position;
+    }
+
+    if (livePosition.shares > 0) {
+      return {
+        ...livePosition,
+        stop: autoManagedOrder?.position.stop ?? positionDraft.stop,
+        target: autoManagedOrder?.position.target ?? positionDraft.target,
+      };
+    }
+
+    if (workingManagedOrder) {
+      return workingManagedOrder.position;
     }
 
     return {
       ...positionDraft,
       symbol: safeSymbol,
     };
-  }, [positionDraft, positionProtection, safeSymbol]);
+  }, [
+    autoManagedOrder?.position.stop,
+    autoManagedOrder?.position.target,
+    livePosition,
+    positionDraft,
+    positionProtection,
+    safeSymbol,
+    workingManagedOrder,
+  ]);
 
-  const openOrders = useMemo<OpenOrderState[]>(
-    () =>
-      executionSnapshot.openOrders.filter(
-        (order) => order.symbol === safeSymbol || safeSymbol === "—",
-      ),
-    [executionSnapshot.openOrders, safeSymbol],
-  );
+  const positionStage = useMemo<PositionStage>(() => {
+    if (livePosition.shares > 0) return "live";
+    if (workingManagedOrder && workingManagedOrder.position.shares > 0) {
+      return "working";
+    }
+    return "flat";
+  }, [livePosition.shares, workingManagedOrder]);
+
+  const positionProtectionOwner = useMemo<PositionProtectionOwner>(() => {
+    if (autoManagedOrder) return "server";
+    if (positionStage === "working") {
+      return workingManagedOrder?.protectionOwner ?? null;
+    }
+    if (positionStage === "live" && positionProtection) return "alpaca";
+    return null;
+  }, [
+    autoManagedOrder,
+    positionProtection,
+    positionStage,
+    workingManagedOrder?.protectionOwner,
+  ]);
+
+  const workingOrderStatus =
+    positionStage === "working" ? workingManagedOrder?.status ?? "WORKING" : null;
 
   const updateTradePlan = useCallback(
     (patch: Partial<TradePlanState>) => {
@@ -1025,6 +1305,9 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       currentPosition: { ...currentPosition, symbol: safeSymbol },
       currentPositionStats,
       positionProtection,
+      positionStage,
+      positionProtectionOwner,
+      workingOrderStatus,
       updateCurrentPosition,
       moveStopToBreakEven,
       closePosition,
@@ -1073,6 +1356,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       moveStopToBreakEven,
       openOrders,
       positionProtection,
+      positionProtectionOwner,
+      positionStage,
       quickOrder,
       refreshTradingData,
       safeSymbol,
@@ -1087,6 +1372,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       updateCurrentPosition,
       updateQuickOrder,
       updateTradePlan,
+      workingOrderStatus,
     ],
   );
 }
