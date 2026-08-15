@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import time
 import os
 import statistics
 from collections import defaultdict
@@ -19,6 +21,29 @@ ET = ZoneInfo("America/New_York")
 PT = ZoneInfo("America/Los_Angeles")
 
 router = APIRouter(prefix="/trading-coach/vwap3", tags=["trading-coach"])
+
+# Phase 7 performance caches. These are deliberately short-lived for current-day
+# scanner data, while historical bars can be retained longer because completed
+# sessions do not change. All caches are process-local and safe to discard on
+# backend restart.
+_SETUP_CACHE_TTL_SECONDS = 10.0
+_STUDY_CACHE_TTL_SECONDS = 30.0
+_CURRENT_DAY_BARS_TTL_SECONDS = 30.0
+_HISTORICAL_BARS_TTL_SECONDS = 30.0 * 60.0
+_REVIEW_CACHE_TTL_SECONDS = 5.0 * 60.0
+
+_setup_rows_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_study_rows_cache: Dict[int, Tuple[float, List[Dict[str, Any]]]] = {}
+_trade_bars_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
+_review_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+def _cache_now() -> float:
+    return time.monotonic()
+
+
+def _copy_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [dict(row) for row in rows]
 
 
 def _app_dir() -> Path:
@@ -147,7 +172,7 @@ def _load_state_rows() -> List[Dict[str, Any]]:
         return []
 
 
-def _load_setups_for_date(trade_date: str) -> List[Dict[str, Any]]:
+def _load_setups_for_date_uncached(trade_date: str) -> List[Dict[str, Any]]:
     # Prefer the unbiased all-setup archive. The target-hit archive is included
     # only as a backward-compatible source for dates recorded before this upgrade.
     merged: Dict[str, Dict[str, Any]] = {}
@@ -166,6 +191,24 @@ def _load_setups_for_date(trade_date: str) -> List[Dict[str, Any]]:
         if key:
             merged[key] = row
     return [_normalize_setup_row(row) for row in merged.values()]
+
+
+def _load_setups_for_date(trade_date: str) -> List[Dict[str, Any]]:
+    now = _cache_now()
+    cached = _setup_rows_cache.get(trade_date)
+    if cached and now - cached[0] < _SETUP_CACHE_TTL_SECONDS:
+        return _copy_rows(cached[1])
+
+    rows = _load_setups_for_date_uncached(trade_date)
+    _setup_rows_cache[trade_date] = (now, _copy_rows(rows))
+
+    # Prevent unbounded growth if this process stays up for a long time.
+    if len(_setup_rows_cache) > 90:
+        oldest = sorted(_setup_rows_cache.items(), key=lambda item: item[1][0])[:30]
+        for key, _ in oldest:
+            _setup_rows_cache.pop(key, None)
+
+    return rows
 
 
 def _normalize_date(value: Optional[str]) -> str:
@@ -237,18 +280,83 @@ class Vwap3TradeReviewRequest(BaseModel):
     r_multiple: Optional[float] = None
 
 
+class Vwap3TradeReviewBatchRequest(BaseModel):
+    trades: List[Vwap3TradeReviewRequest] = Field(default_factory=list)
+
+
+def _review_cache_key(payload: Vwap3TradeReviewRequest) -> str:
+    try:
+        data = payload.model_dump(mode="json")
+    except AttributeError:
+        data = payload.dict()
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _get_cached_review(payload: Vwap3TradeReviewRequest) -> Optional[Dict[str, Any]]:
+    key = _review_cache_key(payload)
+    cached = _review_cache.get(key)
+    if not cached:
+        return None
+    if _cache_now() - cached[0] >= _REVIEW_CACHE_TTL_SECONDS:
+        _review_cache.pop(key, None)
+        return None
+    result = dict(cached[1])
+    result["cache_hit"] = True
+    return result
+
+
+def _put_cached_review(payload: Vwap3TradeReviewRequest, result: Dict[str, Any]) -> Dict[str, Any]:
+    key = _review_cache_key(payload)
+    stored = dict(result)
+    stored.pop("cache_hit", None)
+    _review_cache[key] = (_cache_now(), stored)
+
+    if len(_review_cache) > 500:
+        oldest = sorted(_review_cache.items(), key=lambda item: item[1][0])[:100]
+        for old_key, _ in oldest:
+            _review_cache.pop(old_key, None)
+
+    response = dict(stored)
+    response["cache_hit"] = False
+    return response
+
+
 async def _load_trade_day_bars(symbol: str, trade_date: str) -> List[Dict[str, Any]]:
+    normalized_symbol = symbol.upper().strip()
+    key = (normalized_symbol, trade_date)
+    now = _cache_now()
+    cached = _trade_bars_cache.get(key)
+
+    today_et = datetime.now(ET).date().isoformat()
+    ttl = (
+        _CURRENT_DAY_BARS_TTL_SECONDS
+        if trade_date == today_et
+        else _HISTORICAL_BARS_TTL_SECONDS
+    )
+
+    if cached and now - cached[0] < ttl:
+        return _copy_rows(cached[1])
+
     market = get_market_data_provider()
     try:
-        return await market.get_bars(
-            symbol=symbol,
+        rows = await market.get_bars(
+            symbol=normalized_symbol,
             timeframe="1m",
             session="extended",
             date=trade_date,
             limit=5000,
         )
+        clean = [dict(row) for row in rows if isinstance(row, dict)]
+        _trade_bars_cache[key] = (now, _copy_rows(clean))
+
+        if len(_trade_bars_cache) > 160:
+            oldest = sorted(_trade_bars_cache.items(), key=lambda item: item[1][0])[:40]
+            for old_key, _ in oldest:
+                _trade_bars_cache.pop(old_key, None)
+
+        return clean
     except Exception as exc:
-        print(f"[vwap3-coach] bars unavailable symbol={symbol} date={trade_date}: {exc}", flush=True)
+        print(f"[vwap3-coach] bars unavailable symbol={normalized_symbol} date={trade_date}: {exc}", flush=True)
         return []
 
 
@@ -405,6 +513,10 @@ def _entry_quality(entry: float, setup: Dict[str, Any], detected_dt: Optional[da
 
 @router.post("/review-trade")
 async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
+    cached_review = _get_cached_review(payload)
+    if cached_review is not None:
+        return cached_review
+
     entry_dt = _parse_dt(payload.entry_time)
     exit_dt = _parse_dt(payload.exit_time)
     if entry_dt is None or exit_dt is None:
@@ -417,7 +529,7 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
     matched = _match_setup(payload.symbol, entry_dt, setups)
 
     if not matched:
-        return {
+        result = {
             "trade_id": payload.trade_id,
             "symbol": payload.symbol.upper(),
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
@@ -427,6 +539,7 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
             "classification": "not_vwap3",
             "confidence": 1.0,
         }
+        return _put_cached_review(payload, result)
 
     detected_dt = _setup_detection_dt(matched)
     entry_after_scanner = bool(detected_dt and entry_dt.astimezone(timezone.utc) >= detected_dt.astimezone(timezone.utc))
@@ -523,7 +636,7 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
     else:
         summary = "The trade is linked to a 3-VWAP setup and the coach recorded the entry/exit path for ongoing study."
 
-    return {
+    result = {
         "trade_id": payload.trade_id,
         "symbol": payload.symbol.upper(),
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
@@ -559,9 +672,33 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
         },
         "scanner_setup": matched,
     }
+    return _put_cached_review(payload, result)
 
 
-def _study_rows(days: int) -> List[Dict[str, Any]]:
+@router.post("/review-trades")
+async def review_vwap3_trades(payload: Vwap3TradeReviewBatchRequest):
+    if not payload.trades:
+        return {"count": 0, "reviews": []}
+    if len(payload.trades) > 50:
+        raise HTTPException(status_code=400, detail="review-trades accepts at most 50 trades")
+
+    # Cap concurrent market-data lookups so a journal with many historical
+    # trades cannot create a burst against the provider. Cache hits complete
+    # immediately and do not consume meaningful backend work.
+    semaphore = asyncio.Semaphore(4)
+
+    async def review_one(item: Vwap3TradeReviewRequest) -> Dict[str, Any]:
+        async with semaphore:
+            return await review_vwap3_trade(item)
+
+    reviews = await asyncio.gather(*(review_one(item) for item in payload.trades))
+    return {
+        "count": len(reviews),
+        "reviews": reviews,
+    }
+
+
+def _study_rows_uncached(days: int) -> List[Dict[str, Any]]:
     archive_dir = _setup_archive_dir()
     today = datetime.now(ET).date()
     earliest = today - timedelta(days=max(1, days) - 1)
@@ -586,6 +723,22 @@ def _study_rows(days: int) -> List[Dict[str, Any]]:
         if key:
             merged[key] = _normalize_setup_row(row)
     return list(merged.values())
+
+
+def _study_rows(days: int) -> List[Dict[str, Any]]:
+    normalized_days = max(1, int(days))
+    now = _cache_now()
+    cached = _study_rows_cache.get(normalized_days)
+    if cached and now - cached[0] < _STUDY_CACHE_TTL_SECONDS:
+        return _copy_rows(cached[1])
+
+    rows = _study_rows_uncached(normalized_days)
+    _study_rows_cache[normalized_days] = (now, _copy_rows(rows))
+    if len(_study_rows_cache) > 12:
+        oldest = sorted(_study_rows_cache.items(), key=lambda item: item[1][0])[:4]
+        for key, _ in oldest:
+            _study_rows_cache.pop(key, None)
+    return rows
 
 
 def _aggregate_group(rows: List[Dict[str, Any]]) -> Dict[str, Any]:

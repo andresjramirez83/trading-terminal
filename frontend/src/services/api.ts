@@ -1357,6 +1357,27 @@ export async function reviewVwap3Trade(
   return parseJson<Vwap3TradeCoachReview>(res);
 }
 
+export type Vwap3TradeCoachBatchResponse = {
+  count: number;
+  reviews: Vwap3TradeCoachReview[];
+};
+
+export async function reviewVwap3Trades(
+  payloads: Vwap3TradeCoachReviewRequest[],
+): Promise<Vwap3TradeCoachReview[]> {
+  if (payloads.length === 0) return [];
+
+  const res = await fetch(`${API_BASE}/trading-coach/vwap3/review-trades`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({ trades: payloads }),
+  });
+
+  const parsed = await parseJson<Vwap3TradeCoachBatchResponse>(res);
+  return Array.isArray(parsed.reviews) ? parsed.reviews : [];
+}
+
 export type Vwap3StudyBucket = {
   setups: number;
   resolved: number;
