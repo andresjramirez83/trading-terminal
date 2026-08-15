@@ -9,6 +9,7 @@ import type { ChartDrawing } from "./DrawingTypes";
 
 const STORAGE_PREFIX = "chart.drawings.v1";
 const MARKET_STRUCTURE_STORAGE_PREFIX = "chart.market-structure.v1";
+const TRENDLINE_SCOPE_MIGRATION_PREFIX = "chart.trendline-shared-migration.v1";
 const SHARED_SCOPE = "shared";
 const REMOTE_POLL_MS = 10_000;
 const REMOTE_SAVE_DELAY_MS = 120;
@@ -17,6 +18,7 @@ type DrawingScope = "timeframe" | "shared";
 
 type RemoteDrawingDocument = {
   drawings: ChartDrawing[];
+  legacySharedDrawings: ChartDrawing[];
   exists: boolean;
   revision: number;
   updatedAt: number | string | null;
@@ -48,6 +50,10 @@ function makeStorageKey(symbol: string, timeframe: string): string {
 
 function makeMarketStructureStorageKey(symbol: string): string {
   return `${MARKET_STRUCTURE_STORAGE_PREFIX}.${safeKeyPart(symbol)}`;
+}
+
+function makeTrendlineScopeMigrationKey(symbol: string): string {
+  return `${TRENDLINE_SCOPE_MIGRATION_PREFIX}.${safeKeyPart(symbol)}`;
 }
 
 function cloneDrawing<T extends ChartDrawing>(drawing: T): T {
@@ -99,7 +105,9 @@ function parseStoredDrawings(
 }
 
 function scopeForDrawing(drawing: ChartDrawing): DrawingScope {
-  return drawing.type === "marketStructure" ? "shared" : "timeframe";
+  return drawing.type === "marketStructure" || drawing.type === "trendline"
+    ? "shared"
+    : "timeframe";
 }
 
 function drawingsForScope(
@@ -233,6 +241,7 @@ export class DrawingStore {
   private refreshRequested = false;
   private saveInFlight = false;
   private destroyed = false;
+  private migratedLocalSharedDrawings: ChartDrawing[] = [];
 
   private readonly handleFocus = (): void => {
     void this.refreshFromBackend(false);
@@ -303,6 +312,8 @@ export class DrawingStore {
     this.storageKey = makeStorageKey(this.symbol, this.timeframe);
     this.marketStructureStorageKey =
       makeMarketStructureStorageKey(this.symbol);
+    this.migratedLocalSharedDrawings =
+      this.migrateLegacyLocalTrendlines();
 
     this.workspaceGeneration += 1;
     this.remoteInitialized = false;
@@ -425,14 +436,85 @@ export class DrawingStore {
     }
   }
 
+  private migrateLegacyLocalTrendlines(): ChartDrawing[] {
+    if (!canUseLocalStorage()) return [];
+
+    const migrationKey = makeTrendlineScopeMigrationKey(this.symbol);
+
+    try {
+      if (window.localStorage.getItem(migrationKey) === "1") {
+        return [];
+      }
+
+      const symbolPrefix = `${STORAGE_PREFIX}.${safeKeyPart(this.symbol)}.`;
+      const migratedById = new Map<string, ChartDrawing>();
+      const keysToRewrite: Array<{ key: string; drawings: ChartDrawing[] }> = [];
+
+      for (let index = 0; index < window.localStorage.length; index += 1) {
+        const key = window.localStorage.key(index);
+        if (!key || !key.startsWith(symbolPrefix)) continue;
+
+        const drawings = parseStoredDrawings(key, () => true);
+        if (drawings.length === 0) continue;
+
+        const retained: ChartDrawing[] = [];
+        let changed = false;
+
+        for (const drawing of drawings) {
+          if (drawing.type === "trendline") {
+            migratedById.set(drawing.id, cloneDrawing(drawing));
+            changed = true;
+          } else {
+            retained.push(cloneDrawing(drawing));
+          }
+        }
+
+        if (changed) {
+          keysToRewrite.push({ key, drawings: retained });
+        }
+      }
+
+      const migrated = Array.from(migratedById.values());
+
+      if (migrated.length > 0) {
+        const existingShared = parseStoredDrawings(
+          this.marketStructureStorageKey,
+          (drawing) => scopeForDrawing(drawing) === "shared",
+        );
+        const mergedShared = mergeScopes(existingShared, migrated);
+
+        window.localStorage.setItem(
+          this.marketStructureStorageKey,
+          JSON.stringify(mergedShared),
+        );
+
+        for (const item of keysToRewrite) {
+          window.localStorage.setItem(
+            item.key,
+            JSON.stringify(item.drawings),
+          );
+        }
+      }
+
+      window.localStorage.setItem(migrationKey, "1");
+      return migrated;
+    } catch (error) {
+      console.warn(
+        "[DrawingStore] failed to migrate trendlines to shared scope",
+        { symbol: this.symbol, error },
+      );
+      return [];
+    }
+  }
+
   private loadLocal(): void {
     const timeframeDrawings = parseStoredDrawings(
       this.storageKey,
-      (drawing) => drawing.type !== "marketStructure",
+      (drawing) => scopeForDrawing(drawing) === "timeframe",
     );
     const sharedDrawings = parseStoredDrawings(
       this.marketStructureStorageKey,
-      (drawing) => drawing.type === "marketStructure",
+      (drawing) => scopeForDrawing(drawing) === "shared",
     );
 
     this.drawings = mergeScopes(timeframeDrawings, sharedDrawings);
@@ -509,12 +591,22 @@ export class DrawingStore {
         : [];
     const revision = Number(record.revision ?? 0);
 
+    const validDrawings = raw.filter(isValidDrawing);
+
     return {
       drawings: cloneDrawings(
-        raw
-          .filter(isValidDrawing)
-          .filter((drawing) => scopeForDrawing(drawing) === scope),
+        validDrawings.filter(
+          (drawing) => scopeForDrawing(drawing) === scope,
+        ),
       ),
+      legacySharedDrawings:
+        scope === "timeframe"
+          ? cloneDrawings(
+              validDrawings.filter(
+                (drawing) => scopeForDrawing(drawing) === "shared",
+              ),
+            )
+          : [],
       exists: record.exists !== false,
       revision: Number.isFinite(revision) ? Math.max(0, revision) : 0,
       updatedAt:
@@ -610,12 +702,46 @@ export class DrawingStore {
         const localTimeframe = drawingsForScope(localSnapshot, "timeframe");
         const localShared = drawingsForScope(localSnapshot, "shared");
 
+        const migrationShared = mergeScopes(
+          this.migratedLocalSharedDrawings,
+          timeframeRemote.legacySharedDrawings,
+        );
+        const initialShared = mergeScopes(
+          sharedRemote.exists ? sharedRemote.drawings : localShared,
+          migrationShared,
+        );
+
         let next = mergeScopes(
           timeframeRemote.exists
             ? timeframeRemote.drawings
             : localTimeframe,
-          sharedRemote.exists ? sharedRemote.drawings : localShared,
+          initialShared,
         );
+
+        for (const drawing of this.migratedLocalSharedDrawings) {
+          this.remoteQueue.push({
+            kind: "upsert",
+            scope: "shared",
+            drawing: cloneDrawing(drawing),
+          });
+        }
+
+        for (const drawing of timeframeRemote.legacySharedDrawings) {
+          this.remoteQueue.push(
+            {
+              kind: "upsert",
+              scope: "shared",
+              drawing: cloneDrawing(drawing),
+            },
+            {
+              kind: "remove",
+              scope: "timeframe",
+              id: drawing.id,
+            },
+          );
+        }
+
+        this.migratedLocalSharedDrawings = [];
 
         for (const mutation of this.pendingBeforeInitialLoad) {
           next = applyMutation(next, mutation);
