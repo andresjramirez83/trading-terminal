@@ -719,6 +719,38 @@ const ALPACA_NO_CACHE_HEADERS = {
   Pragma: "no-cache",
 };
 
+export type AlpacaSnapshotResponse = {
+  mode: AlpacaMode;
+  account: unknown;
+  positions: unknown[];
+  orders: unknown[];
+  fetched_at?: string;
+};
+
+export async function fetchAlpacaSnapshot(
+  mode: AlpacaMode = "paper",
+  status: "open" | "closed" | "all" = "all",
+  nested = true,
+): Promise<AlpacaSnapshotResponse> {
+  const params = new URLSearchParams({
+    mode,
+    status,
+    nested: String(nested),
+    limit: "500",
+    _ts: String(Date.now()),
+  });
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/snapshot?${params.toString()}`,
+    {
+      cache: "no-store",
+      headers: ALPACA_NO_CACHE_HEADERS,
+    },
+  );
+
+  return parseJson<AlpacaSnapshotResponse>(res);
+}
+
 export async function fetchAlpacaAccount(mode: AlpacaMode = "paper") {
   const params = new URLSearchParams({
     mode,

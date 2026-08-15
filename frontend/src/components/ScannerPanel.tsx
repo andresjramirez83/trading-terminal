@@ -5,7 +5,6 @@ import { useWatchlists } from "./watchlists/WatchlistContext";
 import {
   fetchOvernightSnapshots,
   fetchScannerCache,
-  fetchScannerDefinitions,
   refreshScannerCache,
   saveAfterhoursSnapshot,
   fetchSelectedAlertSymbols,
@@ -30,6 +29,12 @@ type ScannerDefinition = {
   id: string;
   name: string;
   description?: string;
+};
+
+const VWAP3_SCANNER_DEFINITION: ScannerDefinition = {
+  id: "vwap3_target",
+  name: "VWAP +3 Target",
+  description: "VWAP +3 Target scanner.",
 };
 
 type ScannerMeta = {
@@ -399,10 +404,8 @@ export default function ScannerPanel({
   const { replaceSymbols } = useWatchlists();
   const currentSelectedSymbol = normalizeSymbol(selectedSymbol || activeSymbol);
 
-  const [definitions, setDefinitions] = useState<ScannerDefinition[]>([]);
-  const [selectedScannerId, setSelectedScannerId] = useState(() =>
-    readStoredString(SCANNER_SELECTED_ID_STORAGE_KEY, "overnight_runner"),
-  );
+  const [definitions] = useState<ScannerDefinition[]>([VWAP3_SCANNER_DEFINITION]);
+  const [selectedScannerId, setSelectedScannerId] = useState("vwap3_target");
   const [data, setData] = useState<ScannerResponse | null>(null);
   const [snapshotDates, setSnapshotDates] = useState<string[]>([]);
   const [latestSnapshot, setLatestSnapshot] = useState("");
@@ -488,21 +491,6 @@ export default function ScannerPanel({
       selectedScannerId,
     );
   }, [selectedScannerId]);
-
-  async function loadDefinitions() {
-    try {
-      const result = (await fetchScannerDefinitions()) as ScannerDefinition[];
-      setDefinitions(result ?? []);
-      if (
-        result?.length &&
-        !result.some((item) => item.id === selectedScannerId)
-      ) {
-        setSelectedScannerId(result[0].id);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load scanners");
-    }
-  }
 
   async function loadSnapshots(nextScannerId?: string) {
     if (!isWorkspace) return;
@@ -647,11 +635,6 @@ export default function ScannerPanel({
       </span>
     );
   };
-
-  useEffect(() => {
-    loadDefinitions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     definitions.forEach((definition) => {

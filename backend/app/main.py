@@ -4351,6 +4351,65 @@ async def auto_trade_check_once():
         results.append(await asyncio.to_thread(_auto_trade_try_execute, symbol))
     return {"symbols": symbols, "results": results, "status": _auto_trade_status_payload()}
 
+@app.get("/alpaca/snapshot")
+async def alpaca_snapshot(
+    mode: str = Query("paper"),
+    status: str = Query("all"),
+    limit: int = Query(500, ge=1, le=500),
+    nested: bool = Query(True),
+):
+    """Fetch account, positions, and orders in one browser request.
+
+    The three Alpaca calls run concurrently on worker threads so this endpoint
+    keeps roughly the latency of the slowest broker call instead of summing
+    all three response times.
+    """
+    print(
+        "ALPACA SNAPSHOT ROUTE HIT:",
+        mode,
+        status,
+        limit,
+        "nested=",
+        nested,
+        flush=True,
+    )
+
+    try:
+        account_service = get_alpaca_service(mode)
+        positions_service = get_alpaca_service(mode)
+        orders_service = get_alpaca_service(mode)
+
+        account_task = asyncio.to_thread(account_service.get_account)
+        positions_task = asyncio.to_thread(positions_service.get_positions)
+        orders_task = asyncio.to_thread(
+            orders_service.get_orders,
+            status=status,
+            limit=limit,
+            nested=nested,
+        )
+
+        account, positions, orders = await asyncio.gather(
+            account_task,
+            positions_task,
+            orders_task,
+        )
+
+        print("ALPACA SNAPSHOT SUCCESS", flush=True)
+        return {
+            "mode": (mode or "paper").strip().lower(),
+            "account": account,
+            "positions": positions if isinstance(positions, list) else [],
+            "orders": orders if isinstance(orders, list) else [],
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("ALPACA SNAPSHOT ERROR:", repr(exc), flush=True)
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @app.get("/alpaca/account")
 def alpaca_account(mode: str = Query("paper")):
     print("ALPACA ACCOUNT ROUTE HIT:", mode, flush=True)

@@ -3,6 +3,7 @@ import {
   fetchAlpacaAccount,
   fetchAlpacaOrders,
   fetchAlpacaPositions,
+  fetchAlpacaSnapshot,
   placeAlpacaOrder,
   updateAlpacaOrder,
   type AlpacaMode,
@@ -338,14 +339,35 @@ export class TradeExecutionService {
     });
 
     try {
-      const [rawAccount, rawPositions, rawOrders] = await Promise.all([
-        fetchAlpacaAccount(this.mode),
-        fetchAlpacaPositions(this.mode),
-        // One atomic order snapshot prevents the race where an externally
-        // cancelled order disappears from "open" before a separate "closed"
-        // request sees it.
-        fetchAlpacaOrders(this.mode, "all", true),
-      ]);
+      let rawAccount: unknown;
+      let rawPositions: unknown;
+      let rawOrders: unknown;
+
+      try {
+        const brokerSnapshot = await fetchAlpacaSnapshot(
+          this.mode,
+          "all",
+          true,
+        );
+        rawAccount = brokerSnapshot.account;
+        rawPositions = brokerSnapshot.positions;
+        rawOrders = brokerSnapshot.orders;
+      } catch (snapshotError) {
+        // Compatibility fallback keeps trading data available during a rolling
+        // deploy if the frontend reaches a backend that has not restarted yet.
+        console.warn(
+          "[TradeExecutionService] Alpaca snapshot unavailable; falling back to individual requests.",
+          snapshotError,
+        );
+        [rawAccount, rawPositions, rawOrders] = await Promise.all([
+          fetchAlpacaAccount(this.mode),
+          fetchAlpacaPositions(this.mode),
+          // One atomic order snapshot prevents the race where an externally
+          // cancelled order disappears from "open" before a separate "closed"
+          // request sees it.
+          fetchAlpacaOrders(this.mode, "all", true),
+        ]);
+      }
 
       const rawPositionsArray = Array.isArray(rawPositions) ? rawPositions : [];
       const rawOrdersArray = Array.isArray(rawOrders) ? rawOrders : [];

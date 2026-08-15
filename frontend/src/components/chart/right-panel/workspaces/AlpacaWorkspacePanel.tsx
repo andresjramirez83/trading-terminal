@@ -3,9 +3,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "r
 import {
   cancelAlpacaOrder,
   checkAutoTradeOnce,
-  fetchAlpacaAccount,
-  fetchAlpacaOrders,
-  fetchAlpacaPositions,
+  fetchAlpacaSnapshot,
   fetchAutoTradeStatus,
   placeAlpacaOrder,
   startAutoTrade,
@@ -264,16 +262,22 @@ export default function AlpacaWorkspacePanel() {
     setError("");
 
     try {
-      const [nextAccount, nextPositions, nextOrders, nextAutoTradeStatus] = await Promise.all([
-        fetchAlpacaAccount(mode),
-        fetchAlpacaPositions(mode),
-        fetchAlpacaOrders(mode, "open", true),
+      const [brokerSnapshot, nextAutoTradeStatus] = await Promise.all([
+        fetchAlpacaSnapshot(mode, "open", true),
         fetchAutoTradeStatus().catch(() => null),
       ]);
 
-      setAccount(nextAccount as AccountData);
-      setPositions(Array.isArray(nextPositions) ? nextPositions : []);
-      setOrders(Array.isArray(nextOrders) ? nextOrders : []);
+      setAccount(brokerSnapshot.account as AccountData);
+      setPositions(
+        Array.isArray(brokerSnapshot.positions)
+          ? (brokerSnapshot.positions as PositionData[])
+          : [],
+      );
+      setOrders(
+        Array.isArray(brokerSnapshot.orders)
+          ? (brokerSnapshot.orders as OrderData[])
+          : [],
+      );
       setAutoTradeStatus(nextAutoTradeStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load Alpaca data.");

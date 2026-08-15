@@ -12,7 +12,6 @@ import React, {
 import {
   API_BASE,
   fetchScannerCache,
-  fetchScannerDefinitions,
 } from "../../services/api";
 
 import { dailyPracticeUniverseEngine } from "../../trading/practice/DailyPracticeUniverseEngine";
@@ -76,6 +75,12 @@ type ScannerWatchlistDefinition = {
   id: string;
   name: string;
   description?: string;
+};
+
+const VWAP3_TARGET_WATCHLIST: ScannerWatchlistDefinition = {
+  id: "vwap3_target",
+  name: "VWAP +3 Target",
+  description: "VWAP +3 Target scanner symbols.",
 };
 
 const WatchlistContext = createContext<WatchlistContextValue | null>(null);
@@ -499,10 +504,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       refreshInFlight = true;
 
       try {
-        const definitions = await fetchScannerDefinitions();
-        if (cancelled) return;
-
-        const normalizedDefinitions = definitions
+        const normalizedDefinitions = [VWAP3_TARGET_WATCHLIST]
           .map((definition) => ({
             ...definition,
             id: normalizeWatchlistId(definition.id),
@@ -593,7 +595,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
           return validIds.has(current) ? current : "manual";
         });
       } catch (error) {
-        console.warn("[WatchlistContext] scanner registry load failed", error);
+        console.warn("[WatchlistContext] VWAP +3 scanner cache load failed", error);
       } finally {
         refreshInFlight = false;
       }
