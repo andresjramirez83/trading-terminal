@@ -138,3 +138,9 @@ class ProtectedOrderPriceUpdate(BaseModel):
 
     level: Literal["entry", "stop", "target"]
     price: float
+
+class ProtectedPositionAction(BaseModel):
+    """Risk-control action for a filled server-managed protected position."""
+
+    action: Literal["scale_out", "close_all", "trail_start", "trail_stop"]
+    percent: Optional[float] = None

@@ -1020,6 +1020,29 @@ export async function updateOvernightProtectedOrderPrice(
   return parseJson<AutoTradeStatus>(res);
 }
 
+export type ProtectedPositionAction =
+  | { action: "scale_out"; percent: number }
+  | { action: "close_all" }
+  | { action: "trail_start" }
+  | { action: "trail_stop" };
+
+export async function requestOvernightProtectedPositionAction(
+  symbol: string,
+  action: ProtectedPositionAction,
+): Promise<AutoTradeStatus> {
+  const safeSymbol = String(symbol ?? "").trim().toUpperCase();
+  const res = await fetch(
+    `${API_BASE}/auto-trade/overnight-protected-order/${encodeURIComponent(safeSymbol)}/action`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action),
+    },
+  );
+
+  return parseJson<AutoTradeStatus>(res);
+}
+
 /** @deprecated Use queueOvernightProtectedOrder. */
 export async function queueOverniteHailMaryPlan(
   payload: ManualTradePlanRequest,

@@ -334,8 +334,11 @@ export default function TradingWorkspacePanel({
         protectionOwner={store.positionProtectionOwner}
         workingOrderStatus={store.workingOrderStatus}
         executionLoading={store.executionLoading}
+        trailEnabled={store.serverTrailEnabled}
         onChange={store.updateCurrentPosition}
+        onEditStop={store.editLiveStop}
         onMoveStopToBreakEven={store.moveStopToBreakEven}
+        onToggleTrailingStop={store.toggleTrailingStop}
         onClosePosition={store.closePosition}
         onClosePositionPercent={store.closePositionPercent}
         onFlattenAllPositions={store.flattenAllPositions}

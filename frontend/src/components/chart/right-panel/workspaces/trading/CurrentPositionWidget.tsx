@@ -15,8 +15,11 @@ type CurrentPositionWidgetProps = {
   protectionOwner?: "alpaca" | "server" | null;
   workingOrderStatus?: string | null;
   executionLoading?: boolean;
+  trailEnabled?: boolean;
   onChange: (patch: Partial<CurrentPositionState>) => void;
+  onEditStop?: (price: number) => void | Promise<void>;
   onMoveStopToBreakEven: () => void | Promise<void>;
+  onToggleTrailingStop?: () => void | Promise<void>;
   onClosePosition?: () => void | Promise<void>;
   onClosePositionPercent?: (percent: number) => void | Promise<void>;
   onFlattenAllPositions?: () => void | Promise<void>;
@@ -104,8 +107,11 @@ export default function CurrentPositionWidget({
   protectionOwner = null,
   workingOrderStatus = null,
   executionLoading = false,
+  trailEnabled = false,
   onChange,
+  onEditStop,
   onMoveStopToBreakEven,
+  onToggleTrailingStop,
   onClosePosition,
   onClosePositionPercent,
   onFlattenAllPositions,
@@ -506,14 +512,24 @@ export default function CurrentPositionWidget({
           type="button"
           style={{
             ...styles.actionButton,
-            ...disabledStyle(controlsDisabled || !liveStop),
+            ...disabledStyle(
+              controlsDisabled ||
+                !hasStopValue ||
+                (!liveStop && protectionOwner !== "server"),
+            ),
           }}
-          disabled={controlsDisabled || !liveStop}
+          disabled={
+            controlsDisabled ||
+            !hasStopValue ||
+            (!liveStop && protectionOwner !== "server")
+          }
           onClick={() => void onMoveStopToBreakEven()}
           title={
-            liveStop
-              ? "Replace the live Alpaca stop order at the average entry price."
-              : "A live Alpaca stop order is required."
+            protectionOwner === "server"
+              ? "Move the server-managed Overnight Protected stop to the actual entry price."
+              : liveStop
+                ? "Replace the live Alpaca stop order at the average entry price."
+                : "A live protective stop is required."
           }
         >
           Break Even
@@ -523,13 +539,36 @@ export default function CurrentPositionWidget({
           type="button"
           style={{
             ...styles.actionButton,
-            ...disabledStyle(controlsDisabled || !liveStop),
+            ...disabledStyle(
+              controlsDisabled ||
+                !hasStopValue ||
+                (!liveStop && protectionOwner !== "server"),
+            ),
           }}
-          disabled={controlsDisabled || !liveStop}
+          disabled={
+            controlsDisabled ||
+            !hasStopValue ||
+            (!liveStop && protectionOwner !== "server")
+          }
+          onClick={() => {
+            const raw = window.prompt(
+              protectionOwner === "server"
+                ? "New server-protected stop price"
+                : "New live Alpaca stop price",
+              String(position.stop || ""),
+            );
+            if (raw == null) return;
+            const next = Number(raw.trim());
+            if (!Number.isFinite(next) || next <= 0) {
+              window.alert("Enter a valid stop price greater than zero.");
+              return;
+            }
+            void onEditStop?.(next);
+          }}
           title={
-            liveStop
-              ? "Enter a new price in the LIVE Stop field to replace the Alpaca order."
-              : "A live Alpaca stop order is required."
+            protectionOwner === "server"
+              ? "Change the server worker's synthetic stop without detaching protection."
+              : "Replace the active Alpaca stop order."
           }
         >
           Edit Live Stop
@@ -537,18 +576,42 @@ export default function CurrentPositionWidget({
 
         <button
           type="button"
-          style={{ ...styles.actionButton, ...disabledStyle(true) }}
-          disabled
-          title="Trailing-stop automation will be wired in the next phase."
+          style={{
+            ...styles.actionButton,
+            ...disabledStyle(
+              controlsDisabled ||
+                protectionOwner !== "server" ||
+                !hasStopValue,
+            ),
+          }}
+          disabled={
+            controlsDisabled ||
+            protectionOwner !== "server" ||
+            !hasStopValue
+          }
+          onClick={() => void onToggleTrailingStop?.()}
+          title={
+            protectionOwner === "server"
+              ? trailEnabled
+                ? "Stop server-side trailing and keep the latest raised stop."
+                : "Start a server-side trail using the current stop-to-market distance."
+              : "Server trailing is available for Overnight Protected Orders."
+          }
         >
-          Trail Stop
+          {trailEnabled ? "Stop Trail" : "Trail Stop"}
         </button>
 
         <button
           type="button"
           style={{ ...styles.flattenButton, ...disabledStyle(controlsDisabled) }}
           disabled={controlsDisabled}
-          onClick={() => void onFlattenAllPositions?.()}
+          onClick={() => {
+            const confirmed = window.confirm(
+              "Flatten ALL live positions in this Alpaca account? This affects every symbol, not only the chart symbol.",
+            );
+            if (!confirmed) return;
+            void onFlattenAllPositions?.();
+          }}
         >
           Flatten All
         </button>
@@ -557,7 +620,9 @@ export default function CurrentPositionWidget({
       <div style={styles.footer}>
         Accepted orders populate this manager before fill. After fill, shares
         and entry synchronize from Alpaca and the panel switches to live
-        position risk, reward, P/L, and protection state.
+        position risk, reward, P/L, and protection state. Server-protected
+        positions keep scale-out, close, break-even, edit-stop, and trail
+        actions attached to the Overnight Protected worker.
       </div>
     </section>
   );

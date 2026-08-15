@@ -10,6 +10,8 @@ import { calculateQuickOrderEstimate } from "../../components/chart/right-panel/
 import { getSharedPositionProtectionEngine } from "../position/PositionProtectionEngine";
 import {
   fetchAutoTradeStatus,
+  requestOvernightProtectedPositionAction,
+  updateOvernightProtectedOrderPrice,
   type AutoTradeStatus,
 } from "../../services/api";
 import type {
@@ -43,6 +45,7 @@ type ManagedOrderPreview = {
   position: CurrentPositionState;
   status: string;
   protectionOwner: Exclude<PositionProtectionOwner, null>;
+  trailEnabled?: boolean;
 };
 
 function positiveNumber(value: unknown): number {
@@ -113,6 +116,7 @@ function buildAutoManagedOrder(
         },
         status: phaseDisplayStatus(String(payload.phase ?? "working")),
         protectionOwner: "server",
+        trailEnabled: Boolean(payload.trail_enabled),
       };
     }
   }
@@ -156,6 +160,7 @@ function buildAutoManagedOrder(
       },
       status: "QUEUED",
       protectionOwner: "server",
+      trailEnabled: false,
     };
   }
 
@@ -194,6 +199,65 @@ function mergeOrderIds(
       ...collectAlpacaOrderIds(order),
     ]),
   );
+}
+
+function resolveBracketLegOrderId(
+  orders: unknown[],
+  symbol: string,
+  level: "stop" | "target",
+): string | null {
+  const safeSymbol = String(symbol ?? "").trim().toUpperCase();
+  const terminal = new Set([
+    "filled",
+    "canceled",
+    "cancelled",
+    "expired",
+    "replaced",
+    "rejected",
+    "done_for_day",
+  ]);
+  let resolved: string | null = null;
+
+  const visit = (value: unknown, inheritedSymbol = "", nested = false) => {
+    if (resolved || !value || typeof value !== "object") return;
+    const order = value as Record<string, unknown>;
+    const orderSymbol = String(order.symbol ?? inheritedSymbol).trim().toUpperCase();
+    const status = String(order.status ?? "").trim().toLowerCase();
+    const type = String(order.type ?? "").trim().toLowerCase();
+    const id = String(order.id ?? order.order_id ?? "").trim();
+    const stopPrice = Number(order.stop_price ?? 0);
+    const limitPrice = Number(order.limit_price ?? 0);
+    const active = !status || !terminal.has(status);
+
+    if (
+      nested &&
+      active &&
+      id &&
+      orderSymbol === safeSymbol &&
+      ((level === "stop" &&
+        (stopPrice > 0 || type === "stop" || type === "stop_limit")) ||
+        (level === "target" &&
+          limitPrice > 0 &&
+          type === "limit" &&
+          !(stopPrice > 0)))
+    ) {
+      resolved = id;
+      return;
+    }
+
+    const legs = Array.isArray(order.legs) ? order.legs : [];
+    for (const leg of legs) {
+      visit(leg, orderSymbol, true);
+      if (resolved) return;
+    }
+  };
+
+  for (const order of orders) {
+    visit(order);
+    if (resolved) break;
+  }
+
+  return resolved;
 }
 
 function getAlpacaOrderStatus(order: unknown): string {
@@ -661,6 +725,10 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   const workingOrderStatus =
     positionStage === "working" ? workingManagedOrder?.status ?? "WORKING" : null;
 
+  const serverTrailEnabled = Boolean(
+    positionProtectionOwner === "server" && autoManagedOrder?.trailEnabled,
+  );
+
   const updateTradePlan = useCallback(
     (patch: Partial<TradePlanState>) => {
       setTradePlanDraft((currentPlan) => {
@@ -866,68 +934,94 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     });
   }, [safeSymbol, tradePlan]);
 
+  const editLiveStop = useCallback(
+    async (nextStop: number) => {
+      if (!Number.isFinite(nextStop) || nextStop <= 0) return;
+
+      if (positionProtectionOwner === "server") {
+        const nextStatus = await updateOvernightProtectedOrderPrice(
+          safeSymbol,
+          "stop",
+          nextStop,
+        );
+        setAutoTradeStatus(nextStatus);
+        setPositionDraft((current) => ({ ...current, stop: nextStop }));
+        executionService.queueRefresh();
+        return;
+      }
+
+      const stopOrderId =
+        resolveBracketLegOrderId(
+          [
+            ...executionSnapshot.rawOpenOrders,
+            ...executionSnapshot.rawClosedOrders,
+          ],
+          safeSymbol,
+          "stop",
+        ) ?? positionProtection?.stopOrderId;
+
+      if (!stopOrderId) return;
+
+      const updatedOrder = await executionService.modifyOrder(stopOrderId, {
+        stop_price: nextStop,
+      });
+      if (!updatedOrder) {
+        executionService.queueRefresh();
+        return;
+      }
+
+      setPositionDraft((current) => ({ ...current, stop: nextStop }));
+      const selected = tradeEngine.getSelectedTrade();
+      if (
+        selected &&
+        selected.symbol.trim().toUpperCase() === safeSymbol &&
+        !["closed", "cancelled", "rejected"].includes(selected.status)
+      ) {
+        tradeEngine.updateStop(selected.id, nextStop);
+      }
+      executionService.queueRefresh();
+    },
+    [
+      executionService,
+      executionSnapshot.rawClosedOrders,
+      executionSnapshot.rawOpenOrders,
+      positionProtection?.stopOrderId,
+      positionProtectionOwner,
+      safeSymbol,
+      tradeEngine,
+    ],
+  );
+
   const moveStopToBreakEven = useCallback(async () => {
     const breakEvenPrice =
       currentPosition.entry > 0 ? currentPosition.entry : currentPrice;
-    const stopOrderId = positionProtection?.stopOrderId;
+    if (breakEvenPrice <= 0) return;
+    await editLiveStop(breakEvenPrice);
+  }, [currentPosition.entry, currentPrice, editLiveStop]);
 
-    if (!stopOrderId || breakEvenPrice <= 0) return;
+  const toggleTrailingStop = useCallback(async () => {
+    if (positionProtectionOwner !== "server" || positionStage !== "live") return;
 
-    const updatedOrder = await executionService.modifyOrder(stopOrderId, {
-      stop_price: breakEvenPrice,
-    });
-
-    if (!updatedOrder) {
+    try {
+      const nextStatus = await requestOvernightProtectedPositionAction(
+        safeSymbol,
+        { action: serverTrailEnabled ? "trail_stop" : "trail_start" },
+      );
+      setAutoTradeStatus(nextStatus);
       executionService.queueRefresh();
-      return;
+    } catch (error) {
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : "Could not update the protected trailing stop.",
+      );
     }
-
-    setPositionDraft((current) => ({
-      ...current,
-      stop: breakEvenPrice,
-    }));
-
-    const selected = tradeEngine.getSelectedTrade();
-    const activeTrade =
-      selected &&
-      selected.symbol.trim().toUpperCase() === safeSymbol &&
-      !["closed", "cancelled", "rejected"].includes(selected.status)
-        ? selected
-        : tradeEngine
-            .getTrades()
-            .filter(
-              (trade) =>
-                trade.symbol.trim().toUpperCase() === safeSymbol &&
-                !["closed", "cancelled", "rejected"].includes(trade.status),
-            )
-            .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null;
-
-    if (activeTrade) {
-      tradeEngine.updateStop(activeTrade.id, breakEvenPrice);
-      const latestTrade = tradeEngine.getTrade(activeTrade.id) ?? activeTrade;
-
-      tradeEngine.updateTrade(activeTrade.id, {
-        status: "managing",
-        links: {
-          ...latestTrade.links,
-          alpacaOrderIds: Array.from(
-            new Set([
-              ...(latestTrade.links.alpacaOrderIds ?? []),
-              stopOrderId,
-            ]),
-          ),
-        },
-      });
-    }
-
-    executionService.queueRefresh();
   }, [
-    currentPosition.entry,
-    currentPrice,
     executionService,
-    positionProtection,
+    positionProtectionOwner,
+    positionStage,
     safeSymbol,
-    tradeEngine,
+    serverTrailEnabled,
   ]);
 
   const submitQuickOrder = useCallback(
@@ -1178,6 +1272,24 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   );
 
   const closePosition = useCallback(async () => {
+    if (positionProtectionOwner === "server" && positionStage === "live") {
+      try {
+        const nextStatus = await requestOvernightProtectedPositionAction(
+          safeSymbol,
+          { action: "close_all" },
+        );
+        setAutoTradeStatus(nextStatus);
+        executionService.queueRefresh();
+      } catch (error) {
+        window.alert(
+          error instanceof Error
+            ? error.message
+            : `Could not close the protected ${safeSymbol} position.`,
+        );
+      }
+      return;
+    }
+
     const result = await executionService.closePosition(safeSymbol, {
       extendedHours: quickOrder.extendedHours,
     });
@@ -1187,6 +1299,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     }
   }, [
     executionService,
+    positionProtectionOwner,
+    positionStage,
     quickOrder.extendedHours,
     recordExitOrder,
     safeSymbol,
@@ -1194,9 +1308,32 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
 
   const closePositionPercent = useCallback(
     async (percent: number) => {
+      const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+      if (safePercent <= 0) return;
+
+      if (positionProtectionOwner === "server" && positionStage === "live") {
+        try {
+          const nextStatus = await requestOvernightProtectedPositionAction(
+            safeSymbol,
+            safePercent >= 100
+              ? { action: "close_all" }
+              : { action: "scale_out", percent: safePercent },
+          );
+          setAutoTradeStatus(nextStatus);
+          executionService.queueRefresh();
+        } catch (error) {
+          window.alert(
+            error instanceof Error
+              ? error.message
+              : `Could not scale out of the protected ${safeSymbol} position.`,
+          );
+        }
+        return;
+      }
+
       const result = await executionService.closePositionPercent(
         safeSymbol,
-        percent,
+        safePercent,
         {
           extendedHours: quickOrder.extendedHours,
         },
@@ -1208,6 +1345,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     },
     [
       executionService,
+      positionProtectionOwner,
+      positionStage,
       quickOrder.extendedHours,
       recordExitOrder,
       safeSymbol,
@@ -1237,42 +1376,74 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   );
 
   const flattenAllPositions = useCallback(async () => {
-    const result = await executionService.flattenAllPositions({
-      extendedHours: quickOrder.extendedHours,
-    });
+    const protectedSymbols = new Set<string>();
+    const protectedActions: Promise<AutoTradeStatus>[] = [];
 
-    if (!result.ok) return;
+    for (const [symbol, rawState] of Object.entries(
+      autoTradeStatus?.runner_states ?? {},
+    )) {
+      if (!rawState || typeof rawState !== "object") continue;
+      const state = rawState as Record<string, unknown>;
+      const strategyId = String(state.strategy_id ?? "");
+      const phase = String(state.phase ?? "");
+      if (
+        !["overnight_protected_order", "overnite_hail_mary"].includes(
+          strategyId,
+        ) ||
+        !["active_synthetic", "exit_submitted"].includes(phase)
+      ) {
+        continue;
+      }
 
-    const trade = tradeEngine.getSelectedTrade();
+      const normalizedSymbol = symbol.trim().toUpperCase();
+      if (!normalizedSymbol) continue;
+      protectedSymbols.add(normalizedSymbol);
 
-    if (
-      trade &&
-      trade.symbol.trim().toUpperCase() === safeSymbol
-    ) {
-      const exitOrderIds = result.results.flatMap((item) =>
-        item.ok ? collectAlpacaOrderIds(item.order) : [],
+      // If the protection worker already has an exit working, do not submit a
+      // second broker close. Otherwise hand the flatten request to the worker.
+      if (phase === "active_synthetic") {
+        protectedActions.push(
+          requestOvernightProtectedPositionAction(normalizedSymbol, {
+            action: "close_all",
+          }),
+        );
+      }
+    }
+
+    if (protectedActions.length > 0) {
+      try {
+        const statuses = await Promise.all(protectedActions);
+        const lastStatus = statuses[statuses.length - 1];
+        if (lastStatus) setAutoTradeStatus(lastStatus);
+      } catch (error) {
+        window.alert(
+          error instanceof Error
+            ? error.message
+            : "One or more protected positions could not be queued for flattening.",
+        );
+      }
+    }
+
+    const genericPositions = executionSnapshot.positions.filter(
+      (position) =>
+        position.shares > 0 &&
+        !protectedSymbols.has(position.symbol.trim().toUpperCase()),
+    );
+
+    for (const position of genericPositions) {
+      await executionService.closePositionShares(
+        position.symbol,
+        position.shares,
+        { extendedHours: quickOrder.extendedHours },
       );
-
-      tradeEngine.updateTrade(trade.id, {
-        status: "managing",
-        links: {
-          ...trade.links,
-          alpacaOrderIds: Array.from(
-            new Set([
-              ...(trade.links.alpacaOrderIds ?? []),
-              ...exitOrderIds,
-            ]),
-          ),
-        },
-      });
     }
 
     executionService.queueRefresh();
   }, [
+    autoTradeStatus?.runner_states,
     executionService,
+    executionSnapshot.positions,
     quickOrder.extendedHours,
-    safeSymbol,
-    tradeEngine,
   ]);
 
   const tradePlanStats = useMemo(
@@ -1308,8 +1479,11 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       positionStage,
       positionProtectionOwner,
       workingOrderStatus,
+      serverTrailEnabled,
       updateCurrentPosition,
+      editLiveStop,
       moveStopToBreakEven,
+      toggleTrailingStop,
       closePosition,
       closePositionPercent,
       closePositionShares,
@@ -1350,6 +1524,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       executionSnapshot.status,
       executionSnapshot.updatedAt,
       executionMode,
+      editLiveStop,
       fillOpenOrder,
       flattenAllPositions,
       journalTrades,
@@ -1362,6 +1537,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       refreshTradingData,
       safeSymbol,
       selectedTrade,
+      serverTrailEnabled,
       submitQuickOrder,
       submitTradePlan,
       syncPlanToOrder,
@@ -1369,6 +1545,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       switchTradingMode,
       tradePlan,
       tradePlanStats,
+      toggleTrailingStop,
       updateCurrentPosition,
       updateQuickOrder,
       updateTradePlan,

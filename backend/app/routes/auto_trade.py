@@ -10,6 +10,7 @@ from app.autotrade.models import (
     AutoTradeConfigUpdate,
     ManualTradePlan,
     ProtectedOrderPriceUpdate,
+    ProtectedPositionAction,
 )
 from app.autotrade.state import AutoTradeStore
 from app.services.alpaca_service import AlpacaService
@@ -302,6 +303,138 @@ def auto_trade_move_overnight_protected_order_level(
         return store.status_payload() | {"ok": True, "updated_level": update.level, "updated_price": float(update.price)}
 
     raise HTTPException(status_code=404, detail=f"No editable Overnight Protected Order was found for {safe_symbol}.")
+
+
+def _live_position_qty(alpaca: AlpacaService, symbol: str) -> int:
+    safe_symbol = str(symbol or "").strip().upper()
+    for position in alpaca.get_positions() or []:
+        if str(position.get("symbol") or "").strip().upper() != safe_symbol:
+            continue
+        try:
+            return max(0, int(abs(float(position.get("qty") or 0))))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+@router.post("/overnight-protected-order/{symbol}/action")
+def auto_trade_overnight_protected_position_action(
+    symbol: str,
+    request: ProtectedPositionAction,
+):
+    """Queue a scale-out/close/trailing action for the server protection worker.
+
+    The route never submits an uncoordinated broker exit. It only records the
+    requested risk action in the same runner state that owns the synthetic stop
+    and target, so the worker can use fresh quotes, extended-hours-compliant
+    limit orders, and then re-arm protection for whatever shares remain.
+    """
+    safe_symbol = str(symbol or "").strip().upper()
+    if not safe_symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required.")
+
+    runner = store.get_runner_states().get(safe_symbol)
+    if not isinstance(runner, dict) or not _is_protected_strategy(runner.get("strategy_id")):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active Overnight Protected Order was found for {safe_symbol}.",
+        )
+
+    phase = str(runner.get("phase") or "")
+    if phase == "exit_submitted":
+        raise HTTPException(status_code=409, detail="An exit is already working for this protected position.")
+
+    mode = "live" if str(runner.get("mode") or "paper").lower() == "live" else "paper"
+    try:
+        alpaca = AlpacaService(mode=mode)
+        live_qty = _live_position_qty(alpaca, safe_symbol)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not verify the live Alpaca position: {exc}") from exc
+
+    if live_qty <= 0:
+        if phase == "active_synthetic":
+            store.delete_runner_state(safe_symbol)
+        raise HTTPException(status_code=409, detail=f"No live Alpaca shares remain for {safe_symbol}.")
+
+    if phase not in {"active_synthetic", "entry_submitted", "entry_cancel_requested"}:
+        raise HTTPException(status_code=409, detail="The protected entry must be filled before position controls can be used.")
+
+    # Alpaca can report the filled position one worker cycle before the runner
+    # has promoted entry_submitted -> active_synthetic. Adopt the live shares
+    # immediately so a risk-control click right after the fill cannot fail.
+    next_state = dict(runner)
+    if phase != "active_synthetic":
+        next_state.update({
+            "phase": "active_synthetic",
+            "qty": live_qty,
+            "filled_qty": live_qty,
+            "filled_at": str(runner.get("filled_at") or datetime.now(timezone.utc).isoformat()),
+        })
+        entry_order_id = str(runner.get("order_id") or runner.get("entry_order_id") or "").strip()
+        if entry_order_id:
+            store.delete_pending_entry(entry_order_id)
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    if request.action == "scale_out":
+        percent = float(request.percent or 0)
+        if not 0 < percent < 100:
+            raise HTTPException(status_code=400, detail="Scale-out percent must be greater than 0 and less than 100.")
+        exit_qty = max(1, int(live_qty * (percent / 100.0)))
+        exit_qty = min(exit_qty, live_qty)
+        if exit_qty >= live_qty:
+            raise HTTPException(status_code=400, detail="Scale-out would close the entire position. Use Close All instead.")
+        next_state.update({
+            "manual_exit_action": "scale_out",
+            "manual_exit_qty": exit_qty,
+            "manual_exit_percent": percent,
+            "manual_exit_requested_at": now,
+            "manual_exit_request_id": uuid4().hex,
+        })
+    elif request.action == "close_all":
+        next_state.update({
+            "manual_exit_action": "close_all",
+            "manual_exit_qty": live_qty,
+            "manual_exit_percent": 100.0,
+            "manual_exit_requested_at": now,
+            "manual_exit_request_id": uuid4().hex,
+        })
+    elif request.action == "trail_start":
+        next_state.update({
+            "trail_enabled": True,
+            "trail_initialized": False,
+            "trail_enabled_at": now,
+        })
+        next_state.pop("trail_disabled_at", None)
+    else:
+        next_state.update({
+            "trail_enabled": False,
+            "trail_initialized": False,
+            "trail_disabled_at": now,
+        })
+
+    store.upsert_runner_state(safe_symbol, next_state)
+    store.log_event(
+        "protected_position_action_requested",
+        {
+            "action": request.action,
+            "percent": request.percent,
+            "live_qty": live_qty,
+            "manual_exit_qty": next_state.get("manual_exit_qty"),
+            "trail_enabled": bool(next_state.get("trail_enabled")),
+        },
+        safe_symbol,
+        str(runner.get("strategy_id") or "overnight_protected_order"),
+    )
+
+    return store.status_payload() | {
+        "ok": True,
+        "action": request.action,
+        "symbol": safe_symbol,
+        "live_qty": live_qty,
+        "requested_exit_qty": next_state.get("manual_exit_qty"),
+        "trail_enabled": bool(next_state.get("trail_enabled")),
+    }
 
 
 @router.post("/overnite-hail-mary")

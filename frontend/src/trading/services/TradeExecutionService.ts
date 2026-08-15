@@ -94,6 +94,36 @@ function rawOrderSide(order: unknown): "buy" | "sell" | "" {
   return side === "buy" || side === "sell" ? side : "";
 }
 
+function rawPositionCurrentPrice(positions: unknown[], symbol: string): number {
+  const safeSymbol = cleanSymbol(symbol);
+  for (const value of positions) {
+    if (!value || typeof value !== "object") continue;
+    const position = value as Record<string, unknown>;
+    if (cleanSymbol(String(position.symbol ?? "")) !== safeSymbol) continue;
+    const price = Number(
+      position.current_price ??
+        position.currentPrice ??
+        position.market_price ??
+        position.marketPrice ??
+        0,
+    );
+    if (Number.isFinite(price) && price > 0) return price;
+  }
+  return 0;
+}
+
+function marketableExtendedHoursLimit(
+  side: AlpacaSide,
+  referencePrice: number,
+): number {
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0) return 0;
+  // Extended-hours equities require limit orders. Cross the latest position
+  // mark modestly so the close behaves like an aggressive limit while still
+  // retaining a hard worst-price boundary.
+  const multiplier = side === "sell" ? 0.99 : 1.01;
+  return roundToTick(Math.max(0.0001, referencePrice * multiplier));
+}
+
 function rawFilledQty(order: unknown): number {
   if (!order || typeof order !== "object") return 0;
   const record = order as Record<string, unknown>;
@@ -517,14 +547,30 @@ export class TradeExecutionService {
     });
 
     try {
+      const useExtendedHours = Boolean(options?.extendedHours ?? true);
+      const referencePrice = rawPositionCurrentPrice(
+        this.snapshot.rawPositions,
+        safeSymbol,
+      );
+      const limitPrice = useExtendedHours
+        ? marketableExtendedHoursLimit(side, referencePrice)
+        : 0;
+
+      if (useExtendedHours && limitPrice <= 0) {
+        return this.failSubmit(
+          `Cannot submit an extended-hours close for ${safeSymbol} because the current position price is unavailable.`,
+        );
+      }
+
       const order = await placeAlpacaOrder({
         mode: this.mode,
         symbol: safeSymbol,
         side,
         qty,
-        type: "market",
+        type: useExtendedHours ? "limit" : "market",
         time_in_force: "day",
-        extended_hours: Boolean(options?.extendedHours ?? true),
+        limit_price: useExtendedHours ? limitPrice : undefined,
+        extended_hours: useExtendedHours,
       });
 
       this.setSnapshot({
@@ -613,14 +659,30 @@ export class TradeExecutionService {
       const qty = roundShares(position.shares);
 
       try {
+        const useExtendedHours = Boolean(options?.extendedHours ?? true);
+        const referencePrice = rawPositionCurrentPrice(
+          this.snapshot.rawPositions,
+          position.symbol,
+        );
+        const limitPrice = useExtendedHours
+          ? marketableExtendedHoursLimit(side, referencePrice)
+          : 0;
+
+        if (useExtendedHours && limitPrice <= 0) {
+          throw new Error(
+            `Current position price is unavailable for ${position.symbol}.`,
+          );
+        }
+
         const order = await placeAlpacaOrder({
           mode: this.mode,
           symbol: position.symbol,
           side,
           qty,
-          type: "market",
+          type: useExtendedHours ? "limit" : "market",
           time_in_force: "day",
-          extended_hours: Boolean(options?.extendedHours ?? true),
+          limit_price: useExtendedHours ? limitPrice : undefined,
+          extended_hours: useExtendedHours,
         });
 
         results.push({

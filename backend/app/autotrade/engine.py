@@ -370,8 +370,73 @@ class AutoTradeEngine:
             if trigger_price <= 0:
                 continue
 
+            # Server-side trailing for Overnight Protected Orders. The trail
+            # never lowers the existing stop. On first enable, preserve the
+            # current stop-to-market distance; after that, raise the synthetic
+            # stop only when a new executable bid high-water mark is made.
+            if bool(state.get("trail_enabled")):
+                entry_price = self._alpaca_price(state.get("entry_price"))
+                tick = 0.0001 if trigger_price < 1.0 else 0.01
+                trail_initialized = bool(state.get("trail_initialized"))
+                trail_distance = self._safe_float(state.get("trail_distance"))
+                trail_high_water = self._safe_float(state.get("trail_high_water"))
+
+                if not trail_initialized or trail_distance <= 0:
+                    reference_distance = max(
+                        trigger_price - stop,
+                        entry_price - stop if entry_price > stop else 0.0,
+                        tick,
+                    )
+                    trail_distance = self._alpaca_price(reference_distance)
+                    trail_high_water = trigger_price
+                    trail_initialized = True
+                else:
+                    trail_high_water = max(trail_high_water, trigger_price)
+
+                trailed_stop = self._alpaca_price(
+                    max(stop, trail_high_water - trail_distance)
+                )
+                trail_state = dict(state)
+                trail_state.update({
+                    "trail_initialized": trail_initialized,
+                    "trail_distance": trail_distance,
+                    "trail_high_water": self._alpaca_price(trail_high_water),
+                    "trail_last_quote": trigger_price,
+                    "trail_updated_at": datetime.now(timezone.utc).isoformat(),
+                    "stop_price": trailed_stop,
+                })
+                if trailed_stop > stop:
+                    self.store.log_event(
+                        "protected_trailing_stop_raised",
+                        {
+                            "old_stop": stop,
+                            "new_stop": trailed_stop,
+                            "high_water": trail_high_water,
+                            "trail_distance": trail_distance,
+                        },
+                        symbol,
+                        strategy_id,
+                    )
+                state = trail_state
+                stop = trailed_stop
+                self.store.upsert_runner_state(symbol, trail_state)
+
+            manual_action = str(state.get("manual_exit_action") or "")
+            manual_exit_qty = int(self._safe_float(state.get("manual_exit_qty")))
             forced_reason = str(state.get("force_exit_reason") or "")
-            reason = forced_reason if forced_reason in {"stop_loss", "target_hit"} else None
+            valid_forced_reasons = {
+                "stop_loss",
+                "target_hit",
+                "manual_scale_out",
+                "manual_close",
+            }
+            reason = forced_reason if forced_reason in valid_forced_reasons else None
+
+            if reason is None and manual_action == "scale_out" and manual_exit_qty > 0:
+                reason = "manual_scale_out"
+            elif reason is None and manual_action == "close_all":
+                reason = "manual_close"
+
             if reason is None:
                 if trigger_price <= stop:
                     reason = "stop_loss"
@@ -380,7 +445,10 @@ class AutoTradeEngine:
             if reason is None:
                 continue
 
-            exit_qty = min(qty, live_qty)
+            if reason == "manual_scale_out":
+                exit_qty = min(manual_exit_qty, max(0, live_qty - 1))
+            else:
+                exit_qty = min(qty, live_qty)
             if exit_qty <= 0:
                 continue
 
@@ -418,6 +486,7 @@ class AutoTradeEngine:
                     "exit_order_id": exit_order_id,
                     "exit_reason": reason,
                     "exit_qty": exit_qty,
+                    "exit_start_live_qty": live_qty,
                     "exit_limit_price": limit_price,
                     "exit_submitted_at": datetime.now(timezone.utc).isoformat(),
                     "last_market_snapshot": market_snapshot,
@@ -533,6 +602,86 @@ class AutoTradeEngine:
             "market_data_status": "fresh" if quote_is_fresh else "stale_or_unavailable",
         }
 
+    def _rearmed_exit_state(
+        self,
+        state: Dict[str, Any],
+        *,
+        live_qty: int,
+        order: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return an active synthetic state after an exit completes or retries.
+
+        Manual scale-outs are quantity-aware: if an order partially filled before
+        cancellation, only the unfilled portion of the requested scale-out is
+        retried. A completed scale-out clears the manual request while leaving
+        stop/target protection armed for the remaining shares.
+        """
+        next_state = dict(state)
+        live_qty = max(0, int(live_qty))
+        reason = str(state.get("exit_reason") or state.get("force_exit_reason") or "")
+
+        next_state.update({
+            "phase": "active_synthetic",
+            "qty": live_qty,
+            "filled_qty": live_qty,
+            "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if error is not None:
+            next_state["last_exit_error"] = error
+
+        if reason == "manual_scale_out":
+            requested = int(self._safe_float(state.get("exit_qty") or state.get("manual_exit_qty")))
+            start_qty = int(self._safe_float(state.get("exit_start_live_qty")))
+            order_filled = int(self._safe_float((order or {}).get("filled_qty")))
+            observed_filled = max(0, start_qty - live_qty) if start_qty > 0 else 0
+            filled_against_request = min(requested, max(order_filled, observed_filled))
+            remaining_request = max(0, requested - filled_against_request)
+
+            if remaining_request > 0 and live_qty > 1:
+                next_state.update({
+                    "manual_exit_action": "scale_out",
+                    "manual_exit_qty": min(remaining_request, live_qty - 1),
+                    "force_exit_reason": "manual_scale_out",
+                })
+            else:
+                next_state["force_exit_reason"] = ""
+                for key in (
+                    "manual_exit_action",
+                    "manual_exit_qty",
+                    "manual_exit_percent",
+                    "manual_exit_requested_at",
+                    "manual_exit_request_id",
+                ):
+                    next_state.pop(key, None)
+        elif reason == "manual_close":
+            if live_qty > 0:
+                next_state.update({
+                    "manual_exit_action": "close_all",
+                    "manual_exit_qty": live_qty,
+                    "manual_exit_percent": 100.0,
+                    "force_exit_reason": "manual_close",
+                })
+            else:
+                next_state["force_exit_reason"] = ""
+        else:
+            next_state["force_exit_reason"] = reason
+
+        for key in (
+            "exit_order_id",
+            "exit_reason",
+            "exit_qty",
+            "exit_start_live_qty",
+            "exit_limit_price",
+            "exit_submitted_at",
+            "exit_order_status",
+            "remaining_qty",
+        ):
+            next_state.pop(key, None)
+
+        return next_state
+
+
     async def _reconcile_submitted_exit(
         self,
         *,
@@ -556,13 +705,11 @@ class AutoTradeEngine:
             return
 
         if not order_id:
-            retry_state = dict(state)
-            retry_state.update({
-                "phase": "active_synthetic",
-                "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
-                "last_exit_error": "exit order id missing; protection re-armed",
-                "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
-            })
+            retry_state = self._rearmed_exit_state(
+                state,
+                live_qty=live_qty,
+                error="exit order id missing; protection re-armed",
+            )
             self.store.upsert_runner_state(symbol, retry_state)
             return
 
@@ -572,16 +719,11 @@ class AutoTradeEngine:
             message = str(exc).lower()
             if "order not found" not in message and "40410000" not in message:
                 raise
-            retry_state = dict(state)
-            retry_state.update({
-                "phase": "active_synthetic",
-                "filled_qty": live_qty,
-                "qty": live_qty,
-                "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
-                "last_exit_error": str(exc),
-                "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
-            })
-            retry_state.pop("exit_order_id", None)
+            retry_state = self._rearmed_exit_state(
+                state,
+                live_qty=live_qty,
+                error=str(exc),
+            )
             self.store.upsert_runner_state(symbol, retry_state)
             self.store.log_event(
                 "synthetic_exit_missing_rearmed",
@@ -593,6 +735,34 @@ class AutoTradeEngine:
 
         status = str(order.get("status") or "").lower()
         if status == "filled":
+            # A scale-out (or any partial exit) must not detach the remaining
+            # shares from protection. If Alpaca still reports a live position,
+            # re-arm the same synthetic stop/target for exactly that quantity.
+            if live_qty > 0:
+                rearmed_state = self._rearmed_exit_state(
+                    state,
+                    live_qty=live_qty,
+                    order=order,
+                )
+                rearmed_state.update({
+                    "last_scale_out_at": datetime.now(timezone.utc).isoformat(),
+                    "last_scale_out_qty": int(self._safe_float(state.get("exit_qty"))),
+                    "last_scale_out_reason": str(state.get("exit_reason") or "partial_exit"),
+                })
+                self.store.upsert_runner_state(symbol, rearmed_state)
+                self.store.log_event(
+                    "synthetic_partial_exit_filled_rearmed",
+                    {
+                        "reason": state.get("exit_reason"),
+                        "remaining_qty": live_qty,
+                        "state": rearmed_state,
+                        "order": order,
+                    },
+                    symbol,
+                    strategy_id,
+                )
+                return
+
             self.store.delete_runner_state(symbol)
             self.store.log_event(
                 "synthetic_exit_filled",
@@ -603,16 +773,12 @@ class AutoTradeEngine:
             return
 
         if status in {"canceled", "cancelled", "expired", "rejected"}:
-            retry_state = dict(state)
-            retry_state.update({
-                "phase": "active_synthetic",
-                "filled_qty": live_qty,
-                "qty": live_qty,
-                "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
-                "last_exit_error": f"exit order {status}; protection re-armed",
-                "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
-            })
-            retry_state.pop("exit_order_id", None)
+            retry_state = self._rearmed_exit_state(
+                state,
+                live_qty=live_qty,
+                order=order,
+                error=f"exit order {status}; protection re-armed",
+            )
             self.store.upsert_runner_state(symbol, retry_state)
             self.store.log_event(
                 "synthetic_exit_rearmed",
@@ -632,16 +798,12 @@ class AutoTradeEngine:
         }:
             try:
                 alpaca.cancel_order(order_id)
-                retry_state = dict(state)
-                retry_state.update({
-                    "phase": "active_synthetic",
-                    "filled_qty": live_qty,
-                    "qty": live_qty,
-                    "force_exit_reason": str(state.get("exit_reason") or state.get("force_exit_reason") or ""),
-                    "last_exit_error": "unfilled exit canceled for a more marketable retry",
-                    "last_reconciled_at": datetime.now(timezone.utc).isoformat(),
-                })
-                retry_state.pop("exit_order_id", None)
+                retry_state = self._rearmed_exit_state(
+                    state,
+                    live_qty=live_qty,
+                    order=order,
+                    error="unfilled exit canceled for a more marketable retry",
+                )
                 self.store.upsert_runner_state(symbol, retry_state)
                 self.store.log_event(
                     "synthetic_exit_retry_requested",
