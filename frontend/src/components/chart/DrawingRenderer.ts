@@ -263,6 +263,60 @@ export class DrawingRenderer {
     ]);
   }
 
+  private getSeriesTimes(): number[] {
+    const values = this.priceSeries
+      .data()
+      .map((item) => Number(item.time))
+      .filter(Number.isFinite);
+
+    return values;
+  }
+
+  private snapTimeToSeries(
+    rawTime: number,
+    direction: "left" | "right" | "nearest" = "nearest",
+  ): number {
+    const times = this.getSeriesTimes();
+    if (times.length === 0 || !Number.isFinite(rawTime)) return rawTime;
+
+    let low = 0;
+    let high = times.length - 1;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const value = times[mid];
+
+      if (value === rawTime) return value;
+      if (value < rawTime) low = mid + 1;
+      else high = mid - 1;
+    }
+
+    const leftIndex = Math.max(0, high);
+    const rightIndex = Math.min(times.length - 1, low);
+    const left = times[leftIndex];
+    const right = times[rightIndex];
+
+    if (direction === "left") return left;
+    if (direction === "right") return right;
+
+    return Math.abs(rawTime - left) <= Math.abs(right - rawTime)
+      ? left
+      : right;
+  }
+
+  private getStableTrendlineAnchorTimes(
+    drawing: TrendlineDrawing,
+  ): { p1Time: number; p2Time: number } {
+    const rawP1 = Number(drawing.p1.time);
+    const rawP2 = Number(drawing.p2.time);
+    const forward = rawP1 <= rawP2;
+
+    return {
+      p1Time: this.snapTimeToSeries(rawP1, forward ? "left" : "right"),
+      p2Time: this.snapTimeToSeries(rawP2, forward ? "right" : "left"),
+    };
+  }
+
   private renderTrendline(drawing: TrendlineDrawing): void {
     const { p1Time, p1Price, p2Time, p2Price } =
       this.getRenderedTrendlinePoints(drawing);
@@ -681,13 +735,20 @@ export class DrawingRenderer {
     }
 
     if (drawing.type === "trendline") {
+      const { p1Time, p2Time } = this.getStableTrendlineAnchorTimes(drawing);
+
+      if (p1Time === p2Time) {
+        this.removeHandles(drawing.id);
+        return;
+      }
+
       series.setData([
         {
-          time: Number(drawing.p1.time) as Time,
+          time: p1Time as Time,
           value: Number(drawing.p1.price),
         },
         {
-          time: Number(drawing.p2.time) as Time,
+          time: p2Time as Time,
           value: Number(drawing.p2.price),
         },
       ]);
@@ -726,8 +787,8 @@ export class DrawingRenderer {
     p2Time: number;
     p2Price: number;
   } {
-    const p1Time = Number(drawing.p1.time);
-    const p2ActualTime = Number(drawing.p2.time);
+    const { p1Time, p2Time: p2ActualTime } =
+      this.getStableTrendlineAnchorTimes(drawing);
     const p1Price = Number(drawing.p1.price);
     const p2ActualPrice = Number(drawing.p2.price);
 
@@ -740,12 +801,22 @@ export class DrawingRenderer {
       };
     }
 
-    const visibleRange = this.chart.timeScale().getVisibleRange();
-    const visibleTo = Number(visibleRange?.to ?? p2ActualTime);
-    const finalTime = Math.max(p2ActualTime, visibleTo);
+    // Never add a synthetic timestamp to the Lightweight Charts time scale.
+    // A shared 1-minute trendline can contain times that do not exist on a
+    // 5m/15m/etc chart. Feeding those raw times into a LineSeries changes the
+    // chart's horizontal time points and can create a visible range feedback
+    // loop (the chart appears to vibrate). Extend only to an existing candle.
+    const seriesTimes = this.getSeriesTimes();
+    const lastSeriesTime =
+      seriesTimes.length > 0
+        ? seriesTimes[seriesTimes.length - 1]
+        : p2ActualTime;
+    const finalTime = Math.max(p2ActualTime, lastSeriesTime);
 
     const p1X = this.chart.timeScale().timeToCoordinate(p1Time as Time);
-    const p2X = this.chart.timeScale().timeToCoordinate(p2ActualTime as Time);
+    const p2X = this.chart
+      .timeScale()
+      .timeToCoordinate(p2ActualTime as Time);
     const finalX = this.chart.timeScale().timeToCoordinate(finalTime as Time);
     const p1Y = this.priceSeries.priceToCoordinate(p1Price);
     const p2Y = this.priceSeries.priceToCoordinate(p2ActualPrice);

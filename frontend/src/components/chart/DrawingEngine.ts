@@ -928,14 +928,66 @@ export class DrawingEngine {
     this.renderer.renderDrawing(drawing, this.selectedDrawingId);
   }
 
+  private getSeriesTimes(): number[] {
+    return this.priceSeries
+      .data()
+      .map((item) => Number(item.time))
+      .filter(Number.isFinite);
+  }
+
+  private snapTimeToSeries(
+    rawTime: number,
+    direction: "left" | "right" | "nearest" = "nearest",
+  ): number {
+    const times = this.getSeriesTimes();
+    if (times.length === 0 || !Number.isFinite(rawTime)) return rawTime;
+
+    let low = 0;
+    let high = times.length - 1;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const value = times[mid];
+
+      if (value === rawTime) return value;
+      if (value < rawTime) low = mid + 1;
+      else high = mid - 1;
+    }
+
+    const leftIndex = Math.max(0, high);
+    const rightIndex = Math.min(times.length - 1, low);
+    const left = times[leftIndex];
+    const right = times[rightIndex];
+
+    if (direction === "left") return left;
+    if (direction === "right") return right;
+
+    return Math.abs(rawTime - left) <= Math.abs(right - rawTime)
+      ? left
+      : right;
+  }
+
+  private getStableTrendlineAnchorTimes(
+    drawing: TrendlineDrawing,
+  ): { p1Time: number; p2Time: number } {
+    const rawP1 = Number(drawing.p1.time);
+    const rawP2 = Number(drawing.p2.time);
+    const forward = rawP1 <= rawP2;
+
+    return {
+      p1Time: this.snapTimeToSeries(rawP1, forward ? "left" : "right"),
+      p2Time: this.snapTimeToSeries(rawP2, forward ? "right" : "left"),
+    };
+  }
+
   private getRenderedTrendlinePoints(drawing: TrendlineDrawing): {
     p1Time: number;
     p1Price: number;
     p2Time: number;
     p2Price: number;
   } {
-    const p1Time = Number(drawing.p1.time);
-    const p2ActualTime = Number(drawing.p2.time);
+    const { p1Time, p2Time: p2ActualTime } =
+      this.getStableTrendlineAnchorTimes(drawing);
     const p1Price = Number(drawing.p1.price);
     const p2ActualPrice = Number(drawing.p2.price);
 
@@ -948,21 +1000,21 @@ export class DrawingEngine {
       };
     }
 
-    const visibleRange = this.chart.timeScale().getVisibleRange();
-    const visibleTo = Number(visibleRange?.to ?? p2ActualTime);
-    const finalTime = Math.max(p2ActualTime, visibleTo);
+    const seriesTimes = this.getSeriesTimes();
+    const lastSeriesTime =
+      seriesTimes.length > 0
+        ? seriesTimes[seriesTimes.length - 1]
+        : p2ActualTime;
+    const finalTime = Math.max(p2ActualTime, lastSeriesTime);
 
     const p1X = this.chart.timeScale().timeToCoordinate(p1Time as Time);
-    const p2X = this.chart.timeScale().timeToCoordinate(p2ActualTime as Time);
+    const p2X = this.chart
+      .timeScale()
+      .timeToCoordinate(p2ActualTime as Time);
     const finalX = this.chart.timeScale().timeToCoordinate(finalTime as Time);
     const p1Y = this.priceSeries.priceToCoordinate(p1Price);
     const p2Y = this.priceSeries.priceToCoordinate(p2ActualPrice);
 
-    // Important: Lightweight Charts draws time using logical bar spacing, not
-    // elapsed seconds. Extending by timestamp slope makes the line drift after
-    // market gaps / missing bars. Extend using screen coordinates, then convert
-    // the final Y back to a price. This keeps the rendered extension passing
-    // through the real snapped endpoints.
     if (
       p1X == null ||
       p2X == null ||
@@ -991,7 +1043,6 @@ export class DrawingEngine {
       p2Price: finalPrice,
     };
   }
-
   hitTestAt(point: DrawingPointerEvent): HitResult {
     const x = Number(point.x);
     const y = Number(point.y);
@@ -1128,13 +1179,14 @@ export class DrawingEngine {
     x: number,
     y: number,
   ): HitResult {
+    const { p1Time, p2Time } = this.getStableTrendlineAnchorTimes(drawing);
     const p1x = this.chart
       .timeScale()
-      .timeToCoordinate(Number(drawing.p1.time) as Time);
+      .timeToCoordinate(p1Time as Time);
     const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
     const p2x = this.chart
       .timeScale()
-      .timeToCoordinate(Number(drawing.p2.time) as Time);
+      .timeToCoordinate(p2Time as Time);
     const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
 
     if (p1x == null || p1y == null || p2x == null || p2y == null) return null;
