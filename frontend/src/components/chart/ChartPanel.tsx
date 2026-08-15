@@ -645,15 +645,89 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           }
         }
 
-        if (!change.isLive || !change.orderId) {
+        const resolveBracketLegOrderId = (
+          level: "stop" | "target",
+        ): string | null => {
+          const snapshot = executionService.getSnapshot();
+          const wantedSymbol = change.symbol.trim().toUpperCase();
+          const terminalStatuses = new Set([
+            "filled",
+            "canceled",
+            "cancelled",
+            "expired",
+            "replaced",
+            "rejected",
+            "done_for_day",
+          ]);
+          let resolved: string | null = null;
+
+          const visit = (
+            value: unknown,
+            inheritedSymbol = "",
+            nested = false,
+          ) => {
+            if (resolved || !value || typeof value !== "object") return;
+
+            const order = value as Record<string, unknown>;
+            const orderSymbol = String(order.symbol ?? inheritedSymbol)
+              .trim()
+              .toUpperCase();
+            const status = String(order.status ?? "").trim().toLowerCase();
+            const type = String(order.type ?? "").trim().toLowerCase();
+            const id = String(order.id ?? order.order_id ?? "").trim();
+            const stopPrice = Number(order.stop_price ?? 0);
+            const limitPrice = Number(order.limit_price ?? 0);
+            const active = !status || !terminalStatuses.has(status);
+
+            if (
+              nested &&
+              active &&
+              id &&
+              orderSymbol === wantedSymbol &&
+              ((level === "stop" &&
+                (stopPrice > 0 || type === "stop" || type === "stop_limit")) ||
+                (level === "target" &&
+                  limitPrice > 0 &&
+                  type === "limit" &&
+                  !(stopPrice > 0)))
+            ) {
+              resolved = id;
+              return;
+            }
+
+            const legs = Array.isArray(order.legs) ? order.legs : [];
+            for (const leg of legs) {
+              visit(leg, orderSymbol, true);
+              if (resolved) return;
+            }
+          };
+
+          for (const order of [
+            ...snapshot.rawOpenOrders,
+            ...snapshot.rawClosedOrders,
+          ]) {
+            visit(order);
+            if (resolved) break;
+          }
+
+          return resolved;
+        };
+
+        const resolvedOrderId =
+          change.orderId ||
+          (change.level === "stop" || change.level === "target"
+            ? resolveBracketLegOrderId(change.level)
+            : null);
+
+        if (!resolvedOrderId) {
           console.warn(
-            `[PositionOverlay] ${change.level} is local and cannot be sent to Alpaca.`,
+            `[PositionOverlay] could not resolve Alpaca order id for ${change.level}.`,
           );
           return false;
         }
 
         const updatedOrder = await executionService.modifyOrder(
-          change.orderId,
+          resolvedOrderId,
           change.level === "stop"
             ? { stop_price: change.price }
             : { limit_price: change.price },
@@ -668,7 +742,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             ? (updatedOrder as Record<string, unknown>)
             : null;
         const confirmedOrderId = String(
-          updatedOrderRecord?.id ?? change.orderId,
+          updatedOrderRecord?.id ?? resolvedOrderId,
         ).trim();
 
         const safeSymbol = change.symbol.trim().toUpperCase();
@@ -695,7 +769,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           const nextOrderIds = Array.from(
             new Set([
               ...(liveTrade.links.alpacaOrderIds ?? []),
-              change.orderId,
+              resolvedOrderId,
               confirmedOrderId,
             ]),
           );
@@ -1096,16 +1170,28 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           Number(leg.limit_price) > 0,
       );
 
+      const workingStop = Number(
+        stopLeg?.stop_price ?? workingOrder?.stopPrice ?? 0,
+      );
+      const workingTarget = Number(
+        targetLeg?.limit_price ?? workingOrder?.targetPrice ?? 0,
+      );
+
       positionOverlayRef.current?.updateWorkingOrder(
         workingOrder
           ? {
               id: workingOrder.id,
               symbol: workingOrder.symbol,
               entry: Number(workingOrder.limitPrice),
-              stop: Number(workingOrder.stopPrice ?? 0),
-              target: Number(workingOrder.targetPrice ?? 0),
+              stop: workingStop,
+              target: workingTarget,
               stopOrderId: stopLeg ? String(stopLeg.id ?? "") || null : null,
               targetOrderId: targetLeg ? String(targetLeg.id ?? "") || null : null,
+              // The bracket prices are actionable even when Alpaca temporarily
+              // omits a held leg id from the normalized parent. The commit
+              // handler resolves the actual child id from the raw nested order.
+              stopCanDrag: workingStop > 0,
+              targetCanDrag: workingTarget > 0,
             }
           : null,
       );

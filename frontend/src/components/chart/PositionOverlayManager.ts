@@ -153,6 +153,8 @@ export class PositionOverlayManager {
   private rewardShade: HTMLDivElement | null = null;
   private riskShade: HTMLDivElement | null = null;
   private orderControls: HTMLDivElement | null = null;
+  private stopDragControl: HTMLButtonElement | null = null;
+  private targetDragControl: HTMLButtonElement | null = null;
   private animationFrame: number | null = null;
   private activeDrag: ActiveDrag | null = null;
   private committing = false;
@@ -181,7 +183,7 @@ export class PositionOverlayManager {
     options: PositionOverlayManagerOptions = {},
   ) {
     this.priceSeries = priceSeries;
-    this.hitTolerancePx = Math.max(8, options.hitTolerancePx ?? 14);
+    this.hitTolerancePx = Math.max(12, options.hitTolerancePx ?? 20);
     this.onCommit = options.onCommit;
     this.onDragStateChange = options.onDragStateChange;
     this.onCancelOrder = options.onCancelOrder;
@@ -190,6 +192,18 @@ export class PositionOverlayManager {
       this.rewardShade = this.createShade(options.container, "rgba(34,197,94,.14)");
       this.riskShade = this.createShade(options.container, "rgba(239,68,68,.14)");
       this.orderControls = this.createOrderControls(options.container);
+      this.stopDragControl = this.createLevelDragControl(
+        options.container,
+        "stop",
+        "↕ STOP",
+        LIVE_STOP_COLOR,
+      );
+      this.targetDragControl = this.createLevelDragControl(
+        options.container,
+        "target",
+        "↕ TARGET",
+        LIVE_TARGET_COLOR,
+      );
       this.startShadeLoop();
     }
   }
@@ -260,8 +274,11 @@ export class PositionOverlayManager {
       entryOrderId: order.id,
       entryCanDrag: order.entryCanDrag ?? true,
       entryCanCancel: order.entryCanCancel ?? true,
-      stopCanDrag: order.stopCanDrag ?? Boolean(order.stopOrderId),
-      targetCanDrag: order.targetCanDrag ?? Boolean(order.targetOrderId),
+      // A bracket parent can expose the stop/target price before Alpaca
+      // exposes the held child-leg ids. The line must still be draggable;
+      // ChartPanel resolves the real child id at commit time.
+      stopCanDrag: order.stopCanDrag ?? safePrice(order.stop) > 0,
+      targetCanDrag: order.targetCanDrag ?? safePrice(order.target) > 0,
     };
 
     this.applyPendingPrices(next);
@@ -435,9 +452,13 @@ export class PositionOverlayManager {
     this.rewardShade?.remove();
     this.riskShade?.remove();
     this.orderControls?.remove();
+    this.stopDragControl?.remove();
+    this.targetDragControl?.remove();
     this.rewardShade = null;
     this.riskShade = null;
     this.orderControls = null;
+    this.stopDragControl = null;
+    this.targetDragControl = null;
 
     this.snapshot = {
       symbol: "",
@@ -645,6 +666,8 @@ export class PositionOverlayManager {
     this.placeShade(this.rewardShade, this.snapshot.entry, this.snapshot.target);
     this.placeShade(this.riskShade, this.snapshot.entry, this.snapshot.stop);
     this.placeOrderControls();
+    this.placeLevelDragControl(this.stopDragControl, "stop");
+    this.placeLevelDragControl(this.targetDragControl, "target");
   }
 
   private placeShade(shade: HTMLDivElement | null, first: number, second: number): void {
@@ -669,6 +692,81 @@ export class PositionOverlayManager {
     if (this.rewardShade) this.rewardShade.style.display = "none";
     if (this.riskShade) this.riskShade.style.display = "none";
     if (this.orderControls) this.orderControls.style.display = "none";
+    if (this.stopDragControl) this.stopDragControl.style.display = "none";
+    if (this.targetDragControl) this.targetDragControl.style.display = "none";
+  }
+
+  private createLevelDragControl(
+    container: HTMLDivElement,
+    level: "stop" | "target",
+    label: string,
+    borderColor: string,
+  ): HTMLButtonElement {
+    const control = document.createElement("button");
+    control.type = "button";
+    control.dataset.positionOrderControls = "true";
+    control.textContent = label;
+    control.title = `Drag ${level} price`;
+    control.style.position = "absolute";
+    control.style.right = "70px";
+    control.style.zIndex = "12";
+    control.style.display = "none";
+    control.style.transform = "translateY(-50%)";
+    control.style.height = "24px";
+    control.style.padding = "0 8px";
+    control.style.border = `1px solid ${borderColor}`;
+    control.style.borderRadius = "4px";
+    control.style.background = "#15181c";
+    control.style.color = borderColor;
+    control.style.font = "700 11px Inter,system-ui";
+    control.style.cursor = "ns-resize";
+    control.style.pointerEvents = "auto";
+
+    control.addEventListener("pointerdown", (event) => {
+      const canDrag =
+        level === "stop"
+          ? Boolean(this.snapshot.stopCanDrag)
+          : Boolean(this.snapshot.targetCanDrag);
+      const price = this.snapshot[level];
+
+      if (!canDrag || this.committing || price <= 0) return;
+
+      const y = this.priceSeries.priceToCoordinate(price);
+      if (y == null || !this.beginDrag(y)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    container.appendChild(control);
+    return control;
+  }
+
+  private placeLevelDragControl(
+    control: HTMLButtonElement | null,
+    level: "stop" | "target",
+  ): void {
+    if (!control) return;
+
+    const canDrag =
+      level === "stop"
+        ? Boolean(this.snapshot.stopCanDrag)
+        : Boolean(this.snapshot.targetCanDrag);
+    const price = this.snapshot[level];
+
+    if (!this.snapshot.hasPosition || !canDrag || price <= 0) {
+      control.style.display = "none";
+      return;
+    }
+
+    const y = this.priceSeries.priceToCoordinate(price);
+    if (y == null) {
+      control.style.display = "none";
+      return;
+    }
+
+    control.style.top = `${y}px`;
+    control.style.display = "block";
   }
 
   private createOrderControls(container: HTMLDivElement): HTMLDivElement {
