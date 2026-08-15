@@ -122,6 +122,11 @@ export type TradeHistoryEntry = {
   exitPrice: number;
   entryTime: string;
   exitTime?: string;
+  entryTimestamp?: string;
+  exitTimestamp?: string;
+  plannedTarget?: number;
+  plannedStop?: number;
+  strategy?: string;
   grossPnl: number;
   netPnl: number;
   commission: number;

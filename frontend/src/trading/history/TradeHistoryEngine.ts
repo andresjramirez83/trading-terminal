@@ -509,6 +509,11 @@ export class TradeHistoryEngine {
       exitTime: exitTimestamp
         ? formatDateTime(exitTimestamp)
         : undefined,
+      entryTimestamp,
+      exitTimestamp,
+      plannedTarget: getPrimaryTarget(trade),
+      plannedStop: safeNumber(trade.stop),
+      strategy: trade.strategy ?? trade.setup ?? "",
       grossPnl,
       netPnl,
       commission,

@@ -359,7 +359,12 @@ export default function TradingWorkspacePanel({
         performance={historyStore.performance}
       />
 
-      <TradeJournalWidget trades={historyStore.journalTrades} />
+      <TradeJournalWidget
+        trades={historyStore.journalTrades}
+        coachReviews={historyStore.vwap3CoachReviews}
+        coachStudy={historyStore.vwap3CoachStudy}
+        personalSummary={historyStore.vwap3CoachPersonalSummary}
+      />
     </div>
   );
 }

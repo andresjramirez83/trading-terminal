@@ -95,6 +95,25 @@ def _hit_archive_dir() -> Path:
     )
 
 
+def _setup_archive_dir() -> Path:
+    """Permanent, unbiased archive of every qualified VWAP3 setup.
+
+    The live state can be pruned aggressively for scanner performance, but the
+    coach needs winners, failures, and unresolved/expired setups so its entry
+    statistics are not trained only on target hits.
+    """
+    raw = os.getenv("VWAP3_SETUP_ARCHIVE_DIR", "").strip()
+    if raw:
+        path = Path(raw)
+        return path if path.is_absolute() else Path.cwd() / path
+    return (
+        Path(__file__).resolve().parents[1]
+        / "data"
+        / "scanner_history"
+        / "vwap3_setups"
+    )
+
+
 def _format_pt_time(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -383,26 +402,51 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
         return record
 
     target = _safe_float(record.get("target_price"))
+    freeze_price = _safe_float(record.get("freeze_price"))
     displacement_close = _safe_float(record.get("displacement_close"))
     displacement_high = _safe_float(record.get("displacement_high"))
+    displacement_low = _safe_float(record.get("displacement_low"))
 
     confirmation_time: Optional[str] = None
     strong_confirmation_time: Optional[str] = None
     target_hit_time: Optional[str] = None
+    invalidation_time: Optional[str] = None
+    min_low_after_freeze: Optional[float] = None
+    min_low_before_target: Optional[float] = None
+    min_low_before_target_time: Optional[str] = None
+    max_high_after_freeze: Optional[float] = None
+    bars_to_target: Optional[int] = None
 
     for idx in range(freeze_idx, len(rows)):
         row = rows[idx]
         close = _safe_float(row.get("close"))
         high = _safe_float(row.get("high"))
+        low = _safe_float(row.get("low"))
+        row_time = str(row.get("dt_et") or "") or None
+
+        # Entry-study path begins only AFTER the displacement/freeze candle has
+        # completed. The scanner cannot offer an entry inside the candle that
+        # created the signal, so including that candle's low would introduce
+        # hindsight into pullback statistics.
+        if idx > freeze_idx and low > 0:
+            min_low_after_freeze = low if min_low_after_freeze is None else min(min_low_after_freeze, low)
+            if target_hit_time is None and (min_low_before_target is None or low < min_low_before_target):
+                min_low_before_target = low
+                min_low_before_target_time = row_time
+        if idx > freeze_idx and high > 0:
+            max_high_after_freeze = high if max_high_after_freeze is None else max(max_high_after_freeze, high)
 
         if confirmation_time is None and close > displacement_close:
-            confirmation_time = str(row.get("dt_et") or "") or None
+            confirmation_time = row_time
         if strong_confirmation_time is None and close > displacement_high:
-            strong_confirmation_time = str(row.get("dt_et") or "") or None
+            strong_confirmation_time = row_time
+        if invalidation_time is None and idx > freeze_idx and displacement_low > 0 and low <= displacement_low:
+            invalidation_time = row_time
 
         # Target was not allowed to count until after the freeze confirmation.
         if idx > freeze_idx and target_hit_time is None and high >= target:
-            target_hit_time = str(row.get("dt_et") or "") or None
+            target_hit_time = row_time
+            bars_to_target = idx - freeze_idx
             break
 
     if target_hit_time:
@@ -414,6 +458,36 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
     else:
         status = "WAITING"
 
+    pullback_pct = 0.0
+    if freeze_price > 0 and min_low_before_target and min_low_before_target > 0:
+        pullback_pct = max(0.0, (freeze_price - min_low_before_target) / freeze_price * 100.0)
+    max_drawdown_pct = 0.0
+    if freeze_price > 0 and min_low_after_freeze and min_low_after_freeze > 0:
+        max_drawdown_pct = max(0.0, (freeze_price - min_low_after_freeze) / freeze_price * 100.0)
+    max_runup_pct = 0.0
+    if freeze_price > 0 and max_high_after_freeze and max_high_after_freeze > 0:
+        max_runup_pct = max(0.0, (max_high_after_freeze - freeze_price) / freeze_price * 100.0)
+
+    minutes_to_target: Optional[float] = None
+    if target_hit_time:
+        try:
+            freeze_dt = datetime.fromisoformat(str(record.get("freeze_time"))).astimezone(ET)
+            hit_dt = datetime.fromisoformat(target_hit_time).astimezone(ET)
+            minutes_to_target = round(max(0.0, (hit_dt - freeze_dt).total_seconds() / 60.0), 2)
+        except Exception:
+            minutes_to_target = None
+
+    if target_hit_time:
+        outcome = "target_hit"
+    elif invalidation_time:
+        outcome = "invalidated"
+    else:
+        try:
+            freeze_dt = datetime.fromisoformat(str(record.get("freeze_time"))).astimezone(ET)
+            outcome = "expired" if datetime.now(ET).date() > freeze_dt.date() else "active"
+        except Exception:
+            outcome = "active"
+
     record.update(
         {
             "confirmation_status": status,
@@ -421,9 +495,20 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
             "confirmation_time": confirmation_time,
             "strong_confirmation_time": strong_confirmation_time,
             "target_hit_time": target_hit_time,
+            "invalidation_time": invalidation_time,
+            "outcome": outcome,
             "confirmed": bool(confirmation_time),
             "strong_confirmed": bool(strong_confirmation_time),
             "target_hit": bool(target_hit_time),
+            "min_low_after_freeze": round(min_low_after_freeze, 6) if min_low_after_freeze else None,
+            "min_low_before_target": round(min_low_before_target, 6) if min_low_before_target else None,
+            "min_low_before_target_time": min_low_before_target_time,
+            "max_high_after_freeze": round(max_high_after_freeze, 6) if max_high_after_freeze else None,
+            "pullback_before_target_pct": round(pullback_pct, 3),
+            "max_drawdown_from_freeze_pct": round(max_drawdown_pct, 3),
+            "max_runup_from_freeze_pct": round(max_runup_pct, 3),
+            "bars_to_target": bars_to_target,
+            "minutes_to_target": minutes_to_target,
         }
     )
     return record
@@ -540,6 +625,53 @@ class VWAP3TargetScanner(ScannerBase):
                     f"[vwap3-hit-archive] save failed date={trade_date} error={exc}",
                     flush=True,
                 )
+
+    def _archive_all_setups(self) -> None:
+        """Persist every qualified setup, not only winners.
+
+        Records are upserted by setup_key on every scanner cycle so outcome and
+        post-freeze path statistics continue to improve as more bars arrive.
+        """
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for row in self._tracked.values():
+            trade_date = str(row.get("trade_date") or "").strip()
+            setup_key = str(row.get("setup_key") or "").strip()
+            if trade_date and setup_key:
+                groups.setdefault(trade_date, []).append(dict(row))
+
+        archive_dir = _setup_archive_dir()
+        for trade_date, rows in groups.items():
+            path = archive_dir / f"{trade_date}.json"
+            merged: Dict[str, Dict[str, Any]] = {}
+            try:
+                if path.exists():
+                    existing = json.loads(path.read_text())
+                    for old in existing.get("rows") or []:
+                        if isinstance(old, dict):
+                            key = str(old.get("setup_key") or "")
+                            if key:
+                                merged[key] = dict(old)
+            except Exception as exc:
+                print(f"[vwap3-setup-archive] existing load failed date={trade_date} error={exc}", flush=True)
+
+            for row in rows:
+                key = str(row.get("setup_key") or "")
+                if key:
+                    merged[key] = row
+
+            archived_rows = sorted(merged.values(), key=lambda row: str(row.get("freeze_time") or ""))
+            try:
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "scanner_id": self.id,
+                    "trade_date": trade_date,
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                    "count": len(archived_rows),
+                    "rows": archived_rows,
+                }
+                path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            except Exception as exc:
+                print(f"[vwap3-setup-archive] save failed date={trade_date} error={exc}", flush=True)
 
     def _cleanup_state(self, now_et: datetime) -> None:
         remove: List[str] = []
@@ -1164,6 +1296,7 @@ class VWAP3TargetScanner(ScannerBase):
             self._tracked[key] = row
 
         self._archive_target_hits()
+        self._archive_all_setups()
         self._cleanup_state(now_et)
         self._save_state()
 
@@ -1221,6 +1354,7 @@ class VWAP3TargetScanner(ScannerBase):
                 "active_count": len(active_rows),
                 "target_hit_count": len(target_hit_rows),
                 "target_hit_archive_dir": str(_hit_archive_dir()),
+                "setup_archive_dir": str(_setup_archive_dir()),
                 "pushover_configured": bool(
                     os.getenv("PUSHOVER_USER_KEY", "").strip()
                     and os.getenv("PUSHOVER_APP_TOKEN", "").strip()

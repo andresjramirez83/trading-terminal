@@ -1177,3 +1177,124 @@ export function connectChartV2BarsSocket(params: {
 
   return ws;
 }
+
+export type Vwap3TradeCoachEntryQuality = {
+  score: number;
+  label: string;
+  delay_minutes?: number | null;
+  entry_vs_freeze_pct?: number | null;
+  target_remaining_pct_at_entry?: number | null;
+  risk_to_displacement_low_pct?: number | null;
+};
+
+export type Vwap3TradeCoachReview = {
+  trade_id: string;
+  symbol: string;
+  reviewed_at: string;
+  scanner_match: boolean;
+  setup_key?: string;
+  scanner_grade?: string;
+  scanner_status?: string;
+  scanner_detected_at?: string;
+  freeze_time?: string;
+  freeze_price?: number;
+  frozen_target?: number;
+  displacement_low?: number;
+  displacement_high?: number;
+  entry_after_scanner?: boolean;
+  entry_quality?: Vwap3TradeCoachEntryQuality;
+  classification: string;
+  classification_label?: string;
+  confidence: number;
+  headline: string;
+  summary: string;
+  setup_valid_at_exit?: boolean;
+  target_hit_after_exit?: boolean;
+  target_hit_after_exit_time?: string | null;
+  minutes_exit_to_target?: number | null;
+  missed_upside_per_share?: number;
+  estimated_missed_pnl_to_target?: number;
+  mfe_after_exit_pct?: number;
+  path?: Record<string, unknown>;
+  historical_context?: {
+    study_days?: number;
+    sample_size?: number;
+    best_observed_pullback?: {
+      pullback_pct: number;
+      opportunities: number;
+      target_hits: number;
+      hit_rate_pct: number | null;
+    } | null;
+  };
+  scanner_setup?: Record<string, unknown>;
+};
+
+export type Vwap3TradeCoachReviewRequest = {
+  trade_id: string;
+  symbol: string;
+  side: string;
+  shares: number;
+  entry_price: number;
+  exit_price: number;
+  entry_time: string;
+  exit_time: string;
+  planned_target?: number;
+  planned_stop?: number;
+  strategy?: string;
+  realized_pnl?: number;
+  r_multiple?: number;
+};
+
+export async function reviewVwap3Trade(
+  payload: Vwap3TradeCoachReviewRequest,
+): Promise<Vwap3TradeCoachReview> {
+  const res = await fetch(`${API_BASE}/trading-coach/vwap3/review-trade`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(payload),
+  });
+  return parseJson<Vwap3TradeCoachReview>(res);
+}
+
+export type Vwap3StudyBucket = {
+  setups: number;
+  resolved: number;
+  target_hits: number;
+  invalidated: number;
+  expired: number;
+  hit_rate_pct: number | null;
+  median_pullback_before_target_pct: number | null;
+  median_minutes_to_target: number | null;
+};
+
+export type Vwap3StudyResponse = {
+  generated_at: string;
+  days: number;
+  overall: Vwap3StudyBucket;
+  by_grade: Record<string, Vwap3StudyBucket>;
+  pullback_entry_tests: Array<{
+    pullback_pct: number;
+    opportunities: number;
+    target_hits: number;
+    hit_rate_pct: number | null;
+  }>;
+  best_observed_pullback?: {
+    pullback_pct: number;
+    opportunities: number;
+    target_hits: number;
+    hit_rate_pct: number | null;
+  } | null;
+  notes: string[];
+};
+
+export async function fetchVwap3CoachStudy(
+  days = 30,
+): Promise<Vwap3StudyResponse> {
+  const qs = new URLSearchParams({ days: String(days) });
+  const res = await fetch(
+    `${API_BASE}/trading-coach/vwap3/study?${qs.toString()}`,
+    { cache: "no-store" },
+  );
+  return parseJson<Vwap3StudyResponse>(res);
+}
