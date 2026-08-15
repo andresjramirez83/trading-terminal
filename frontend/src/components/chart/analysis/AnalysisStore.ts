@@ -4,6 +4,10 @@ import type {
   FxAnalysisToolId,
 } from "./AnalysisTypes";
 import { API_BASE } from "../../../services/api";
+import {
+  fetchChartWorkspaceSync,
+  invalidateChartWorkspaceSync,
+} from "../ChartSyncClient";
 
 export type FxAnalysisPriceRange = {
   minValue: number;
@@ -121,6 +125,7 @@ export class AnalysisStore {
   private selectedResultId: string | null = null;
   private storageKey = makeStorageKey("SPY", "5m");
   private symbol = "SPY";
+  private timeframe = "5m";
   private listeners = new Set<AnalysisStoreListener>();
   private workspaceGeneration = 0;
   private remoteInitialized = false;
@@ -199,6 +204,7 @@ export class AnalysisStore {
     }
 
     this.symbol = String(symbol || "SPY").trim().toUpperCase();
+    this.timeframe = String(timeframe || "5m").trim().toLowerCase();
     this.storageKey = makeStorageKey(symbol, timeframe);
     this.previewByTool.clear();
     this.selectedResultId = null;
@@ -441,19 +447,11 @@ export class AnalysisStore {
   }
 
   private async fetchRemote(symbol: string): Promise<RemoteAnalysisDocument> {
-    const response = await fetch(this.remoteUrl(symbol), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `FX analysis load failed (${response.status}) for ${symbol}`,
-      );
-    }
-
-    const payload = (await response.json()) as Record<string, unknown>;
+    const snapshot = await fetchChartWorkspaceSync(
+      symbol,
+      this.timeframe,
+    );
+    const payload = snapshot.projections;
     const raw = Array.isArray(payload.projections)
       ? payload.projections
       : Array.isArray(payload.items)
@@ -509,6 +507,7 @@ export class AnalysisStore {
 
     const payload = (await response.json()) as Record<string, unknown>;
     const revision = Number(payload.revision ?? 0);
+    invalidateChartWorkspaceSync(symbol, this.timeframe);
     return Number.isFinite(revision) ? Math.max(0, revision) : 0;
   }
 

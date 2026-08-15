@@ -1,6 +1,10 @@
 // src/components/chart/DrawingStore.ts
 
 import { API_BASE } from "../../services/api";
+import {
+  fetchChartWorkspaceSync,
+  invalidateChartWorkspaceSync,
+} from "./ChartSyncClient";
 import type { ChartDrawing } from "./DrawingTypes";
 
 const STORAGE_PREFIX = "chart.drawings.v1";
@@ -468,19 +472,26 @@ export class DrawingStore {
     scopeName: string,
     scope: DrawingScope,
   ): Promise<RemoteDrawingDocument> {
-    const response = await fetch(this.remoteUrl(symbol, scopeName), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
+    // DrawingStore needs both timeframe drawings and shared market-structure
+    // drawings. ChartSyncClient coalesces these reads with AnalysisStore into
+    // one /chart/sync request for the workspace.
+    const snapshot = await fetchChartWorkspaceSync(
+      symbol,
+      this.timeframe,
+    );
 
-    if (!response.ok) {
+    const payload =
+      scope === "shared"
+        ? snapshot.drawings.shared
+        : snapshot.drawings.timeframe;
+
+    if (!payload) {
       throw new Error(
-        `Drawing load failed (${response.status}) for ${symbol}/${scopeName}`,
+        `Drawing load returned no ${scopeName} document for ${symbol}`,
       );
     }
 
-    return this.parseRemoteDocument(await response.json(), scope);
+    return this.parseRemoteDocument(payload, scope);
   }
 
   private parseRemoteDocument(
@@ -559,6 +570,7 @@ export class DrawingStore {
 
     const payload = (await response.json()) as Record<string, unknown>;
     const revision = Number(payload.revision ?? 0);
+    invalidateChartWorkspaceSync(symbol, timeframe);
     return Number.isFinite(revision) ? Math.max(0, revision) : 0;
   }
 

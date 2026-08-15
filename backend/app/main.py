@@ -1,7 +1,9 @@
 import asyncio
+import copy
 import json
 import os
 import threading
+import time
 import traceback
 import sys
 from contextlib import contextmanager
@@ -4011,6 +4013,12 @@ CHART_STORAGE_DIR = Path(__file__).resolve().parent / "data" / "chart_storage"
 CHART_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 CHART_STORAGE_LOCAL_LOCK = threading.RLock()
 
+# Hot-read cache for chart documents. Writes still use the existing file lock and
+# atomic replace path; GETs can serve unchanged JSON directly from memory.
+CHART_DOCUMENT_CACHE_LOCK = threading.RLock()
+CHART_DOCUMENT_CACHE: Dict[str, Dict[str, Any]] = {}
+CHART_DOCUMENT_CACHE_MAX_ENTRIES = 512
+
 
 def _clean_chart_part(value: str) -> str:
     cleaned = "".join(ch for ch in str(value).upper().strip() if ch.isalnum() or ch in {".", "-", "_"})
@@ -4093,6 +4101,65 @@ def _read_chart_document_unlocked(
         }
 
 
+def _chart_cache_signature(path: Path) -> Optional[tuple[int, int]]:
+    try:
+        stat = path.stat()
+        return (int(stat.st_mtime_ns), int(stat.st_size))
+    except FileNotFoundError:
+        return None
+
+
+def _chart_cache_key(path: Path) -> str:
+    return str(path.resolve())
+
+
+def _cache_chart_document(
+    path: Path,
+    document: Dict[str, Any],
+) -> Dict[str, Any]:
+    key = _chart_cache_key(path)
+    signature = _chart_cache_signature(path)
+    cached_document = {
+        "items": copy.deepcopy(document.get("items") or []),
+        "exists": bool(document.get("exists", False)),
+        "revision": max(0, int(document.get("revision") or 0)),
+        "updatedAt": document.get("updatedAt"),
+    }
+
+    with CHART_DOCUMENT_CACHE_LOCK:
+        if len(CHART_DOCUMENT_CACHE) >= CHART_DOCUMENT_CACHE_MAX_ENTRIES:
+            # Chart documents are tiny. Clearing occasionally is cheaper and safer
+            # than maintaining a complex eviction structure.
+            CHART_DOCUMENT_CACHE.clear()
+
+        CHART_DOCUMENT_CACHE[key] = {
+            "signature": signature,
+            "document": cached_document,
+        }
+
+    return copy.deepcopy(cached_document)
+
+
+def _read_chart_document_cached(
+    symbol: str,
+    scope: str,
+    kind: str,
+) -> Dict[str, Any]:
+    path = _chart_storage_file(symbol, scope, kind)
+    key = _chart_cache_key(path)
+    signature = _chart_cache_signature(path)
+
+    with CHART_DOCUMENT_CACHE_LOCK:
+        cached = CHART_DOCUMENT_CACHE.get(key)
+        if cached is not None and cached.get("signature") == signature:
+            return copy.deepcopy(cached["document"])
+
+    # Files are replaced atomically by the writer, so an unlocked read is safe:
+    # readers see either the previous complete file or the new complete file.
+    document = _read_chart_document_unlocked(symbol, scope, kind)
+    return _cache_chart_document(path, document)
+
+
 def _read_chart_document(
     symbol: str,
     scope: str,
@@ -4156,6 +4223,15 @@ def _write_chart_document_unlocked(
     )
     tmp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp_file.replace(path)
+    _cache_chart_document(
+        path,
+        {
+            "items": items,
+            "exists": True,
+            "revision": revision,
+            "updatedAt": updated_at,
+        },
+    )
     return payload
 
 
@@ -4246,7 +4322,7 @@ def _mutate_chart_item(
 
 @app.get("/chart/trendlines/{symbol}/{scope}")
 def get_chart_trendlines(symbol: str, scope: str):
-    document = _read_chart_document(symbol, scope, "trendlines")
+    document = _read_chart_document_cached(symbol, scope, "trendlines")
     rows = document["items"]
     return {"trendlines": rows, **document}
 
@@ -4258,7 +4334,7 @@ def put_chart_trendlines(symbol: str, scope: str, items: Any = Body(default=[]))
 
 @app.get("/chart/projections/{symbol}/{scope}")
 def get_chart_projections(symbol: str, scope: str):
-    document = _read_chart_document(symbol, scope, "projections")
+    document = _read_chart_document_cached(symbol, scope, "projections")
     rows = document["items"]
     return {"projections": rows, **document}
 
@@ -4285,7 +4361,7 @@ def clear_chart_projections(symbol: str, scope: str):
 
 @app.get("/chart/drawings/{symbol}/{scope}")
 def get_chart_drawings(symbol: str, scope: str):
-    document = _read_chart_document(symbol, scope, "drawings")
+    document = _read_chart_document_cached(symbol, scope, "drawings")
     rows = document["items"]
     return {"drawings": rows, **document}
 
@@ -4309,6 +4385,45 @@ def remove_chart_drawing(symbol: str, scope: str, payload: dict = Body(default={
 def clear_chart_drawings(symbol: str, scope: str):
     return _mutate_chart_item(symbol, scope, "drawings", "clear")
 
+
+
+@app.get("/chart/sync/{symbol}/{timeframe}")
+def get_chart_workspace_sync(symbol: str, timeframe: str):
+    """Return all read-only chart persistence state needed by one workspace.
+
+    DrawingStore and AnalysisStore used to make three separate requests every
+    poll: timeframe drawings, shared market-structure drawings, and analysis
+    projections. This endpoint serves all three from the hot document cache in
+    one round trip. Existing write endpoints remain unchanged.
+    """
+    timeframe_drawings = _read_chart_document_cached(
+        symbol, timeframe, "drawings"
+    )
+    shared_drawings = _read_chart_document_cached(
+        symbol, "shared", "drawings"
+    )
+    projections = _read_chart_document_cached(
+        symbol, "analysis", "projections"
+    )
+
+    return {
+        "symbol": _clean_chart_part(symbol),
+        "timeframe": _clean_chart_part(timeframe),
+        "drawings": {
+            "timeframe": {
+                "drawings": timeframe_drawings["items"],
+                **timeframe_drawings,
+            },
+            "shared": {
+                "drawings": shared_drawings["items"],
+                **shared_drawings,
+            },
+        },
+        "projections": {
+            "projections": projections["items"],
+            **projections,
+        },
+    }
 
 
 @app.get("/auto-trade/status")
@@ -4351,6 +4466,48 @@ async def auto_trade_check_once():
         results.append(await asyncio.to_thread(_auto_trade_try_execute, symbol))
     return {"symbols": symbols, "results": results, "status": _auto_trade_status_payload()}
 
+# Very short broker-snapshot cache. This only deduplicates mounts/manual
+# refreshes that arrive together; the normal 8-second UI refresh still reaches
+# Alpaca, so trading/account data does not become meaningfully stale.
+ALPACA_SNAPSHOT_CACHE_TTL_SECONDS = 2.0
+ALPACA_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
+ALPACA_SNAPSHOT_IN_FLIGHT: Dict[str, asyncio.Task] = {}
+
+
+async def _fetch_alpaca_snapshot_from_broker(
+    mode: str,
+    status: str,
+    limit: int,
+    nested: bool,
+) -> Dict[str, Any]:
+    account_service = get_alpaca_service(mode)
+    positions_service = get_alpaca_service(mode)
+    orders_service = get_alpaca_service(mode)
+
+    account_task = asyncio.to_thread(account_service.get_account)
+    positions_task = asyncio.to_thread(positions_service.get_positions)
+    orders_task = asyncio.to_thread(
+        orders_service.get_orders,
+        status=status,
+        limit=limit,
+        nested=nested,
+    )
+
+    account, positions, orders = await asyncio.gather(
+        account_task,
+        positions_task,
+        orders_task,
+    )
+
+    return {
+        "mode": (mode or "paper").strip().lower(),
+        "account": account,
+        "positions": positions if isinstance(positions, list) else [],
+        "orders": orders if isinstance(orders, list) else [],
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.get("/alpaca/snapshot")
 async def alpaca_snapshot(
     mode: str = Query("paper"),
@@ -4360,54 +4517,51 @@ async def alpaca_snapshot(
 ):
     """Fetch account, positions, and orders in one browser request.
 
-    The three Alpaca calls run concurrently on worker threads so this endpoint
-    keeps roughly the latency of the slowest broker call instead of summing
-    all three response times.
+    The broker calls run concurrently. A two-second in-process cache also
+    deduplicates simultaneous consumers without slowing the normal UI refresh.
     """
-    print(
-        "ALPACA SNAPSHOT ROUTE HIT:",
-        mode,
-        status,
-        limit,
-        "nested=",
-        nested,
-        flush=True,
-    )
+    normalized_mode = (mode or "paper").strip().lower()
+    cache_key = f"{normalized_mode}:{status}:{limit}:{int(bool(nested))}"
+    now = time.monotonic()
+
+    cached = ALPACA_SNAPSHOT_CACHE.get(cache_key)
+    if cached is not None:
+        age = now - float(cached.get("stored_at") or 0.0)
+        if age <= ALPACA_SNAPSHOT_CACHE_TTL_SECONDS:
+            payload = copy.deepcopy(cached["payload"])
+            payload["cache_hit"] = True
+            return payload
+
+    task = ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _fetch_alpaca_snapshot_from_broker(
+                normalized_mode,
+                status,
+                limit,
+                nested,
+            )
+        )
+        ALPACA_SNAPSHOT_IN_FLIGHT[cache_key] = task
 
     try:
-        account_service = get_alpaca_service(mode)
-        positions_service = get_alpaca_service(mode)
-        orders_service = get_alpaca_service(mode)
-
-        account_task = asyncio.to_thread(account_service.get_account)
-        positions_task = asyncio.to_thread(positions_service.get_positions)
-        orders_task = asyncio.to_thread(
-            orders_service.get_orders,
-            status=status,
-            limit=limit,
-            nested=nested,
-        )
-
-        account, positions, orders = await asyncio.gather(
-            account_task,
-            positions_task,
-            orders_task,
-        )
-
-        print("ALPACA SNAPSHOT SUCCESS", flush=True)
-        return {
-            "mode": (mode or "paper").strip().lower(),
-            "account": account,
-            "positions": positions if isinstance(positions, list) else [],
-            "orders": orders if isinstance(orders, list) else [],
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        payload = await task
+        ALPACA_SNAPSHOT_CACHE[cache_key] = {
+            "stored_at": time.monotonic(),
+            "payload": copy.deepcopy(payload),
         }
+        result = copy.deepcopy(payload)
+        result["cache_hit"] = False
+        return result
     except HTTPException:
         raise
     except Exception as exc:
         print("ALPACA SNAPSHOT ERROR:", repr(exc), flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=502, detail=str(exc))
+    finally:
+        if ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key) is task:
+            ALPACA_SNAPSHOT_IN_FLIGHT.pop(cache_key, None)
 
 
 @app.get("/alpaca/account")
