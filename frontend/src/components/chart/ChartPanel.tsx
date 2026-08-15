@@ -28,7 +28,7 @@ import LeftDrawingBar from "./LeftDrawingBar";
 import RightInfoPanel from "./RightInfoPanel";
 import { DrawingEngine } from "./DrawingEngine";
 import { MarketObjectDrawingBridge } from "./analysis/market-objects/MarketObjectDrawingBridge";
-import { ChartIntelligenceBridge } from "../../trading/intelligence/integration/ChartIntelligenceBridge";
+import type { ChartIntelligenceBridge } from "../../trading/intelligence/integration/ChartIntelligenceBridge";
 import { TrendlineTool } from "./interaction/tools/TrendlineTool";
 import { HorizontalLineTool } from "./interaction/tools/HorizontalLineTool";
 import { RectangleTool } from "./interaction/tools/RectangleTool";
@@ -616,12 +616,47 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       { symbol, timeframe },
     );
     marketObjectDrawingBridge.start();
-    const chartIntelligenceBridge = new ChartIntelligenceBridge({
-      mode: marketDataMode === "replay" ? "replay" : "live",
-      onError: (error) => {
-        console.error("Chart intelligence evaluation failed", error);
-      },
-    });
+    let chartIntelligenceBridge: ChartIntelligenceBridge | null = null;
+    let intelligenceLoadTimer: number | null = null;
+    let intelligenceLoadCancelled = false;
+
+    const loadChartIntelligence = async () => {
+      try {
+        const module = await import(
+          "../../trading/intelligence/integration/ChartIntelligenceBridge"
+        );
+
+        if (intelligenceLoadCancelled) return;
+
+        chartIntelligenceBridge = new module.ChartIntelligenceBridge({
+          mode: marketDataMode === "replay" ? "replay" : "live",
+          onError: (error) => {
+            console.error("Chart intelligence evaluation failed", error);
+          },
+        });
+        chartIntelligenceBridgeRef.current = chartIntelligenceBridge;
+
+        const currentState = engine.getState();
+        if (currentState.bars.length > 0) {
+          chartIntelligenceBridge.update(
+            currentState,
+            "startup-intelligence-ready",
+          );
+        }
+      } catch (error) {
+        if (!intelligenceLoadCancelled) {
+          console.error("Failed to load chart intelligence", error);
+        }
+      }
+    };
+
+    // Keep the chart/trading shell on the critical startup path and load the
+    // heavier Decision Center intelligence shortly afterward.
+    intelligenceLoadTimer = window.setTimeout(
+      () => void loadChartIntelligence(),
+      900,
+    );
+
     const tradeEngine = getSharedTradeEngine({ symbol, timeframe });
 
     engine.setStudyVisibility(studyVisibility);
@@ -656,7 +691,6 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     engineRef.current = engine;
     drawingEngineRef.current = drawingEngine;
     marketObjectDrawingBridgeRef.current = marketObjectDrawingBridge;
-    chartIntelligenceBridgeRef.current = chartIntelligenceBridge;
     tradeEngineRef.current = tradeEngine;
 
     const executionService = getSharedExecutionGateway();
@@ -1027,7 +1061,12 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       container.style.cursor = "";
       tradeController.detach();
       tradeControllerRef.current = null;
-      chartIntelligenceBridge.destroy();
+      intelligenceLoadCancelled = true;
+      if (intelligenceLoadTimer != null) {
+        window.clearTimeout(intelligenceLoadTimer);
+        intelligenceLoadTimer = null;
+      }
+      chartIntelligenceBridge?.destroy();
       if (chartIntelligenceBridgeRef.current === chartIntelligenceBridge) {
         chartIntelligenceBridgeRef.current = null;
       }

@@ -1,13 +1,30 @@
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import type { RightPanelWorkspace } from "./right-panel/RightPanelTypes";
 import type { ChartState } from "./ChartState";
-import { DecisionCenterProvider } from "./right-panel/DecisionCenterContext";
 
-import ChartWorkspacePanel from "./right-panel/workspaces/ChartWorkspacePanel";
-import TradingWorkspacePanel from "./right-panel/workspaces/trading/TradingWorkspacePanel";
-import WatchlistsWorkspacePanel from "./right-panel/workspaces/WatchlistsWorkspacePanel";
-import ScannerWorkspacePanel from "./right-panel/workspaces/ScannerWorkspacePanel";
-import NewsWorkspacePanel from "./right-panel/workspaces/NewsWorkspacePanel";
+const ChartWorkspacePanel = lazy(
+  () => import("./right-panel/workspaces/ChartWorkspacePanel"),
+);
+const TradingWorkspacePanel = lazy(
+  () =>
+    import(
+      "./right-panel/workspaces/trading/TradingWorkspacePanel"
+    ),
+);
+const WatchlistsWorkspacePanel = lazy(
+  () => import("./right-panel/workspaces/WatchlistsWorkspacePanel"),
+);
+const ScannerWorkspacePanel = lazy(
+  () => import("./right-panel/workspaces/ScannerWorkspacePanel"),
+);
+const NewsWorkspacePanel = lazy(
+  () => import("./right-panel/workspaces/NewsWorkspacePanel"),
+);
+const DecisionCenterProvider = lazy(() =>
+  import("./right-panel/DecisionCenterContext").then((module) => ({
+    default: module.DecisionCenterProvider,
+  })),
+);
 
 type Props = {
   symbol: string;
@@ -23,6 +40,26 @@ const WORKSPACES: { id: RightPanelWorkspace; label: string }[] = [
   { id: "scanner", label: "Scanner" },
   { id: "news", label: "News" },
 ];
+
+function WorkspaceLoading() {
+  return (
+    <div
+      style={{
+        minHeight: 92,
+        display: "grid",
+        placeItems: "center",
+        border: "1px solid rgba(148,163,184,.14)",
+        borderRadius: 10,
+        background: "rgba(15,23,42,.45)",
+        color: "#94a3b8",
+        fontSize: 11,
+        fontWeight: 700,
+      }}
+    >
+      Loading workspace…
+    </div>
+  );
+}
 
 export default function RightInfoPanel({
   symbol,
@@ -150,16 +187,20 @@ export default function RightInfoPanel({
         </div>
       </div>
 
-      <DecisionCenterProvider chartState={chartState}>
-        <div
-          style={{
-            flex: 1,
-            minHeight: 0,
-            overflowY: "auto",
-            padding: 10,
-          }}
-        >
-          {workspace === "chart" && <ChartWorkspacePanel />}
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          padding: 10,
+        }}
+      >
+        <Suspense fallback={<WorkspaceLoading />}>
+          {workspace === "chart" && (
+            <DecisionCenterProvider chartState={chartState}>
+              <ChartWorkspacePanel />
+            </DecisionCenterProvider>
+          )}
 
           {workspace === "trade" && (
             <TradingWorkspacePanel
@@ -173,8 +214,8 @@ export default function RightInfoPanel({
           {workspace === "scanner" && <ScannerWorkspacePanel />}
 
           {workspace === "news" && <NewsWorkspacePanel />}
-        </div>
-      </DecisionCenterProvider>
+        </Suspense>
+      </div>
     </aside>
   );
 }

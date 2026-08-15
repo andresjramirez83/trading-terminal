@@ -1,11 +1,9 @@
 import { lazy, Suspense, useState, type CSSProperties } from "react";
 import AccountWidget from "./AccountWidget";
 import QuickOrderWidget from "./QuickOrderWidget";
-import TradePlanWidget from "./TradePlanWidget";
 import CurrentPositionWidget from "./CurrentPositionWidget";
 import OpenOrdersWidget from "./OpenOrdersWidget";
 import FilledOrdersWidget from "./FilledOrdersWidget";
-import AutoTradeWidget from "./AutoTradeWidget";
 import TradeJournalWidget from "./TradeJournalWidget";
 import PerformanceWidget from "./PerformanceWidget";
 import { useTradeEngineStore } from "../../../../../trading/hooks/useTradeEngineStore";
@@ -17,6 +15,9 @@ type TradingWorkspacePanelProps = {
   symbol: string;
   currentPrice: number;
 };
+
+const AutoTradeWidget = lazy(() => import("./AutoTradeWidget"));
+const TradePlanWidget = lazy(() => import("./TradePlanWidget"));
 
 const DailyPracticeUniverseWidget = lazy(
   () => import("./DailyPracticeUniverseWidget"),
@@ -305,26 +306,30 @@ export default function TradingWorkspacePanel({
           )}
 
           {activeTab === "auto" && (
-            <AutoTradeWidget
-              symbol={safeSymbol}
-              currentPrice={safePrice}
-              mode={store.executionMode === "live" ? "live" : "paper"}
-            />
+            <Suspense fallback={<ModuleLoading label="Auto Trade" />}>
+              <AutoTradeWidget
+                symbol={safeSymbol}
+                currentPrice={safePrice}
+                mode={store.executionMode === "live" ? "live" : "paper"}
+              />
+            </Suspense>
           )}
 
           {activeTab === "plan" && (
-            <TradePlanWidget
-              plan={store.tradePlan}
-              stats={store.tradePlanStats}
-              currentPrice={safePrice}
-              tradeStatus={store.selectedTrade?.status ?? null}
-              alpacaOrderCount={activeAlpacaOrderCount}
-              executionLoading={store.executionLoading}
-              executionMessage={store.executionMessage}
-              onChange={store.updateTradePlan}
-              onSendToOrder={handleSendPlanToOrder}
-              onSendToPosition={store.syncPlanToPosition}
-            />
+            <Suspense fallback={<ModuleLoading label="Plan Trade" />}>
+              <TradePlanWidget
+                plan={store.tradePlan}
+                stats={store.tradePlanStats}
+                currentPrice={safePrice}
+                tradeStatus={store.selectedTrade?.status ?? null}
+                alpacaOrderCount={activeAlpacaOrderCount}
+                executionLoading={store.executionLoading}
+                executionMessage={store.executionMessage}
+                onChange={store.updateTradePlan}
+                onSendToOrder={handleSendPlanToOrder}
+                onSendToPosition={store.syncPlanToPosition}
+              />
+            </Suspense>
           )}
         </div>
       </section>
@@ -403,6 +408,14 @@ export default function TradingWorkspacePanel({
   );
 }
 
+function ModuleLoading({ label }: { label: string }) {
+  return (
+    <div style={styles.moduleLoading}>
+      Loading {label}…
+    </div>
+  );
+}
+
 function StatusMetric({ label, value }: { label: string; value: string }) {
   return (
     <div style={styles.statusMetric}>
@@ -413,6 +426,14 @@ function StatusMetric({ label, value }: { label: string; value: string }) {
 }
 
 const styles: Record<string, CSSProperties> = {
+  moduleLoading: {
+    minHeight: 90,
+    display: "grid",
+    placeItems: "center",
+    color: "#94a3b8",
+    fontSize: 11,
+    fontWeight: 700,
+  },
   practiceToggleCard: {
     display: "flex",
     alignItems: "center",
