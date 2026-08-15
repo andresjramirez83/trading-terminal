@@ -6,6 +6,7 @@ import { getSharedTradeHistoryEngine } from "../history/TradeHistoryEngine";
 import { getSharedTradeEngine } from "../engine/TradeEngineRuntime";
 import { getSharedExecutionGateway } from "../execution/ExecutionGateway";
 import { getSharedExecutionModeRuntime } from "../execution/router/ExecutionModeRuntime";
+import { useVwap3TradeCoach } from "./useVwap3TradeCoach";
 
 export function useTradeHistoryStore() {
   const gateway = getSharedExecutionGateway();
@@ -74,19 +75,32 @@ export function useTradeHistoryStore() {
     };
   }, [gateway, historyEngine, modeRuntime, tradeEngine]);
 
+  const tradeHistory = useMemo(
+    () => historyEngine.getTradeHistory(),
+    [historyEngine, historyRevision],
+  );
+  const vwap3Coach = useVwap3TradeCoach(tradeHistory);
+
   return useMemo(
     () => ({
       filledOrders: historyEngine.getFilledOrders(),
-      tradeHistory: historyEngine.getTradeHistory(),
+      tradeHistory,
       journalTrades: historyEngine.getJournal(),
       performance: historyEngine.getPerformance(),
+      vwap3CoachReviews: vwap3Coach.reviews,
+      vwap3CoachStudy: vwap3Coach.study,
+      vwap3CoachPersonalSummary: vwap3Coach.personalSummary,
       connectionStatus: snapshot.connectionStatus,
       loading: snapshot.loading,
       updatedAt: snapshot.updatedAt,
     }),
     [
       historyEngine,
+      tradeHistory,
       historyRevision,
+      vwap3Coach.reviews,
+      vwap3Coach.study,
+      vwap3Coach.personalSummary,
       snapshot.connectionStatus,
       snapshot.loading,
       snapshot.updatedAt,
