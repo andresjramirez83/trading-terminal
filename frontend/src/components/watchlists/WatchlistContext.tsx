@@ -631,7 +631,33 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(watchlists));
+    // Scanner watchlists are runtime data refreshed from the backend every 45s.
+    // Persisting every scanner row (price, volume, notes, scores, etc.) can easily
+    // exceed the browser's localStorage quota and crash the React tree.  Only the
+    // small manual list needs local persistence; the backend remains authoritative.
+    const manual = watchlists.find((watchlist) => watchlist.id === "manual");
+    const compactWatchlists: Watchlist[] = [
+      {
+        id: "manual",
+        name: manual?.name ?? DEFAULT_WATCHLISTS[0].name,
+        type: "manual",
+        description:
+          manual?.description ?? DEFAULT_WATCHLISTS[0].description ?? "",
+        symbols: uniqueSymbolStrings(
+          (manual?.symbols ?? []).map((item) => item.symbol)
+        ).map((symbol) => ({ symbol })),
+      },
+    ];
+
+    try {
+      window.localStorage.setItem(
+        WATCHLIST_STORAGE_KEY,
+        JSON.stringify(compactWatchlists)
+      );
+    } catch (error) {
+      // Browser storage must never be allowed to take down the trading terminal.
+      console.warn("[WatchlistContext] local watchlist persistence skipped", error);
+    }
   }, [watchlists]);
 
   useEffect(() => {
@@ -673,7 +699,14 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    window.localStorage.setItem(ACTIVE_WATCHLIST_STORAGE_KEY, activeWatchlistId);
+    try {
+      window.localStorage.setItem(
+        ACTIVE_WATCHLIST_STORAGE_KEY,
+        activeWatchlistId
+      );
+    } catch (error) {
+      console.warn("[WatchlistContext] active watchlist persistence skipped", error);
+    }
   }, [activeWatchlistId]);
 
   useEffect(() => {
