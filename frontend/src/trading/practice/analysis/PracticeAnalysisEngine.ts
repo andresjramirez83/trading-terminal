@@ -34,6 +34,48 @@ const DEFAULT_PIVOT_STRENGTH = 2;
 const DEFAULT_COMPRESSION_LOOKBACK = 8;
 const DEFAULT_VOLUME_LOOKBACK = 20;
 
+const MAX_PERSISTED_STORAGE_CHARACTERS = 3_250_000;
+const MAX_COMPONENT_REASONS = 6;
+const MAX_STRENGTHS = 8;
+const MAX_RISKS = 8;
+const MAX_TAGS = 12;
+
+interface StorageCompactionProfile {
+  maxDays: number;
+  maxSymbolsPerDay: number;
+  maxEventsPerSection: number;
+  maxSetupsPerSymbol: number;
+  maxRecommendationsPerSymbol: number;
+  maxDayRecommendations: number;
+}
+
+const STORAGE_COMPACTION_PROFILES: StorageCompactionProfile[] = [
+  {
+    maxDays: 7,
+    maxSymbolsPerDay: 24,
+    maxEventsPerSection: 24,
+    maxSetupsPerSymbol: 10,
+    maxRecommendationsPerSymbol: 6,
+    maxDayRecommendations: 40,
+  },
+  {
+    maxDays: 4,
+    maxSymbolsPerDay: 16,
+    maxEventsPerSection: 12,
+    maxSetupsPerSymbol: 8,
+    maxRecommendationsPerSymbol: 5,
+    maxDayRecommendations: 28,
+  },
+  {
+    maxDays: 2,
+    maxSymbolsPerDay: 10,
+    maxEventsPerSection: 6,
+    maxSetupsPerSymbol: 6,
+    maxRecommendationsPerSymbol: 4,
+    maxDayRecommendations: 18,
+  },
+];
+
 type Listener = () => void;
 
 interface PivotPoint {
@@ -1497,6 +1539,171 @@ function createEmptyStorage(): PracticeAnalysisStorage {
   };
 }
 
+function isStorageQuotaError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    name?: string;
+    code?: number;
+  };
+
+  return (
+    candidate.name === "QuotaExceededError" ||
+    candidate.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+    candidate.code === 22 ||
+    candidate.code === 1014
+  );
+}
+
+function compactSymbolAnalysis(
+  analysis: PracticeSymbolAnalysis,
+  profile: StorageCompactionProfile,
+): PracticeSymbolAnalysis {
+  const trimReasons = (reasons: string[]): string[] =>
+    reasons.slice(0, MAX_COMPONENT_REASONS);
+
+  return {
+    ...analysis,
+    trend: {
+      ...analysis.trend,
+      reasons: trimReasons(analysis.trend.reasons),
+    },
+    structure: {
+      ...analysis.structure,
+      reasons: trimReasons(analysis.structure.reasons),
+    },
+    liquidity: {
+      ...analysis.liquidity,
+      reasons: trimReasons(analysis.liquidity.reasons),
+      events: analysis.liquidity.events.slice(
+        -profile.maxEventsPerSection,
+      ),
+    },
+    gaps: {
+      ...analysis.gaps,
+      reasons: trimReasons(analysis.gaps.reasons),
+      events: analysis.gaps.events.slice(
+        -profile.maxEventsPerSection,
+      ),
+    },
+    vwap: {
+      ...analysis.vwap,
+      reasons: trimReasons(analysis.vwap.reasons),
+      interactions: analysis.vwap.interactions.slice(
+        -profile.maxEventsPerSection,
+      ),
+    },
+    openingRange: {
+      ...analysis.openingRange,
+      reasons: trimReasons(analysis.openingRange.reasons),
+    },
+    compression: {
+      ...analysis.compression,
+      reasons: trimReasons(analysis.compression.reasons),
+    },
+    volatility: {
+      ...analysis.volatility,
+      reasons: trimReasons(analysis.volatility.reasons),
+    },
+    volume: {
+      ...analysis.volume,
+      reasons: trimReasons(analysis.volume.reasons),
+    },
+    setups: analysis.setups
+      .slice(0, profile.maxSetupsPerSymbol)
+      .map((setup) => ({
+        ...setup,
+        reasons: setup.reasons.slice(0, MAX_COMPONENT_REASONS),
+        tags: setup.tags.slice(0, MAX_TAGS),
+      })),
+    recommendations: analysis.recommendations.slice(
+      0,
+      profile.maxRecommendationsPerSymbol,
+    ),
+    strengths: analysis.strengths.slice(0, MAX_STRENGTHS),
+    risks: analysis.risks.slice(0, MAX_RISKS),
+    tags: analysis.tags.slice(0, MAX_TAGS),
+  };
+}
+
+function compactDayAnalysis(
+  day: PracticeDayAnalysis,
+  profile: StorageCompactionProfile,
+): PracticeDayAnalysis {
+  const symbols = day.symbols
+    .slice(0, profile.maxSymbolsPerDay)
+    .map((analysis) =>
+      compactSymbolAnalysis(analysis, profile),
+    );
+
+  const recommendations = symbols
+    .flatMap((analysis) => analysis.recommendations)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, profile.maxDayRecommendations);
+
+  const findTopSymbol = (
+    category: PracticeReplayRecommendation["category"],
+  ): string | undefined => {
+    return recommendations.find(
+      (recommendation) =>
+        recommendation.category === category,
+    )?.symbol;
+  };
+
+  return {
+    ...day,
+    symbolCount: symbols.length,
+    analyzedSymbolCount: symbols.length,
+    symbols,
+    recommendations,
+    topOverallSymbol:
+      findTopSymbol("best_overall") ?? symbols[0]?.symbol,
+    topTrendSymbol: findTopSymbol("best_trend"),
+    topOpeningRangeBreakSymbol: findTopSymbol(
+      "best_opening_range_break",
+    ),
+    topIfvgSymbol: findTopSymbol("best_ifvg"),
+    topLiquiditySweepSymbol: findTopSymbol(
+      "best_liquidity_sweep",
+    ),
+    topReversalSymbol: findTopSymbol("best_reversal"),
+    topMomentumSymbol: findTopSymbol("best_momentum"),
+  };
+}
+
+function compactPracticeStorage(
+  storage: PracticeAnalysisStorage,
+  profile: StorageCompactionProfile,
+): PracticeAnalysisStorage {
+  const orderedDays = Object.values(storage.days).sort(
+    (left, right) => {
+      const byDate = right.tradingDate.localeCompare(
+        left.tradingDate,
+      );
+
+      if (byDate !== 0) {
+        return byDate;
+      }
+
+      return right.analyzedAt - left.analyzedAt;
+    },
+  );
+
+  const days: Record<string, PracticeDayAnalysis> = {};
+
+  for (const day of orderedDays.slice(0, profile.maxDays)) {
+    days[day.tradingDate] = compactDayAnalysis(day, profile);
+  }
+
+  return {
+    version: PRACTICE_ANALYSIS_STORAGE_VERSION,
+    updatedAt: storage.updatedAt,
+    days,
+  };
+}
+
 export class PracticeAnalysisEngine {
   private readonly storageKey: string;
 
@@ -1507,6 +1714,10 @@ export class PracticeAnalysisEngine {
   private storage: PracticeAnalysisStorage;
 
   private listeners = new Set<Listener>();
+
+  private persistenceDisabled = false;
+
+  private persistenceWarningShown = false;
 
   public constructor(
     options: PracticeAnalysisEngineOptions = {},
@@ -1519,7 +1730,10 @@ export class PracticeAnalysisEngine {
     this.pivotStrength =
       options.pivotStrength ?? DEFAULT_PIVOT_STRENGTH;
 
-    this.storage = this.loadStorage();
+    this.storage = compactPracticeStorage(
+      this.loadStorage(),
+      STORAGE_COMPACTION_PROFILES[0],
+    );
   }
 
   public subscribe(listener: Listener): () => void {
@@ -1840,6 +2054,8 @@ export class PracticeAnalysisEngine {
 
   public clear(): void {
     this.storage = createEmptyStorage();
+    this.persistenceDisabled = false;
+    this.persistenceWarningShown = false;
     this.persist();
     this.emit();
   }
@@ -1955,19 +2171,77 @@ export class PracticeAnalysisEngine {
   }
 
   private persist(): void {
-    if (typeof window === "undefined") {
+    if (
+      typeof window === "undefined" ||
+      this.persistenceDisabled
+    ) {
       return;
     }
 
+    let lastError: unknown;
+
+    for (const profile of STORAGE_COMPACTION_PROFILES) {
+      const candidate = compactPracticeStorage(
+        this.storage,
+        profile,
+      );
+      const serialized = JSON.stringify(candidate);
+
+      if (
+        serialized.length >
+        MAX_PERSISTED_STORAGE_CHARACTERS
+      ) {
+        continue;
+      }
+
+      try {
+        window.localStorage.setItem(
+          this.storageKey,
+          serialized,
+        );
+
+        this.storage = candidate;
+        return;
+      } catch (error) {
+        lastError = error;
+
+        if (!isStorageQuotaError(error)) {
+          this.persistenceDisabled = true;
+          break;
+        }
+      }
+    }
+
+    const smallestProfile =
+      STORAGE_COMPACTION_PROFILES[
+        STORAGE_COMPACTION_PROFILES.length - 1
+      ];
+    const smallestCandidate = compactPracticeStorage(
+      this.storage,
+      smallestProfile,
+    );
+
     try {
+      window.localStorage.removeItem(this.storageKey);
       window.localStorage.setItem(
         this.storageKey,
-        JSON.stringify(this.storage),
+        JSON.stringify(smallestCandidate),
       );
+
+      this.storage = smallestCandidate;
+      return;
     } catch (error) {
+      lastError = error;
+      this.persistenceDisabled = true;
+    }
+
+    if (!this.persistenceWarningShown) {
+      this.persistenceWarningShown = true;
+
       console.warn(
-        "[PracticeAnalysisEngine] Failed to persist storage",
-        error,
+        "[PracticeAnalysisEngine] Practice cache storage is full; " +
+          "continuing with in-memory analysis only until reload.",
+        lastError,
       );
     }
   }
