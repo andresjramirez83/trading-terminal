@@ -130,6 +130,15 @@ class AutoTradeEngine:
         requested_dollars = float(payload.get("trade_amount") or 0)
         sizing_mode = "shares" if requested_qty > 0 else str(payload.get("sizing_mode") or cfg.sizing_mode)
 
+        manual_strategy_id = str(
+            payload.get("strategy_id") or "overnight_protected_order"
+        )
+
+        is_protected_manual_order = manual_strategy_id in {
+            "overnight_protected_order",
+            "overnite_hail_mary",
+        }
+
         manual_cfg = cfg.copy(update={
             "mode": payload.get("mode", cfg.mode),
             "sizing_mode": sizing_mode,
@@ -138,10 +147,19 @@ class AutoTradeEngine:
             "extended_hours": True,
             "runner_mode": "off",
             "min_profit_range": 0.0,
+
+            # Manual Overnight Protected Orders may coexist with unrelated
+            # Alpaca positions/orders. Other AutoTrade strategies retain the
+            # global flat-account protection.
+            "require_flat_account": (
+                False
+                if is_protected_manual_order
+                else cfg.require_flat_account
+            ),
         })
 
         signal = TradeSignal(
-            strategy_id=str(payload.get("strategy_id") or "overnight_protected_order"),
+            strategy_id=manual_strategy_id,
             symbol=str(payload.get("symbol") or "").upper(),
             side="buy",
             setup=str(payload.get("setup") or "overnight_protected_limit_entry_stop_target"),

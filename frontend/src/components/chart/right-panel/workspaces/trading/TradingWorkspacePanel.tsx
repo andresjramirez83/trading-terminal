@@ -346,6 +346,7 @@ export default function TradingWorkspacePanel({
 
       <OpenOrdersWidget
         orders={store.openOrders}
+        mode={store.executionMode === "live" ? "live" : "paper"}
         onCancelOrder={store.cancelOpenOrder}
         onFillOrder={store.fillOpenOrder}
       />

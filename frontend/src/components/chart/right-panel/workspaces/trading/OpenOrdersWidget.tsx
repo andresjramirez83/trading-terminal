@@ -2,6 +2,7 @@ import type { OpenOrderState } from "./TradingTypes";
 
 type OpenOrdersWidgetProps = {
   orders: OpenOrderState[];
+  mode: "paper" | "live";
   onCancelOrder: (orderId: string) => void | Promise<void>;
   onFillOrder?: (orderId: string) => void;
 };
@@ -18,21 +19,27 @@ function money(value?: number): string {
 
 export default function OpenOrdersWidget({
   orders,
+  mode,
   onCancelOrder,
 }: OpenOrdersWidgetProps) {
+  const modeLabel = mode === "live" ? "Live" : "Paper";
+  const modeLower = mode === "live" ? "live" : "paper";
+
   return (
     <section style={styles.card}>
       <div style={styles.top}>
         <div>
           <div style={styles.kicker}>Orders</div>
-          <div style={styles.title}>Live Open Orders</div>
+          <div style={styles.title}>{modeLabel} Open Orders</div>
         </div>
 
         <div style={styles.countBadge}>{orders.length}</div>
       </div>
 
       {orders.length === 0 ? (
-        <div style={styles.empty}>No live open Alpaca orders for this symbol.</div>
+        <div style={styles.empty}>
+          No {modeLower} open Alpaca orders for this symbol.
+        </div>
       ) : (
         <div style={styles.list}>
           {orders.map((order) => (
@@ -90,7 +97,7 @@ export default function OpenOrdersWidget({
                   style={styles.cancelButton}
                   onClick={() => onCancelOrder(order.id)}
                 >
-                  Cancel Live Order
+                  Cancel {modeLabel} Order
                 </button>
               </div>
             </div>
@@ -99,7 +106,7 @@ export default function OpenOrdersWidget({
       )}
 
       <div style={styles.footer}>
-        These orders come from Alpaca. The old mock fill button was removed.
+        These orders come directly from Alpaca {modeLower}.
       </div>
     </section>
   );
