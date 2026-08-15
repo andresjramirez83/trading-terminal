@@ -327,9 +327,23 @@ export class TradeExecutionService {
         TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
       );
 
-      const filledOrders = rawClosedOrdersArray
+      // Alpaca returns bracket/OTO/OCO children inside `legs` when nested=true.
+      // Flatten the closed snapshot so an executed target or stop leg becomes
+      // a real fill in History instead of leaving only the parent entry order.
+      // Dedupe by Alpaca order id because a leg can occasionally appear both
+      // nested under its parent and as a top-level closed order.
+      const normalizedFilledOrders = flattenRawOrders(rawClosedOrdersArray)
         .filter(isFilledOrder)
         .map(normalizeFilledOrder);
+
+      const filledOrders = Array.from(
+        new Map(
+          normalizedFilledOrders.map((order) => [
+            String(order.orderId || order.id),
+            order,
+          ]),
+        ).values(),
+      );
 
       this.reconcileTradeLifecycle(
         rawOpenOrdersArray,
