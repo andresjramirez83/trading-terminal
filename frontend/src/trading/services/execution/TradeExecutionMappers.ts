@@ -201,7 +201,16 @@ export function normalizeFilledOrder(raw: any): FilledOrderState {
     limitPrice: limitPrice > 0 ? limitPrice : undefined,
     stopPrice: stopPrice && stopPrice > 0 ? stopPrice : undefined,
     targetPrice: targetPrice && targetPrice > 0 ? targetPrice : undefined,
-    filledAt: getOrderDateTime(raw),
+    // Keep broker timestamps as ISO strings. Formatting them here loses the
+    // timezone offset and can move a Pacific-time trade onto the wrong
+    // calendar day when Journal/AI Coach parses it later.
+    filledAt: String(
+      raw?.filled_at ??
+        raw?.updated_at ??
+        raw?.created_at ??
+        raw?.submitted_at ??
+        "",
+    ),
     submittedAt: raw?.submitted_at ? String(raw.submitted_at) : undefined,
     status: "filled",
     raw,

@@ -70,6 +70,45 @@ def _parse_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+
+def _effective_outcome(row: Dict[str, Any]) -> str:
+    """Normalize old/new archive rows into mutually exclusive research outcomes."""
+    target_dt = _parse_dt(row.get("target_hit_time"))
+    invalidation_dt = _parse_dt(row.get("invalidation_time"))
+
+    if target_dt is not None:
+        if (
+            invalidation_dt is not None
+            and invalidation_dt.astimezone(timezone.utc) < target_dt.astimezone(timezone.utc)
+        ):
+            return "target_hit_after_invalidation"
+        return "target_hit"
+
+    if invalidation_dt is not None:
+        return "invalidated"
+
+    existing = str(row.get("outcome") or "").strip().lower()
+    if existing in {"expired", "active"}:
+        return existing
+    return existing or "active"
+
+
+def _normalize_setup_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(row)
+    outcome = _effective_outcome(normalized)
+    normalized["outcome"] = outcome
+    normalized["valid_target_hit"] = outcome == "target_hit"
+    normalized["target_hit_after_invalidation"] = outcome == "target_hit_after_invalidation"
+    # target_hit means the price eventually touched the frozen target. Keep it
+    # true for the after-invalidation bucket while valid_target_hit identifies
+    # actual setup wins.
+    normalized["target_hit"] = outcome in {"target_hit", "target_hit_after_invalidation"}
+    if outcome == "target_hit_after_invalidation":
+        normalized["confirmation_status"] = "TARGET HIT AFTER INVALIDATION"
+        normalized["setup_stage"] = "TARGET HIT AFTER INVALIDATION"
+    return normalized
+
+
 def _bar_dt(row: Dict[str, Any]) -> Optional[datetime]:
     raw = row.get("time", row.get("t"))
     try:
@@ -126,7 +165,7 @@ def _load_setups_for_date(trade_date: str) -> List[Dict[str, Any]]:
         key = str(row.get("setup_key") or "").strip()
         if key:
             merged[key] = row
-    return list(merged.values())
+    return [_normalize_setup_row(row) for row in merged.values()]
 
 
 def _normalize_date(value: Optional[str]) -> str:
@@ -539,28 +578,41 @@ def _study_rows(days: int) -> List[Dict[str, Any]]:
             for row in _load_json_rows(path):
                 key = str(row.get("setup_key") or "").strip()
                 if key:
-                    merged[key] = row
+                    merged[key] = _normalize_setup_row(row)
 
     # Include live/current rows even before the first permanent archive file exists.
     for row in _load_state_rows():
         key = str(row.get("setup_key") or "").strip()
         if key:
-            merged[key] = row
+            merged[key] = _normalize_setup_row(row)
     return list(merged.values())
 
 
 def _aggregate_group(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    hits = [row for row in rows if bool(row.get("target_hit"))]
-    invalidated = [row for row in rows if str(row.get("outcome") or "") == "invalidated"]
-    expired = [row for row in rows if str(row.get("outcome") or "") == "expired"]
-    resolved = [row for row in rows if bool(row.get("target_hit")) or str(row.get("outcome") or "") in {"invalidated", "expired"}]
+    normalized = [_normalize_setup_row(row) for row in rows]
+    hits = [row for row in normalized if row.get("outcome") == "target_hit"]
+    hit_after_invalidation = [
+        row for row in normalized if row.get("outcome") == "target_hit_after_invalidation"
+    ]
+    invalidated = [row for row in normalized if row.get("outcome") == "invalidated"]
+    expired = [row for row in normalized if row.get("outcome") == "expired"]
+    resolved = [
+        row
+        for row in normalized
+        if row.get("outcome")
+        in {"target_hit", "target_hit_after_invalidation", "invalidated", "expired"}
+    ]
+    eventual_hits = len(hits) + len(hit_after_invalidation)
     return {
-        "setups": len(rows),
+        "setups": len(normalized),
         "resolved": len(resolved),
         "target_hits": len(hits),
+        "target_hits_after_invalidation": len(hit_after_invalidation),
+        "eventual_target_hits": eventual_hits,
         "invalidated": len(invalidated),
         "expired": len(expired),
         "hit_rate_pct": round(len(hits) / len(resolved) * 100.0, 2) if resolved else None,
+        "eventual_target_rate_pct": round(eventual_hits / len(resolved) * 100.0, 2) if resolved else None,
         "median_pullback_before_target_pct": _median(_safe_float(row.get("pullback_before_target_pct")) for row in hits),
         "median_minutes_to_target": _median(_safe_float(row.get("minutes_to_target")) for row in hits if _safe_float(row.get("minutes_to_target")) > 0),
     }
@@ -584,14 +636,7 @@ def _pullback_tests(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if not was_offered:
                 continue
             offered += 1
-            target_dt = _parse_dt(row.get("target_hit_time"))
-            invalidation_dt = _parse_dt(row.get("invalidation_time"))
-            clean_target_hit = bool(row.get("target_hit")) and (
-                invalidation_dt is None
-                or target_dt is None
-                or target_dt.astimezone(timezone.utc) <= invalidation_dt.astimezone(timezone.utc)
-            )
-            if clean_target_hit:
+            if _effective_outcome(row) == "target_hit":
                 wins += 1
         results.append(
             {
@@ -624,7 +669,9 @@ async def vwap3_study(days: int = Query(30, ge=1, le=365)):
         "best_observed_pullback": best,
         "notes": [
             "Statistics include all permanently archived qualified setups, not only target hits.",
-            "Pullback tests measure whether the entry level was offered and whether the setup later reached its frozen target; they are descriptive, not guarantees.",
+            "TARGET HIT requires the frozen target to be reached before invalidation. TARGET HIT AFTER INVALIDATION is tracked separately and is not counted as a valid setup win.",
+            "Eventual target rate includes both valid target hits and target hits after invalidation for research context.",
+            "Pullback tests measure whether the entry level was offered and whether a still-valid setup later reached its frozen target; they are descriptive, not guarantees.",
         ],
     }
 

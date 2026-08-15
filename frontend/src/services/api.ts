@@ -759,7 +759,9 @@ export async function fetchAlpacaOrders(
     mode,
     status,
     nested: String(nested),
-    limit: "100",
+    // Pull enough recent broker history to reconstruct completed round trips
+    // even after a browser refresh or date rollover.
+    limit: "500",
     _ts: String(Date.now()),
   });
 
@@ -1261,9 +1263,12 @@ export type Vwap3StudyBucket = {
   setups: number;
   resolved: number;
   target_hits: number;
+  target_hits_after_invalidation: number;
+  eventual_target_hits: number;
   invalidated: number;
   expired: number;
   hit_rate_pct: number | null;
+  eventual_target_rate_pct: number | null;
   median_pullback_before_target_pct: number | null;
   median_minutes_to_target: number | null;
 };

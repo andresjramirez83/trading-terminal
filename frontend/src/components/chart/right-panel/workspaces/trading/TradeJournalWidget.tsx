@@ -102,8 +102,16 @@ export default function TradeJournalWidget({
           </div>
           <div style={styles.studyGrid}>
             <Meta
-              label="Resolved Hit Rate"
+              label="Valid Hit Rate"
               value={pct(coachStudy.overall.hit_rate_pct)}
+            />
+            <Meta
+              label="Hit After Invalidation"
+              value={String(coachStudy.overall.target_hits_after_invalidation)}
+            />
+            <Meta
+              label="Eventual Target Rate"
+              value={pct(coachStudy.overall.eventual_target_rate_pct)}
             />
             <Meta
               label="Median Winner Pullback"
@@ -127,13 +135,13 @@ export default function TradeJournalWidget({
             />
           </div>
           <div style={styles.studyNote}>
-            Includes target hits, invalidations, and expired setups—not winners only.
+            Valid hits must reach target before invalidation. Target hits after invalidation are tracked separately for research.
           </div>
         </div>
       ) : null}
 
       {trades.length === 0 ? (
-        <div style={styles.empty}>No filled trades logged yet.</div>
+        <div style={styles.empty}>No completed Alpaca round-trip trades found yet. Journal times display in Pacific Time.</div>
       ) : (
         <div style={styles.list}>
           {trades.map((trade) => {

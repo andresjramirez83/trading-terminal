@@ -449,7 +449,18 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
             bars_to_target = idx - freeze_idx
             break
 
-    if target_hit_time:
+    target_after_invalidation = False
+    if target_hit_time and invalidation_time:
+        try:
+            target_dt = datetime.fromisoformat(target_hit_time).astimezone(ET)
+            invalidation_dt = datetime.fromisoformat(invalidation_time).astimezone(ET)
+            target_after_invalidation = invalidation_dt < target_dt
+        except Exception:
+            target_after_invalidation = False
+
+    if target_hit_time and target_after_invalidation:
+        status = "TARGET HIT AFTER INVALIDATION"
+    elif target_hit_time:
         status = "TARGET HIT"
     elif strong_confirmation_time:
         status = "STRONG CONFIRMED"
@@ -477,7 +488,9 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
         except Exception:
             minutes_to_target = None
 
-    if target_hit_time:
+    if target_hit_time and target_after_invalidation:
+        outcome = "target_hit_after_invalidation"
+    elif target_hit_time:
         outcome = "target_hit"
     elif invalidation_time:
         outcome = "invalidated"
@@ -500,6 +513,8 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
             "confirmed": bool(confirmation_time),
             "strong_confirmed": bool(strong_confirmation_time),
             "target_hit": bool(target_hit_time),
+            "valid_target_hit": bool(target_hit_time) and not target_after_invalidation,
+            "target_hit_after_invalidation": target_after_invalidation,
             "min_low_after_freeze": round(min_low_after_freeze, 6) if min_low_after_freeze else None,
             "min_low_before_target": round(min_low_before_target, 6) if min_low_before_target else None,
             "min_low_before_target_time": min_low_before_target_time,
