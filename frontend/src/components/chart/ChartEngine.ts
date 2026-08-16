@@ -432,7 +432,6 @@ export class ChartEngine {
     });
     this.positionOverlayEngine = new PositionOverlayEngine();
     this.positionOverlayRenderer = new PositionOverlayRenderer(
-      this.series.candles,
       this.container,
     );
     this.unsubscribePositionOverlay = this.positionOverlayEngine.subscribe((state) => {

@@ -709,6 +709,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
               change.level,
               change.price,
             );
+
+            // One event-driven reconciliation keeps worker/broker state caught
+            // up after a drag without increasing normal background polling.
+            void refreshProtectedOrderStateRef.current?.();
             return true;
           } catch (error) {
             console.error(
