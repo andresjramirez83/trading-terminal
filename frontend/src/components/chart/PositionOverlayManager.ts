@@ -402,23 +402,37 @@ export class PositionOverlayManager {
     this.activeDrag = null;
     this.onDragStateChange?.(false, null);
 
+    // Lock the optimistic drag price before the network request starts.
+    // Broker/AutoTrade subscriptions can emit a stale snapshot while the
+    // replacement request is in flight; without this lock the controls can
+    // briefly jump back to the old price and make two entry levels appear.
+    this.pendingPrices[level] = {
+      price,
+      expiresAt: Date.now() + 30_000,
+    };
+    this.restorePrice(level, price);
+    this.render();
+
     try {
       const result = await this.onCommit?.(change);
       const accepted = result !== false;
 
-      this.restorePrice(level, accepted ? price : drag.originalPrice);
-      if (accepted) {
+      if (!accepted) {
+        delete this.pendingPrices[level];
+        this.restorePrice(level, drag.originalPrice);
+      } else {
+        // Keep the optimistic price pinned while Alpaca/AutoTrade finish
+        // propagating the replacement through their next snapshots.
         this.pendingPrices[level] = {
           price,
-          // Alpaca replaces an order asynchronously and may return one or two
-          // stale open-order snapshots before the replacement is visible.
-          // Keep the confirmed replacement price on screen during that window.
           expiresAt: Date.now() + 30_000,
         };
+        this.restorePrice(level, price);
       }
       return accepted;
     } catch (error) {
       console.error("[PositionOverlayManager] drag commit failed", error);
+      delete this.pendingPrices[level];
       this.restorePrice(level, drag.originalPrice);
       return false;
     } finally {

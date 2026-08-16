@@ -1201,8 +1201,17 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         ? { symbol: overnightPlan.symbol, phase: overnightPlan.phase }
         : null;
       if (overnightPlan) {
+        // While the protected entry is still working, the overlay must follow
+        // the worker's working-order price. A pre-existing/stale Alpaca position
+        // for the same symbol must not pull the draggable entry controls back to
+        // the position cost basis. Once the protected order has filled and the
+        // worker is actively managing the position, switch to the actual fill
+        // basis from PositionProtectionEngine.
+        const usePositionEntry = ["active_synthetic", "exit_submitted"].includes(
+          overnightPlan.phase,
+        );
         const actualEntry =
-          protection && protection.position.entry > 0
+          usePositionEntry && protection && protection.position.entry > 0
             ? protection.position.entry
             : overnightPlan.entry;
 
