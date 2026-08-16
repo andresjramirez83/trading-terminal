@@ -256,6 +256,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     symbol: string;
     phase: string;
   } | null>(null);
+  const refreshProtectedOrderStateRef = useRef<(() => Promise<void>) | null>(null);
   const fxAnalysisToolRef = useRef<FxAnalysisToolId>("none");
   const drawingToolRef = useRef<DrawingTool>("cursor");
   const drawingStyleRef = useRef<DrawingStyle>(loadDrawingStyle());
@@ -876,7 +877,21 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       onCancelOrder: async (orderId) => {
         const canceled = await executionService.cancelOrder(orderId);
         if (!canceled) return false;
-        executionService.queueRefresh();
+
+        // The button already switches to “Canceling…” immediately inside
+        // PositionOverlayManager. After Alpaca accepts the cancel request,
+        // reconcile both broker state and AutoTrade worker state right away
+        // instead of waiting for the normal polling cycle. A short follow-up
+        // reconciliation catches the common race where Alpaca has canceled the
+        // order but the worker has not removed its runner state yet.
+        void refreshProtectedOrderStateRef.current?.();
+        window.setTimeout(() => {
+          void refreshProtectedOrderStateRef.current?.();
+        }, 500);
+        window.setTimeout(() => {
+          void refreshProtectedOrderStateRef.current?.();
+        }, 1_500);
+
         return true;
       },
       onDragStateChange: (dragging) => {
@@ -1289,6 +1304,28 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       }
     };
 
+    const refreshProtectedOrderState = async (): Promise<void> => {
+      const [autoTradeResult, brokerResult] = await Promise.allSettled([
+        fetchAutoTradeStatus(),
+        executionService.refreshAll(),
+      ]);
+
+      if (!active) return;
+
+      if (autoTradeResult.status === "fulfilled") {
+        latestAutoTradeStatus = autoTradeResult.value;
+      }
+
+      const brokerSnapshot =
+        brokerResult.status === "fulfilled"
+          ? brokerResult.value
+          : executionService.getSnapshot();
+
+      applySnapshot(brokerSnapshot);
+    };
+
+    refreshProtectedOrderStateRef.current = refreshProtectedOrderState;
+
     const unsubscribe = executionService.subscribe(applySnapshot);
     applySnapshot(executionService.getSnapshot());
     executionService.queueRefresh();
@@ -1302,6 +1339,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       active = false;
       window.clearInterval(autoTradeTimer);
       unsubscribe();
+      if (refreshProtectedOrderStateRef.current === refreshProtectedOrderState) {
+        refreshProtectedOrderStateRef.current = null;
+      }
       if (overnightProtectedOverlayRef.current?.symbol === safeSymbol) {
         overnightProtectedOverlayRef.current = null;
       }
