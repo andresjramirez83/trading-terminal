@@ -216,11 +216,15 @@ export class DrawingEngine {
   }
 
   setWorkspace(symbol: string, timeframe: string): void {
-    this.store.setWorkspace(symbol, timeframe);
+    // Clear transient selection/drag state before the store switches scopes so
+    // a selected trendline from the previous timeframe can never create a
+    // temporary handle series while the new timeframe is settling.
     this.pendingTrendPoint = null;
     this.selectedDrawingId = null;
     this.dragManager.endDrag();
+    this.store.setWorkspace(symbol, timeframe);
     this.renderAll();
+    this.scheduleRenderAll();
     this.emitDrawingChange("workspace");
   }
 

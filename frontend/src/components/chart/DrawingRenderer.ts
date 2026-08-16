@@ -160,9 +160,15 @@ export class DrawingRenderer {
     }
 
     if (drawing.type === "trendline") {
+      // Keep trendlines completely outside the Lightweight Charts data model.
+      // A LineSeries setData() during visible-range changes can feed another
+      // time-scale update back into DrawingEngine and make the chart oscillate
+      // after switching timeframes. SVG follows chart coordinates without
+      // changing the chart's own series/time scale.
+      this.removeLine(drawing.id);
+      this.removeHandles(drawing.id);
       this.removeBox(drawing.id);
-      this.renderTrendline(drawing);
-      this.renderHandlesForDrawing(drawing, selectedDrawingId);
+      this.renderTrendline(drawing, drawing.id === selectedDrawingId);
       return;
     }
 
@@ -317,31 +323,83 @@ export class DrawingRenderer {
     };
   }
 
-  private renderTrendline(drawing: TrendlineDrawing): void {
-    const { p1Time, p1Price, p2Time, p2Price } =
-      this.getRenderedTrendlinePoints(drawing);
+  private renderTrendline(
+    drawing: TrendlineDrawing,
+    selected: boolean,
+  ): void {
+    const overlay = this.ensureSvgOverlay();
+    if (!overlay) return;
 
-    if (p1Time === p2Time) {
-      this.removeLine(drawing.id);
+    const { p1Time, p2Time } = this.getStableTrendlineAnchorTimes(drawing);
+    if (p1Time === p2Time) return;
+
+    const p1X = this.chart.timeScale().timeToCoordinate(p1Time as Time);
+    const p2X = this.chart.timeScale().timeToCoordinate(p2Time as Time);
+    const p1Y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
+    const p2Y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
+
+    if (p1X == null || p2X == null || p1Y == null || p2Y == null) {
       return;
     }
 
-    let series = this.drawingSeries.get(drawing.id);
+    let finalX: number = p2X;
+    let finalY: number = p2Y;
 
-    if (!series) {
-      series = this.chart.addSeries(
-        LineSeries,
-        this.baseLineOptions(drawing.style),
-      );
-      this.drawingSeries.set(drawing.id, series);
-    } else {
-      series.applyOptions(this.baseLineOptions(drawing.style));
+    if (drawing.style.extendRight && p1X !== p2X) {
+      const timeScale = this.chart.timeScale() as unknown as {
+        width?: () => number;
+      };
+      const measuredWidth = Number(timeScale.width?.());
+      const fallbackWidth = Number(this.container?.clientWidth ?? p2X);
+      const rightEdge =
+        Number.isFinite(measuredWidth) && measuredWidth > 0
+          ? measuredWidth
+          : fallbackWidth;
+
+      const targetX = Math.max(p1X, p2X, rightEdge);
+      const slope = (p2Y - p1Y) / (p2X - p1X);
+      finalX = targetX;
+      finalY = p1Y + slope * (targetX - p1X);
     }
 
-    series.setData([
-      { time: p1Time as Time, value: p1Price },
-      { time: p2Time as Time, value: p2Price },
-    ]);
+    const elements: SVGElement[] = [];
+    const line = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "line",
+    );
+    line.setAttribute("x1", svgNumber(p1X));
+    line.setAttribute("y1", svgNumber(p1Y));
+    line.setAttribute("x2", svgNumber(finalX));
+    line.setAttribute("y2", svgNumber(finalY));
+    line.setAttribute("stroke", drawing.style.color);
+    line.setAttribute("stroke-width", String(lineWidth(drawing.style.width)));
+    line.setAttribute("stroke-linecap", "round");
+    line.setAttribute("vector-effect", "non-scaling-stroke");
+    overlay.appendChild(line);
+    elements.push(line);
+
+    if (selected) {
+      for (const [cx, cy] of [
+        [p1X, p1Y],
+        [p2X, p2Y],
+      ] as Array<[number, number]>) {
+        const handle = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "circle",
+        );
+        handle.setAttribute("cx", svgNumber(cx));
+        handle.setAttribute("cy", svgNumber(cy));
+        handle.setAttribute("r", "5");
+        handle.setAttribute("fill", drawing.style.color);
+        handle.setAttribute("stroke", "#ffffff");
+        handle.setAttribute("stroke-width", "1");
+        handle.setAttribute("vector-effect", "non-scaling-stroke");
+        overlay.appendChild(handle);
+        elements.push(handle);
+      }
+    }
+
+    this.boxElements.set(drawing.id, elements);
   }
 
   private renderMarketStructure(drawing: MarketStructureDrawing): void {
