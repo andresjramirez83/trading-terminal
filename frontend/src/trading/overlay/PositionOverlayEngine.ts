@@ -20,6 +20,16 @@ function safeNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function isProtectedAutoTradeClientOrderId(value: unknown): boolean {
+  const clientOrderId = String(value ?? "").trim().toLowerCase();
+
+  return (
+    clientOrderId.startsWith("autotrade_opo_") ||
+    clientOrderId.startsWith("autotrade_overnight_protected_order_") ||
+    clientOrderId.startsWith("autotrade_overnite_hail_mary_")
+  );
+}
+
 function isClosedStatus(status: TradeObject["status"]): boolean {
   return ["closed", "cancelled", "rejected"].includes(status);
 }
@@ -131,6 +141,28 @@ export class PositionOverlayEngine {
         ) ?? null;
 
       if (order) {
+        // Overnight Protected Orders have their own interactive chart overlay
+        // owned by ChartPanel/PositionOverlayManager.  The execution snapshot
+        // can lag briefly after an entry-price replacement, so rendering the
+        // same broker order here creates a second yellow ORDER line at the old
+        // price.  Identify only those server-managed protected entries from
+        // Alpaca's raw client_order_id and leave normal broker orders alone.
+        const rawOrder =
+          this.snapshot.rawOpenOrders.find(
+            (item) => String(item?.id ?? "") === String(order.id ?? ""),
+          ) ?? null;
+
+        if (
+          rawOrder &&
+          isProtectedAutoTradeClientOrderId(rawOrder.client_order_id)
+        ) {
+          this.publish({
+            ...EMPTY_POSITION_OVERLAY,
+            symbol: this.symbol,
+          });
+          return;
+        }
+
         const trade = findActiveTrade(this.symbol);
         const entryPrice =
           safeNumber(order.limitPrice) ||
