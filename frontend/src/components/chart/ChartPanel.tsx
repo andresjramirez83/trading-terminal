@@ -1201,7 +1201,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           entryCanDrag: ["queued", "entry_submitted", "entry_cancel_requested"].includes(
             overnightPlan.phase,
           ),
-          entryCanCancel: false,
+          entryCanCancel: ["entry_submitted", "entry_cancel_requested"].includes(
+            overnightPlan.phase,
+          ),
           stopCanDrag: ["queued", "entry_submitted", "entry_cancel_requested", "active_synthetic"].includes(
             overnightPlan.phase,
           ),
