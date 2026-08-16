@@ -20,16 +20,6 @@ function safeNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function isProtectedAutoTradeClientOrderId(value: unknown): boolean {
-  const clientOrderId = String(value ?? "").trim().toLowerCase();
-
-  return (
-    clientOrderId.startsWith("autotrade_opo_") ||
-    clientOrderId.startsWith("autotrade_overnight_protected_order_") ||
-    clientOrderId.startsWith("autotrade_overnite_hail_mary_")
-  );
-}
-
 function isClosedStatus(status: TradeObject["status"]): boolean {
   return ["closed", "cancelled", "rejected"].includes(status);
 }
@@ -135,68 +125,10 @@ export class PositionOverlayEngine {
       ) ?? null;
 
     if (!position) {
-      const order =
-        this.snapshot.openOrders.find(
-          (item) => cleanSymbol(item.symbol) === this.symbol,
-        ) ?? null;
-
-      if (order) {
-        // Overnight Protected Orders have their own interactive chart overlay
-        // owned by ChartPanel/PositionOverlayManager.  The execution snapshot
-        // can lag briefly after an entry-price replacement, so rendering the
-        // same broker order here creates a second yellow ORDER line at the old
-        // price.  Identify only those server-managed protected entries from
-        // Alpaca's raw client_order_id and leave normal broker orders alone.
-        const rawOrder =
-          this.snapshot.rawOpenOrders.find(
-            (item) => String(item?.id ?? "") === String(order.id ?? ""),
-          ) ?? null;
-
-        if (
-          rawOrder &&
-          isProtectedAutoTradeClientOrderId(rawOrder.client_order_id)
-        ) {
-          this.publish({
-            ...EMPTY_POSITION_OVERLAY,
-            symbol: this.symbol,
-          });
-          return;
-        }
-
-        const trade = findActiveTrade(this.symbol);
-        const entryPrice =
-          safeNumber(order.limitPrice) ||
-          safeNumber(trade?.entry) ||
-          this.currentPrice;
-        const stopPrice =
-          safeNumber(order.stopPrice) || safeNumber(trade?.stop);
-        const targetPrice =
-          safeNumber(order.targetPrice) ||
-          safeNumber(trade?.targets[0]?.price);
-
-        this.publish({
-          kind: "order",
-          tradeId: trade?.id ?? null,
-          symbol: this.symbol,
-          side: order.side === "sell" ? "short" : "long",
-          status: trade?.status ?? "accepted",
-          visible: entryPrice > 0,
-          entryPrice,
-          stopPrice,
-          targets:
-            targetPrice > 0
-              ? [{ id: `${order.id}-target`, price: targetPrice, label: "Target" }]
-              : [],
-          quantity: Math.max(0, safeNumber(order.shares)),
-          currentPrice: this.currentPrice || entryPrice,
-          unrealizedPnL: 0,
-          percentPnL: 0,
-          riskPerShare: 0,
-          currentR: 0,
-        });
-        return;
-      }
-
+      // Working/open orders are rendered by ChartPanel/PositionOverlayManager.
+      // This legacy engine renders filled positions only, preventing a stale
+      // broker order price from appearing as a second yellow line while an
+      // entry-price replacement is being confirmed.
       this.publish({
         ...EMPTY_POSITION_OVERLAY,
         symbol: this.symbol,
