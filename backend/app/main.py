@@ -4772,6 +4772,54 @@ def alpaca_positions(mode: str = Query("paper")):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.delete("/alpaca/position/{symbol}")
+def close_alpaca_position(
+    symbol: str,
+    mode: str = Query("paper"),
+    qty: Optional[float] = Query(None, gt=0),
+    percentage: Optional[float] = Query(None, gt=0, le=100),
+    cancel_orders: bool = Query(True),
+    preserve_protection: bool = Query(False),
+):
+    if qty is not None and percentage is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="qty and percentage are mutually exclusive",
+        )
+
+    try:
+        service = get_alpaca_service(mode)
+        result = service.close_position(
+            symbol,
+            qty=qty,
+            percentage=percentage,
+            cancel_orders=cancel_orders,
+            preserve_protection=preserve_protection,
+        )
+        _invalidate_alpaca_snapshot_cache(mode)
+        return result
+    except Exception as exc:
+        print("ALPACA CLOSE POSITION ERROR:", repr(exc), flush=True)
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.delete("/alpaca/positions")
+def close_all_alpaca_positions(
+    mode: str = Query("paper"),
+    cancel_orders: bool = Query(True),
+):
+    try:
+        service = get_alpaca_service(mode)
+        result = service.close_all_positions(cancel_orders=cancel_orders)
+        _invalidate_alpaca_snapshot_cache(mode)
+        return result
+    except Exception as exc:
+        print("ALPACA CLOSE ALL POSITIONS ERROR:", repr(exc), flush=True)
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @app.delete("/alpaca/order/{order_id}")
 def cancel_alpaca_order(order_id: str, mode: str = Query("paper")):
     try:

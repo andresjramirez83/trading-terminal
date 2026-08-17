@@ -54,6 +54,46 @@ def get_positions(mode: AlpacaMode = Query("paper")):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.delete("/position/{symbol}")
+def close_position(
+    symbol: str,
+    mode: AlpacaMode = Query("paper"),
+    qty: Optional[float] = Query(None, gt=0),
+    percentage: Optional[float] = Query(None, gt=0, le=100),
+    cancel_orders: bool = Query(True),
+    preserve_protection: bool = Query(False),
+):
+    if qty is not None and percentage is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="qty and percentage are mutually exclusive",
+        )
+
+    try:
+        return get_service(mode).close_position(
+            symbol,
+            qty=qty,
+            percentage=percentage,
+            cancel_orders=cancel_orders,
+            preserve_protection=preserve_protection,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.delete("/positions")
+def close_all_positions(
+    mode: AlpacaMode = Query("paper"),
+    cancel_orders: bool = Query(True),
+):
+    try:
+        return get_service(mode).close_all_positions(cancel_orders=cancel_orders)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.get("/orders")
 def get_orders(
     mode: AlpacaMode = Query("paper"),

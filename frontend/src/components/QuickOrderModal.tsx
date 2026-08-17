@@ -6,6 +6,7 @@ import {
   type CSSProperties,
 } from "react";
 import {
+  closeAlpacaPosition,
   fetchAlpacaPositions,
   placeAlpacaOrder,
   type AlpacaMode,
@@ -326,13 +327,9 @@ export default function QuickOrderModal({
       setSubmitting(true);
       setError("");
 
-      const flattenSide: AlpacaSide =
-        position.side === "long" ? "sell" : "buy";
-
-      await submitOrder({
-        qty: position.qty,
-        side: flattenSide,
-        type: "market",
+      await closeAlpacaPosition(cleanedSymbol, {
+        mode,
+        cancelOrders: true,
       });
 
       onClose();

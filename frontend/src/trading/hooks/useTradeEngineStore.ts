@@ -425,7 +425,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     orderType: "market",
     limitPrice: 0,
     stopPrice: 0,
-    extendedHours: true,
+    extendedHours: false,
     bracketEnabled: true,
     bracketTarget: 0,
     bracketStop: 0,
@@ -1291,17 +1291,18 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     }
 
     const result = await executionService.closePosition(safeSymbol, {
-      extendedHours: quickOrder.extendedHours,
+      extendedHours: false,
     });
 
     if (result.ok) {
       recordExitOrder(result.order);
+    } else if (result.error) {
+      window.alert(result.error);
     }
   }, [
     executionService,
     positionProtectionOwner,
     positionStage,
-    quickOrder.extendedHours,
     recordExitOrder,
     safeSymbol,
   ]);
@@ -1335,19 +1336,20 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         safeSymbol,
         safePercent,
         {
-          extendedHours: quickOrder.extendedHours,
+          extendedHours: false,
         },
       );
 
       if (result.ok) {
         recordExitOrder(result.order);
+      } else if (result.error) {
+        window.alert(result.error);
       }
     },
     [
       executionService,
       positionProtectionOwner,
       positionStage,
-      quickOrder.extendedHours,
       recordExitOrder,
       safeSymbol,
     ],
@@ -1359,17 +1361,18 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         safeSymbol,
         shares,
         {
-          extendedHours: quickOrder.extendedHours,
+          extendedHours: false,
         },
       );
 
       if (result.ok) {
         recordExitOrder(result.order);
+      } else if (result.error) {
+        window.alert(result.error);
       }
     },
     [
       executionService,
-      quickOrder.extendedHours,
       recordExitOrder,
       safeSymbol,
     ],
@@ -1431,11 +1434,14 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     );
 
     for (const position of genericPositions) {
-      await executionService.closePositionShares(
+      const result = await executionService.closePositionShares(
         position.symbol,
         position.shares,
-        { extendedHours: quickOrder.extendedHours },
+        { extendedHours: false },
       );
+      if (!result.ok && result.error) {
+        window.alert(result.error);
+      }
     }
 
     executionService.queueRefresh();
@@ -1443,7 +1449,6 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     autoTradeStatus?.runner_states,
     executionService,
     executionSnapshot.positions,
-    quickOrder.extendedHours,
   ]);
 
   const tradePlanStats = useMemo(

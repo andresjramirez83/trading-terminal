@@ -142,6 +142,15 @@ class AlpacaService:
         data = self._request("GET", "/v2/positions")
         return data if isinstance(data, list) else []
 
+    def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        safe_symbol = str(symbol or "").strip().upper()
+        if not safe_symbol:
+            return None
+        for position in self.get_positions():
+            if str(position.get("symbol") or "").strip().upper() == safe_symbol:
+                return position
+        return None
+
     def get_orders(
         self,
         *,
@@ -390,3 +399,391 @@ class AlpacaService:
 
     def cancel_all_orders(self) -> Any:
         return self._request("DELETE", "/v2/orders")
+
+    @staticmethod
+    def _order_is_active(order: Dict[str, Any]) -> bool:
+        status = str(order.get("status") or "").strip().lower()
+        return status not in {
+            "filled",
+            "canceled",
+            "cancelled",
+            "expired",
+            "replaced",
+            "rejected",
+            "done_for_day",
+        }
+
+    def _cancel_symbol_orders(
+        self,
+        symbol: str,
+        *,
+        timeout_seconds: float = 4.0,
+    ) -> List[str]:
+        safe_symbol = str(symbol or "").strip().upper()
+        if not safe_symbol:
+            return []
+
+        orders = self.get_orders(
+            status="open",
+            limit=500,
+            nested=False,
+            symbols=[safe_symbol],
+        )
+        order_ids = []
+        for order in orders:
+            if not isinstance(order, dict) or not self._order_is_active(order):
+                continue
+            order_id = str(order.get("id") or "").strip()
+            if order_id and order_id not in order_ids:
+                order_ids.append(order_id)
+
+        # Cancel every visible symbol order. For bracket/OCO groups, canceling
+        # one leg can automatically cancel its sibling, so later DELETE calls
+        # can legitimately fail because the sibling is already gone. The
+        # authoritative check is the fresh open-order poll below.
+        for order_id in order_ids:
+            try:
+                self.cancel_order(order_id)
+            except RuntimeError:
+                pass
+
+        deadline = time.monotonic() + max(0.5, timeout_seconds)
+        while time.monotonic() < deadline:
+            remaining = self.get_orders(
+                status="open",
+                limit=500,
+                nested=False,
+                symbols=[safe_symbol],
+            )
+            remaining_active = [
+                order
+                for order in remaining
+                if isinstance(order, dict) and self._order_is_active(order)
+            ]
+            if not remaining_active:
+                return order_ids
+            time.sleep(0.15)
+
+        raise RuntimeError(
+            f"Timed out waiting for open {safe_symbol} orders to cancel before liquidation"
+        )
+
+    def _capture_position_protection(
+        self,
+        symbol: str,
+        position: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        safe_symbol = str(symbol or "").strip().upper()
+        qty = float(position.get("qty") or 0)
+        avg_entry = self._positive_number(position.get("avg_entry_price")) or 0.0
+        closing_side = "sell" if qty > 0 else "buy"
+
+        orders = self.get_orders(
+            status="open",
+            limit=500,
+            nested=False,
+            symbols=[safe_symbol],
+        )
+
+        stops: List[Dict[str, Any]] = []
+        targets: List[Dict[str, Any]] = []
+        for order in orders:
+            if not isinstance(order, dict) or not self._order_is_active(order):
+                continue
+            if str(order.get("side") or "").strip().lower() != closing_side:
+                continue
+
+            order_type = str(order.get("type") or "").strip().lower()
+            stop_price = self._positive_number(order.get("stop_price"))
+            limit_price = self._positive_number(order.get("limit_price"))
+
+            valid_stop = (
+                stop_price is not None
+                and (
+                    avg_entry <= 0
+                    or (qty > 0 and stop_price <= avg_entry)
+                    or (qty < 0 and stop_price >= avg_entry)
+                )
+            )
+            valid_target = (
+                limit_price is not None
+                and (
+                    avg_entry <= 0
+                    or (qty > 0 and limit_price >= avg_entry)
+                    or (qty < 0 and limit_price <= avg_entry)
+                )
+            )
+
+            if stop_price is not None or order_type in {"stop", "stop_limit"}:
+                if valid_stop:
+                    stops.append(order)
+                continue
+
+            if order_type == "limit" and valid_target:
+                targets.append(order)
+
+        def stop_distance(order: Dict[str, Any]) -> float:
+            price = self._positive_number(order.get("stop_price")) or 0.0
+            return abs(avg_entry - price) if avg_entry > 0 else price
+
+        def target_distance(order: Dict[str, Any]) -> float:
+            price = self._positive_number(order.get("limit_price")) or 0.0
+            return abs(avg_entry - price) if avg_entry > 0 else price
+
+        stop_order = min(stops, key=stop_distance) if stops else None
+        target_order = min(targets, key=target_distance) if targets else None
+
+        stop_price = (
+            self._positive_number(stop_order.get("stop_price"))
+            if stop_order
+            else None
+        )
+        stop_limit_price = (
+            self._positive_number(stop_order.get("limit_price"))
+            if stop_order
+            else None
+        )
+        target_price = (
+            self._positive_number(target_order.get("limit_price"))
+            if target_order
+            else None
+        )
+        tif = str(
+            (target_order or stop_order or {}).get("time_in_force") or "day"
+        ).strip().lower()
+        if tif not in {"day", "gtc"}:
+            tif = "day"
+
+        return {
+            "stop_price": stop_price,
+            "stop_limit_price": stop_limit_price,
+            "target_price": target_price,
+            "time_in_force": tif,
+        }
+
+    def _wait_for_close_order(
+        self,
+        close_order: Dict[str, Any],
+        *,
+        timeout_seconds: float = 6.0,
+    ) -> Dict[str, Any]:
+        order_id = str(close_order.get("id") or "").strip()
+        if not order_id:
+            return close_order
+
+        deadline = time.monotonic() + max(0.5, timeout_seconds)
+        latest = close_order
+        while time.monotonic() < deadline:
+            latest = self.get_order(order_id, nested=False)
+            status = str(latest.get("status") or "").strip().lower()
+            if status in {
+                "filled",
+                "canceled",
+                "cancelled",
+                "expired",
+                "rejected",
+                "done_for_day",
+            }:
+                return latest
+            time.sleep(0.15)
+
+        # Do not leave a slow/pending manual scale-out competing with the OCO
+        # protection we are about to restore. Cancel it, then restore against
+        # the broker's actual remaining position quantity.
+        try:
+            self.cancel_order(order_id)
+        except RuntimeError:
+            pass
+
+        cancel_deadline = time.monotonic() + 3.0
+        while time.monotonic() < cancel_deadline:
+            latest = self.get_order(order_id, nested=False)
+            status = str(latest.get("status") or "").strip().lower()
+            if status in {
+                "filled",
+                "canceled",
+                "cancelled",
+                "expired",
+                "rejected",
+                "done_for_day",
+            }:
+                return latest
+            time.sleep(0.15)
+
+        raise RuntimeError(
+            "Timed out waiting for a scale-out order to stop before restoring protection"
+        )
+
+    def _wait_for_position_reduction(
+        self,
+        symbol: str,
+        original_qty: float,
+        *,
+        timeout_seconds: float = 3.0,
+    ) -> Optional[Dict[str, Any]]:
+        original_abs = abs(float(original_qty))
+        deadline = time.monotonic() + max(0.5, timeout_seconds)
+        latest = self.get_position(symbol)
+
+        while time.monotonic() < deadline:
+            latest = self.get_position(symbol)
+            if latest is None:
+                return None
+            current_abs = abs(float(latest.get("qty") or 0))
+            if current_abs < max(0.0, original_abs - 1e-9):
+                return latest
+            time.sleep(0.1)
+
+        return latest
+
+    def _restore_position_protection(
+        self,
+        symbol: str,
+        protection: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        position = self.get_position(symbol)
+        if not position:
+            return None
+
+        raw_qty = float(position.get("qty") or 0)
+        qty = abs(raw_qty)
+        if qty <= 0:
+            return None
+
+        side = "sell" if raw_qty > 0 else "buy"
+        target_price = self._positive_number(protection.get("target_price"))
+        stop_price = self._positive_number(protection.get("stop_price"))
+        stop_limit_price = self._positive_number(
+            protection.get("stop_limit_price")
+        )
+        tif = str(protection.get("time_in_force") or "day").strip().lower()
+        if tif not in {"day", "gtc"}:
+            tif = "day"
+
+        if target_price is not None and stop_price is not None:
+            stop_loss: Dict[str, Any] = {"stop_price": stop_price}
+            if stop_limit_price is not None:
+                stop_loss["limit_price"] = stop_limit_price
+            return self.place_order(
+                symbol=symbol,
+                side=side,
+                order_type="limit",
+                time_in_force=tif,
+                qty=qty,
+                extended_hours=False,
+                order_class="oco",
+                take_profit={"limit_price": target_price},
+                stop_loss=stop_loss,
+            )
+
+        if stop_price is not None:
+            return self.place_order(
+                symbol=symbol,
+                side=side,
+                order_type="stop_limit" if stop_limit_price is not None else "stop",
+                time_in_force=tif,
+                qty=qty,
+                stop_price=stop_price,
+                limit_price=stop_limit_price,
+                extended_hours=False,
+            )
+
+        if target_price is not None:
+            return self.place_order(
+                symbol=symbol,
+                side=side,
+                order_type="limit",
+                time_in_force=tif,
+                qty=qty,
+                limit_price=target_price,
+                extended_hours=False,
+            )
+
+        return None
+
+    def close_position(
+        self,
+        symbol: str,
+        *,
+        qty: Optional[float] = None,
+        percentage: Optional[float] = None,
+        cancel_orders: bool = True,
+        preserve_protection: bool = False,
+    ) -> Dict[str, Any]:
+        safe_symbol = str(symbol or "").strip().upper()
+        if not safe_symbol:
+            raise RuntimeError("symbol is required")
+        if qty is not None and percentage is not None:
+            raise RuntimeError("qty and percentage are mutually exclusive")
+
+        position = self.get_position(safe_symbol)
+        if not position:
+            raise RuntimeError(f"No open position found for {safe_symbol}")
+
+        is_partial = qty is not None or (
+            percentage is not None and float(percentage) < 100.0
+        )
+        protection = (
+            self._capture_position_protection(safe_symbol, position)
+            if preserve_protection and is_partial
+            else {}
+        )
+
+        if cancel_orders:
+            self._cancel_symbol_orders(safe_symbol)
+
+        params: Dict[str, Any] = {}
+        if qty is not None:
+            params["qty"] = qty
+        if percentage is not None:
+            params["percentage"] = percentage
+
+        close_order = self._request(
+            "DELETE",
+            f"/v2/positions/{safe_symbol}",
+            params=params or None,
+        )
+        if not isinstance(close_order, dict):
+            close_order = {"result": close_order}
+
+        restored_order: Optional[Dict[str, Any]] = None
+        if protection and any(
+            protection.get(key) is not None
+            for key in ("target_price", "stop_price")
+        ):
+            terminal_close = self._wait_for_close_order(close_order)
+            close_status = str(terminal_close.get("status") or "").strip().lower()
+            if close_status == "filled":
+                self._wait_for_position_reduction(
+                    safe_symbol,
+                    float(position.get("qty") or 0),
+                )
+            restored_order = self._restore_position_protection(
+                safe_symbol,
+                protection,
+            )
+            close_order = terminal_close or close_order
+
+            if close_status in {
+                "rejected",
+                "canceled",
+                "cancelled",
+                "expired",
+                "done_for_day",
+            }:
+                raise RuntimeError(
+                    f"Scale-out order for {safe_symbol} did not complete; position protection was restored"
+                )
+
+        return {
+            "order": close_order,
+            "protection_order": restored_order,
+            "protection_restored": restored_order is not None,
+        }
+
+    def close_all_positions(self, *, cancel_orders: bool = True) -> Any:
+        return self._request(
+            "DELETE",
+            "/v2/positions",
+            params={"cancel_orders": str(bool(cancel_orders)).lower()},
+        )

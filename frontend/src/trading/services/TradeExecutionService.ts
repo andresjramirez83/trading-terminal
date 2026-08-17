@@ -1,6 +1,8 @@
 import {
   cancelAlpacaOrder,
   fetchAlpacaAccount,
+  closeAlpacaPosition,
+  closeAllAlpacaPositions,
   fetchAlpacaOrders,
   fetchAlpacaPositions,
   fetchAlpacaSnapshot,
@@ -146,6 +148,24 @@ function flattenRawOrders(orders: unknown[]): unknown[] {
 
   for (const order of orders) visit(order);
   return flattened;
+}
+
+function dedupeRawOrders(orders: unknown[]): unknown[] {
+  const seenIds = new Set<string>();
+  const result: unknown[] = [];
+
+  for (const order of orders) {
+    const id = rawOrderId(order);
+
+    if (id) {
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+    }
+
+    result.push(order);
+  }
+
+  return result;
 }
 
 function uniqueStrings(values: Array<string | null | undefined>): string[] {
@@ -377,12 +397,29 @@ export class TradeExecutionService {
       const rawPositionsArray = Array.isArray(rawPositions) ? rawPositions : [];
       const rawOrdersArray = Array.isArray(rawOrders) ? rawOrders : [];
 
-      const rawOpenOrdersArray = rawOrdersArray.filter(
+      const rawTopLevelOpenOrdersArray = rawOrdersArray.filter(
         (order) => !TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
       );
       const rawClosedOrdersArray = rawOrdersArray.filter((order) =>
         TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
       );
+
+      // With nested=true Alpaca rolls a bracket under its parent. Once the
+      // entry fills, the parent becomes `filled` while the stop/target legs
+      // remain `held`/`new`. Filtering only by the parent status makes both
+      // live protection legs disappear from the chart and Position Manager.
+      // Lift active descendants out of terminal parents so they remain first-
+      // class open orders after the entry fill.
+      const activeNestedLegsFromClosedParents = flattenRawOrders(
+        rawClosedOrdersArray,
+      ).filter(
+        (order) => !TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
+      );
+
+      const rawOpenOrdersArray = dedupeRawOrders([
+        ...rawTopLevelOpenOrdersArray,
+        ...activeNestedLegsFromClosedParents,
+      ]);
 
       // Alpaca returns bracket/OTO/OCO children inside `legs` when nested=true.
       // Flatten the closed snapshot so an executed target or stop leg becomes
@@ -470,8 +507,14 @@ export class TradeExecutionService {
       lastMessage: "Sending order to Alpaca...",
     });
 
+    const wantsTarget = order.bracketEnabled && order.bracketTarget > 0;
+    const wantsStop = order.bracketEnabled && order.bracketStop > 0;
     const orderClass: AlpacaOrderClass | undefined = order.bracketEnabled
-      ? "bracket"
+      ? wantsTarget && wantsStop
+        ? "bracket"
+        : wantsTarget || wantsStop
+          ? "oto"
+          : undefined
       : undefined;
 
     const payload: any = {
@@ -481,7 +524,9 @@ export class TradeExecutionService {
       qty: estimate.estimatedShares,
       type: order.orderType,
       time_in_force: "day",
-      extended_hours: Boolean(order.extendedHours),
+      // Alpaca bracket/OTO orders do not support extended hours. The app's
+      // server-managed Overnight Protected Order path handles that use case.
+      extended_hours: orderClass ? false : Boolean(order.extendedHours),
       order_class: orderClass,
     };
 
@@ -574,7 +619,7 @@ export class TradeExecutionService {
     });
 
     try {
-      const useExtendedHours = Boolean(options?.extendedHours ?? true);
+      const useExtendedHours = Boolean(options?.extendedHours ?? false);
       const referencePrice = rawPositionCurrentPrice(
         this.snapshot.rawPositions,
         safeSymbol,
@@ -589,16 +634,24 @@ export class TradeExecutionService {
         );
       }
 
-      const order = await placeAlpacaOrder({
-        mode: this.mode,
-        symbol: safeSymbol,
-        side,
-        qty,
-        type: useExtendedHours ? "limit" : "market",
-        time_in_force: "day",
-        limit_price: useExtendedHours ? limitPrice : undefined,
-        extended_hours: useExtendedHours,
-      });
+      const isFullClose = qty >= roundShares(livePosition.shares);
+      const order = useExtendedHours
+        ? await placeAlpacaOrder({
+            mode: this.mode,
+            symbol: safeSymbol,
+            side,
+            qty,
+            type: "limit",
+            time_in_force: "day",
+            limit_price: limitPrice,
+            extended_hours: true,
+          })
+        : await closeAlpacaPosition(safeSymbol, {
+            mode: this.mode,
+            qty: isFullClose ? undefined : qty,
+            cancelOrders: true,
+            preserveProtection: !isFullClose,
+          });
 
       this.setSnapshot({
         status: "success",
@@ -681,47 +734,51 @@ export class TradeExecutionService {
 
     const results: SubmitQuickOrderResult[] = [];
 
-    for (const position of positions) {
-      const side: AlpacaSide = position.side === "long" ? "sell" : "buy";
-      const qty = roundShares(position.shares);
+    try {
+      const useExtendedHours = Boolean(options?.extendedHours ?? false);
 
-      try {
-        const useExtendedHours = Boolean(options?.extendedHours ?? true);
-        const referencePrice = rawPositionCurrentPrice(
-          this.snapshot.rawPositions,
-          position.symbol,
-        );
-        const limitPrice = useExtendedHours
-          ? marketableExtendedHoursLimit(side, referencePrice)
-          : 0;
-
-        if (useExtendedHours && limitPrice <= 0) {
-          throw new Error(
-            `Current position price is unavailable for ${position.symbol}.`,
+      if (useExtendedHours) {
+        // Extended-hours liquidation still has to use aggressive DAY limits.
+        // This branch is intentionally separate from broker bracket flattening.
+        for (const position of positions) {
+          const side: AlpacaSide = position.side === "long" ? "sell" : "buy";
+          const qty = roundShares(position.shares);
+          const referencePrice = rawPositionCurrentPrice(
+            this.snapshot.rawPositions,
+            position.symbol,
           );
+          const limitPrice = marketableExtendedHoursLimit(side, referencePrice);
+
+          if (limitPrice <= 0) {
+            throw new Error(
+              `Current position price is unavailable for ${position.symbol}.`,
+            );
+          }
+
+          const order = await placeAlpacaOrder({
+            mode: this.mode,
+            symbol: position.symbol,
+            side,
+            qty,
+            type: "limit",
+            time_in_force: "day",
+            limit_price: limitPrice,
+            extended_hours: true,
+          });
+          results.push({ ok: true, order });
         }
-
-        const order = await placeAlpacaOrder({
-          mode: this.mode,
-          symbol: position.symbol,
-          side,
-          qty,
-          type: useExtendedHours ? "limit" : "market",
-          time_in_force: "day",
-          limit_price: useExtendedHours ? limitPrice : undefined,
-          extended_hours: useExtendedHours,
-        });
-
-        results.push({
-          ok: true,
-          order,
-        });
-      } catch (error) {
-        results.push({
-          ok: false,
-          error: this.errorToMessage(error),
-        });
+      } else {
+        const brokerResults = await closeAllAlpacaPositions(this.mode, true);
+        const values = Array.isArray(brokerResults) ? brokerResults : [brokerResults];
+        for (const value of values) {
+          results.push({ ok: true, order: value });
+        }
       }
+    } catch (error) {
+      results.push({
+        ok: false,
+        error: this.errorToMessage(error),
+      });
     }
 
     const failed = results.filter((result) => !result.ok);

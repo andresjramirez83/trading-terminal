@@ -897,6 +897,71 @@ export async function cancelAlpacaOrder(
   return parseJson(res);
 }
 
+export type CloseAlpacaPositionOptions = {
+  mode?: AlpacaMode;
+  qty?: number;
+  percentage?: number;
+  cancelOrders?: boolean;
+  preserveProtection?: boolean;
+};
+
+export async function closeAlpacaPosition(
+  symbol: string,
+  options: CloseAlpacaPositionOptions = {},
+) {
+  const params = new URLSearchParams({
+    mode: options.mode ?? "paper",
+    cancel_orders: String(options.cancelOrders ?? true),
+    preserve_protection: String(options.preserveProtection ?? false),
+    _ts: String(Date.now()),
+  });
+
+  if (Number.isFinite(options.qty) && Number(options.qty) > 0) {
+    params.set("qty", String(options.qty));
+  }
+
+  if (
+    Number.isFinite(options.percentage) &&
+    Number(options.percentage) > 0
+  ) {
+    params.set("percentage", String(options.percentage));
+  }
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/position/${encodeURIComponent(symbol.toUpperCase())}?${params.toString()}`,
+    {
+      method: "DELETE",
+      cache: "no-store",
+      headers: ALPACA_NO_CACHE_HEADERS,
+    },
+  );
+
+  const payload = await parseJson<any>(res);
+  return payload?.order ?? payload?.close_order ?? payload;
+}
+
+export async function closeAllAlpacaPositions(
+  mode: AlpacaMode = "paper",
+  cancelOrders = true,
+) {
+  const params = new URLSearchParams({
+    mode,
+    cancel_orders: String(cancelOrders),
+    _ts: String(Date.now()),
+  });
+
+  const res = await fetch(
+    `${API_BASE}/alpaca/positions?${params.toString()}`,
+    {
+      method: "DELETE",
+      cache: "no-store",
+      headers: ALPACA_NO_CACHE_HEADERS,
+    },
+  );
+
+  return parseJson(res);
+}
+
 export type AutoTradeSource = "manual" | "scanner" | "both";
 export type AutoTradeSizingMode = "dollars" | "shares";
 export type AutoTradeRunnerMode = "off" | "scale_trail";

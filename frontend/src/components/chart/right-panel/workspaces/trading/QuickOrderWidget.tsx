@@ -178,7 +178,8 @@ export default function QuickOrderWidget({
         <label style={styles.toggle}>
           <input
             type="checkbox"
-            checked={order.extendedHours}
+            checked={order.extendedHours && !order.bracketEnabled}
+            disabled={order.bracketEnabled}
             onPointerDown={(event) => event.stopPropagation()}
             onChange={(event) =>
               onChange({ extendedHours: event.target.checked })
@@ -192,9 +193,13 @@ export default function QuickOrderWidget({
             type="checkbox"
             checked={order.bracketEnabled}
             onPointerDown={(event) => event.stopPropagation()}
-            onChange={(event) =>
-              onChange({ bracketEnabled: event.target.checked })
-            }
+            onChange={(event) => {
+              const bracketEnabled = event.target.checked;
+              onChange({
+                bracketEnabled,
+                ...(bracketEnabled ? { extendedHours: false } : {}),
+              });
+            }}
           />
           Bracket
         </label>
