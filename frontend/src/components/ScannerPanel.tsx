@@ -10,7 +10,8 @@ import {
   fetchSelectedAlertSymbols,
   saveSelectedAlertSymbols,
   toggleSelectedAlertSymbol,
-  fetchVwap3TargetHitHistory,
+  fetchVwap3SetupHistory,
+  type Vwap3SetupHistoryCounts,
   type ScannerCacheResponse,
 } from "../services/api";
 
@@ -79,6 +80,13 @@ type ScannerRow = {
   volume_accel_pct?: number;
   runner_score?: number;
   pm_runner_score?: number;
+  score_at_freeze?: number;
+  original_score?: number;
+  current_score?: number;
+  outcome?: string;
+  invalidation_time?: string | null;
+  target_hit_after_invalidation?: boolean;
+  valid_target_hit?: boolean;
   float_shares?: number | null;
   short_interest_pct?: number | null;
   short_interest_rank?: number | null;
@@ -451,9 +459,12 @@ export default function ScannerPanel({
 
   const [sortKey, setSortKey] = useState<keyof ScannerRow>("runner_score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [vwap3ResultTab, setVwap3ResultTab] = useState<"active" | "hits">("active");
+  const [vwap3ResultTab, setVwap3ResultTab] = useState<
+    "active" | "hits" | "after_invalid" | "invalidated"
+  >("active");
   const [vwap3HitDate, setVwap3HitDate] = useState(() => pacificTodayIso());
-  const [vwap3ArchivedHitRows, setVwap3ArchivedHitRows] = useState<ScannerRow[]>([]);
+  const [vwap3SetupHistoryRows, setVwap3SetupHistoryRows] = useState<ScannerRow[]>([]);
+  const [vwap3HistoryCounts, setVwap3HistoryCounts] = useState<Vwap3SetupHistoryCounts | null>(null);
   const [vwap3HitsLoading, setVwap3HitsLoading] = useState(false);
   const [vwap3HistoryError, setVwap3HistoryError] = useState("");
   const vwap3PacificToday = pacificTodayIso();
@@ -883,18 +894,20 @@ export default function ScannerPanel({
     setVwap3HitsLoading(true);
     setVwap3HistoryError("");
 
-    fetchVwap3TargetHitHistory(vwap3HitDate)
+    fetchVwap3SetupHistory(vwap3HitDate)
       .then((payload) => {
         if (cancelled) return;
-        setVwap3ArchivedHitRows((payload.rows ?? []) as ScannerRow[]);
+        setVwap3SetupHistoryRows((payload.rows ?? []) as ScannerRow[]);
+        setVwap3HistoryCounts(payload.counts ?? null);
       })
       .catch((err) => {
         if (cancelled) return;
-        setVwap3ArchivedHitRows([]);
+        setVwap3SetupHistoryRows([]);
+        setVwap3HistoryCounts(null);
         setVwap3HistoryError(
           err instanceof Error
             ? err.message
-            : "Failed to load VWAP +3 target-hit history",
+            : "Failed to load VWAP +3 setup history",
         );
       })
       .finally(() => {
@@ -939,14 +952,8 @@ export default function ScannerPanel({
     return sorted;
   }, [rows, runnerTypeFilter, sortKey, sortDir, isVwap3TargetScanner]);
 
-  const vwap3ActiveRows = useMemo(
-    () => filteredRows.filter((row) => String(row.confirmation_status ?? "") !== "TARGET HIT"),
-    [filteredRows],
-  );
-
-  const vwap3TargetHitRows = useMemo(() => {
-    const hitRows = dedupeScannerRows(vwap3ArchivedHitRows);
-    return [...hitRows].sort((a, b) => {
+  const sortVwap3Rows = (items: ScannerRow[]) => {
+    return [...items].sort((a, b) => {
       const av = a[sortKey];
       const bv = b[sortKey];
       const aNum = typeof av === "number" ? av : Number(av ?? -Infinity);
@@ -956,14 +963,40 @@ export default function ScannerPanel({
       }
       const aStr = String(av ?? "");
       const bStr = String(bv ?? "");
-      return sortDir === "asc"
-        ? aStr.localeCompare(bStr)
-        : bStr.localeCompare(aStr);
+      return sortDir === "asc" ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
     });
-  }, [vwap3ArchivedHitRows, sortKey, sortDir]);
+  };
+
+  const vwap3ActiveRows = useMemo(
+    () => filteredRows.filter((row) => String(row.outcome ?? "active") === "active"),
+    [filteredRows],
+  );
+
+  const vwap3HistoryRows = useMemo(
+    () => dedupeScannerRows(vwap3SetupHistoryRows),
+    [vwap3SetupHistoryRows],
+  );
+  const vwap3TargetHitRows = useMemo(
+    () => sortVwap3Rows(vwap3HistoryRows.filter((row) => String(row.outcome ?? "") === "target_hit")),
+    [vwap3HistoryRows, sortKey, sortDir],
+  );
+  const vwap3AfterInvalidRows = useMemo(
+    () => sortVwap3Rows(vwap3HistoryRows.filter((row) => String(row.outcome ?? "") === "target_hit_after_invalidation")),
+    [vwap3HistoryRows, sortKey, sortDir],
+  );
+  const vwap3InvalidatedRows = useMemo(
+    () => sortVwap3Rows(vwap3HistoryRows.filter((row) => String(row.outcome ?? "") === "invalidated")),
+    [vwap3HistoryRows, sortKey, sortDir],
+  );
 
   const vwap3DisplayedRows =
-    vwap3ResultTab === "hits" ? vwap3TargetHitRows : vwap3ActiveRows;
+    vwap3ResultTab === "hits"
+      ? vwap3TargetHitRows
+      : vwap3ResultTab === "after_invalid"
+        ? vwap3AfterInvalidRows
+        : vwap3ResultTab === "invalidated"
+          ? vwap3InvalidatedRows
+          : vwap3ActiveRows;
 
   const runnerCounts = useMemo(() => {
     const momentum = rows.filter(
@@ -1117,7 +1150,7 @@ export default function ScannerPanel({
   const cacheSummary = `Cache: ${cacheStatus?.status ?? "loading"} | Last PT: ${lastRunText} | Count: ${data?.count ?? rows.length}`;
 
   const summaryText = isWorkspace
-    ? isVwap3TargetScanner && vwap3ResultTab === "hits"
+    ? isVwap3TargetScanner && vwap3ResultTab !== "active"
       ? `History PT: ${vwap3HitDate} | ${cacheSummary}`
       : `Trade day: ${data?.trade_day ?? "--"} | ${cacheSummary}`
     : cacheSummary;
@@ -1367,6 +1400,7 @@ export default function ScannerPanel({
             <span><strong>A</strong> = frozen target 10-15%</span>
             <span><strong>Confirmed</strong> = 5m close above displacement close/body</span>
             <span><strong>Strong</strong> = 5m close above displacement high/wick</span>
+            <span><strong>Invalidated</strong> = later 5m low touches/breaks displacement low → live score 0</span>
           </div>
         </div>
       ) : isWorkspace ? (
@@ -1596,6 +1630,34 @@ export default function ScannerPanel({
         </div>
       ) : null}
 
+      {isWorkspace && isVwap3TargetScanner ? (
+        <div style={{ ...panelStyle, display: "grid", gap: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <div style={{ fontWeight: 800 }}>VWAP +3 Outcome Feedback · {vwap3HitDate} PT</div>
+            <div style={{ fontSize: 12, opacity: 0.72 }}>
+              Valid win rate uses resolved setups only. Hit-after-invalidation counts as a failure.
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8 }}>
+            {[
+              ["Total Setups", vwap3HistoryCounts?.total ?? vwap3HistoryRows.length],
+              ["Resolved", vwap3HistoryCounts?.resolved ?? 0],
+              ["Valid Hits", vwap3HistoryCounts?.valid_hits ?? vwap3TargetHitRows.length],
+              ["Failed", vwap3HistoryCounts?.failed ?? 0],
+              ["Hit After Invalid", vwap3HistoryCounts?.target_hits_after_invalidation ?? vwap3AfterInvalidRows.length],
+              ["Invalidated", vwap3HistoryCounts?.invalidated ?? vwap3InvalidatedRows.length],
+              ["Expired", vwap3HistoryCounts?.expired ?? 0],
+              ["Valid Hit Rate", `${formatMaybe(vwap3HistoryCounts?.valid_hit_rate_pct ?? 0)}%`],
+            ].map(([label, value]) => (
+              <div key={String(label)} style={{ border: "1px solid #2a2f3a", borderRadius: 9, padding: "9px 10px", background: "#0b0f14" }}>
+                <div style={{ fontSize: 11, opacity: 0.68, marginBottom: 4 }}>{label}</div>
+                <div style={{ fontSize: 17, fontWeight: 900 }}>{value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {status ? (
         <div
           style={{
@@ -1666,9 +1728,23 @@ export default function ScannerPanel({
                   onClick={() => setVwap3ResultTab("hits")}
                   style={vwap3ResultTab === "hits" ? activeButtonStyle : buttonStyle}
                 >
-                  Target Hits ({vwap3TargetHitRows.length})
+                  Valid Hits ({vwap3TargetHitRows.length})
                 </button>
-                {vwap3ResultTab === "hits" ? (
+                <button
+                  type="button"
+                  onClick={() => setVwap3ResultTab("after_invalid")}
+                  style={vwap3ResultTab === "after_invalid" ? activeButtonStyle : buttonStyle}
+                >
+                  Hit After Invalid ({vwap3AfterInvalidRows.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVwap3ResultTab("invalidated")}
+                  style={vwap3ResultTab === "invalidated" ? activeButtonStyle : buttonStyle}
+                >
+                  Invalidated ({vwap3InvalidatedRows.length})
+                </button>
+                {vwap3ResultTab !== "active" ? (
                   <>
                     <button
                       type="button"
@@ -1710,12 +1786,12 @@ export default function ScannerPanel({
                   </>
                 ) : null}
                 <span style={{ fontSize: 12, opacity: 0.72 }}>
-                  Hits are removed from Active Targets and archived by date.
+                  Invalidated setups are removed from Active and their actionable score becomes 0.
                 </span>
               </div>
             )}
             {isVwap3TargetScanner &&
-            vwap3ResultTab === "hits" &&
+            vwap3ResultTab !== "active" &&
             vwap3HistoryError ? (
               <div style={{ color: "#ff7b7b", fontSize: 12, marginTop: 8 }}>
                 {vwap3HistoryError}
@@ -1842,6 +1918,8 @@ export default function ScannerPanel({
                   ["rank_at_freeze", "Rank@Freeze"],
                   ["session", "Session"],
                   ["confirmation_status", "Status"],
+                  ["score_at_freeze", "Score@Freeze"],
+                  ["current_score", "Live Score"],
                   ["last_price", "Last"],
                   ["freeze_price", "Hist Freeze"],
                   ["target_price", "+3 TARGET"],
@@ -1853,6 +1931,7 @@ export default function ScannerPanel({
                   ["displacement_high", "Disp High"],
                   ["displacement_time", "Disp Time PT"],
                   ["freeze_time", "Freeze Time PT"],
+                  ["invalidation_time", "Invalid PT"],
                   ["target_hit_time", "Hit Time PT"],
                   ["scanner_detected_at", "Detected PT"],
                   ["detection_delay_minutes", "Delay"],
@@ -1897,11 +1976,15 @@ export default function ScannerPanel({
                 const statusColor =
                   statusText === "TARGET HIT"
                     ? "#66d17a"
-                    : statusText === "STRONG CONFIRMED"
-                      ? "#79c7ff"
-                      : statusText === "CONFIRMED"
-                        ? "#b9e679"
-                        : "#f0c36a";
+                    : statusText === "TARGET HIT AFTER INVALIDATION"
+                      ? "#f59e0b"
+                      : statusText === "INVALIDATED"
+                        ? "#ff6b6b"
+                        : statusText === "STRONG CONFIRMED"
+                          ? "#79c7ff"
+                          : statusText === "CONFIRMED"
+                            ? "#b9e679"
+                            : "#f0c36a";
                 const gradeColor = row.grade === "A+" ? "#66d17a" : "#f0c36a";
                 return (
                   <tr
@@ -1923,6 +2006,10 @@ export default function ScannerPanel({
                     <td style={cellLeft}>{row.session ?? "-"}</td>
                     <td style={{ ...cellLeft, color: statusColor, fontWeight: 800 }}>
                       {statusText}
+                    </td>
+                    <td style={cellRight}>{row.score_at_freeze ?? row.original_score ?? "-"}</td>
+                    <td style={{ ...cellRight, fontWeight: 900, color: Number(row.current_score ?? row.score ?? 0) === 0 ? "#ff6b6b" : "#e5e7eb" }}>
+                      {row.current_score ?? row.score ?? "-"}
                     </td>
                     <td style={cellRight}>{formatPrice(row.last_price ?? row.price)}</td>
                     <td style={cellRight}>{formatPrice(row.freeze_price)}</td>
@@ -1950,6 +2037,9 @@ export default function ScannerPanel({
                       {formatPacificDateTime(row.freeze_time)}
                     </td>
                     <td style={cellRight}>
+                      {formatPacificDateTime(row.invalidation_time)}
+                    </td>
+                    <td style={cellRight}>
                       {formatPacificDateTime(row.target_hit_time)}
                     </td>
                     <td style={cellRight}>
@@ -1964,10 +2054,14 @@ export default function ScannerPanel({
               })}
               {!loading && vwap3DisplayedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={21} style={{ padding: 16, opacity: 0.7 }}>
+                  <td colSpan={30} style={{ padding: 16, opacity: 0.7 }}>
                     {vwap3ResultTab === "hits"
-                      ? `No VWAP +3 target hits saved for ${vwap3HitDate} PT.`
-                      : "No active VWAP +3 target setups are active right now."}
+                      ? `No valid VWAP +3 target hits saved for ${vwap3HitDate} PT.`
+                      : vwap3ResultTab === "after_invalid"
+                        ? `No target hits after invalidation saved for ${vwap3HitDate} PT.`
+                        : vwap3ResultTab === "invalidated"
+                          ? `No invalidated VWAP +3 setups saved for ${vwap3HitDate} PT.`
+                          : "No active VWAP +3 target setups are active right now."}
                   </td>
                 </tr>
               ) : null}

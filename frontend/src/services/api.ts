@@ -378,6 +378,54 @@ export type Vwap3TargetHitHistoryResponse = {
   rows: Record<string, unknown>[];
 };
 
+export type Vwap3SetupHistoryRow = {
+  symbol?: string;
+  setup_key?: string;
+  grade?: string;
+  session?: string;
+  outcome?: string;
+  confirmation_status?: string;
+  displacement_time?: string;
+  displacement_high?: number;
+  displacement_low?: number;
+  displacement_close?: number;
+  freeze_time?: string;
+  freeze_price?: number;
+  freeze_upper_3std?: number;
+  freeze_lower_3std?: number;
+  frozen_target?: number;
+  target_price?: number;
+  target_hit_time?: string | null;
+  invalidation_time?: string | null;
+  score_at_freeze?: number;
+  original_score?: number;
+  current_score?: number;
+  score?: number;
+  runner_score?: number;
+  [key: string]: unknown;
+};
+
+export type Vwap3SetupHistoryCounts = {
+  total: number;
+  active: number;
+  resolved: number;
+  valid_hits: number;
+  target_hits_after_invalidation: number;
+  invalidated: number;
+  expired: number;
+  failed: number;
+  valid_hit_rate_pct: number;
+  failure_rate_pct: number;
+};
+
+export type Vwap3SetupHistoryResponse = {
+  trade_date: string;
+  pacific_today: string;
+  count: number;
+  counts: Vwap3SetupHistoryCounts;
+  rows: Vwap3SetupHistoryRow[];
+};
+
 export async function fetchVwap3TargetHitHistory(
   tradeDate?: string,
 ): Promise<Vwap3TargetHitHistoryResponse> {
@@ -388,6 +436,18 @@ export async function fetchVwap3TargetHitHistory(
     { cache: "no-store" },
   );
   return parseJson<Vwap3TargetHitHistoryResponse>(res);
+}
+
+export async function fetchVwap3SetupHistory(
+  tradeDate?: string,
+): Promise<Vwap3SetupHistoryResponse> {
+  const qs = new URLSearchParams();
+  if (tradeDate) qs.set("trade_date", tradeDate);
+  const res = await fetch(
+    `${API_BASE}/scanner-v2/vwap3/setups${qs.toString() ? `?${qs.toString()}` : ""}`,
+    { cache: "no-store" },
+  );
+  return parseJson<Vwap3SetupHistoryResponse>(res);
 }
 
 const ENABLED_SCANNER_IDS = new Set(["vwap3_target"]);

@@ -65,8 +65,10 @@ import {
 import {
   API_BASE,
   fetchAutoTradeStatus,
+  fetchVwap3SetupHistory,
   updateOvernightProtectedOrderPrice,
   type AutoTradeStatus,
+  type Vwap3SetupHistoryRow,
 } from "../../services/api";
 
 const TIMEFRAME_STORAGE_KEY = "chartv2.timeframe";
@@ -80,6 +82,34 @@ const MARKET_DATA_MODE_STORAGE_KEY = "chartv2.marketDataMode";
 const CHART_PREFERENCES_POLL_MS = 15_000;
 const CHART_PREFERENCES_SAVE_DELAY_MS = 180;
 const LIVE_CHART_STATE_THROTTLE_MS = 250;
+const VWAP3_CHART_OVERLAY_REFRESH_MS = 15_000;
+
+function pacificTodayIsoForChart(): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function latestVwap3SetupForSymbol(
+  rows: Vwap3SetupHistoryRow[],
+  symbol: string,
+): Vwap3SetupHistoryRow | null {
+  const normalized = symbol.trim().toUpperCase();
+  const matches = rows.filter(
+    (row) => String(row.symbol ?? "").trim().toUpperCase() === normalized,
+  );
+  matches.sort((a, b) => {
+    const aTime = Date.parse(String(a.freeze_time ?? a.displacement_time ?? ""));
+    const bTime = Date.parse(String(b.freeze_time ?? b.displacement_time ?? ""));
+    return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+  });
+  return matches[0] ?? null;
+}
 
 const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
   vwap: true,
@@ -1705,6 +1735,60 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     symbol,
     timeframe,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const applyOverlay = async () => {
+      const engine = engineRef.current;
+      if (!engine) return;
+
+      if (marketDataMode !== "live") {
+        engine.setVwap3SetupOverlay(null);
+        return;
+      }
+
+      try {
+        const history = await fetchVwap3SetupHistory(pacificTodayIsoForChart());
+        if (cancelled) return;
+        const setup = latestVwap3SetupForSymbol(history.rows ?? [], symbol);
+        if (!setup) {
+          engine.setVwap3SetupOverlay(null);
+          return;
+        }
+
+        engine.setVwap3SetupOverlay({
+          symbol: String(setup.symbol ?? symbol).toUpperCase(),
+          setupKey: String(setup.setup_key ?? ""),
+          grade: String(setup.grade ?? ""),
+          status: String(setup.confirmation_status ?? ""),
+          outcome: String(setup.outcome ?? ""),
+          displacementTime: setup.displacement_time ? String(setup.displacement_time) : undefined,
+          displacementHigh: Number(setup.displacement_high ?? 0) || undefined,
+          displacementLow: Number(setup.displacement_low ?? 0) || undefined,
+          freezeUpper3Std: Number(setup.freeze_upper_3std ?? setup.frozen_target ?? setup.target_price ?? 0) || undefined,
+          freezeLower3Std: Number(setup.freeze_lower_3std ?? 0) || undefined,
+          currentScore: Number(setup.current_score ?? setup.score ?? 0),
+          scoreAtFreeze: Number(setup.score_at_freeze ?? setup.original_score ?? 0),
+        });
+      } catch (error) {
+        if (!cancelled) {
+          console.warn("[vwap3-chart-overlay] refresh failed", error);
+        }
+      }
+    };
+
+    void applyOverlay();
+    if (marketDataMode === "live") {
+      timer = window.setInterval(() => void applyOverlay(), VWAP3_CHART_OVERLAY_REFRESH_MS);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearInterval(timer);
+    };
+  }, [marketDataMode, symbol, timeframe]);
 
   useEffect(() => {
     if (marketDataMode !== "live") {

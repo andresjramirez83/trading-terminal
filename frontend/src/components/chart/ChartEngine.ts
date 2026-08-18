@@ -11,6 +11,7 @@ import {
   type CandlestickData,
   type HistogramData,
   type IChartApi,
+  type IPriceLine,
   type LineData,
   type MouseEventParams,
   type Time,
@@ -53,6 +54,22 @@ import { PositionOverlayEngine } from "../../trading/overlay/PositionOverlayEngi
 import { PositionOverlayRenderer } from "../../trading/overlay/PositionOverlayRenderer";
 import { marketObjectRegistry } from "./analysis/market-objects/MarketObjectRegistry";
 import type { MarketObject } from "./analysis/market-objects/MarketObjectTypes";
+
+
+export type Vwap3ChartSetupOverlay = {
+  symbol: string;
+  setupKey?: string;
+  grade?: string;
+  status?: string;
+  outcome?: string;
+  displacementTime?: string;
+  displacementHigh?: number;
+  displacementLow?: number;
+  freezeUpper3Std?: number;
+  freezeLower3Std?: number;
+  currentScore?: number;
+  scoreAtFreeze?: number;
+};
 
 function volumeColor(bar: CleanBar): string {
   return bar.close >= bar.open
@@ -283,6 +300,11 @@ export class ChartEngine {
   private unsubscribeAnalysisStore: (() => void) | null = null;
   private fxAutoScaleRangeKey = "none";
   private forceNextFxAutoScale = false;
+  private vwap3SetupOverlay: Vwap3ChartSetupOverlay | null = null;
+  private vwap3UpperPriceLine: IPriceLine | null = null;
+  private vwap3LowerPriceLine: IPriceLine | null = null;
+  private vwap3ExpansionOverlay: HTMLDivElement;
+  private vwap3OverlayRenderFrame: number | null = null;
 
   // Live candle updates can arrive many times per second. Keep the expensive
   // study algorithms off the hot path and update EMA/VWAP from cached prefix
@@ -316,6 +338,14 @@ export class ChartEngine {
     this.sessionOverlay.style.overflow = "hidden";
     this.sessionOverlay.style.zIndex = "2";
     this.container.appendChild(this.sessionOverlay);
+
+    this.vwap3ExpansionOverlay = document.createElement("div");
+    this.vwap3ExpansionOverlay.style.position = "absolute";
+    this.vwap3ExpansionOverlay.style.inset = "0";
+    this.vwap3ExpansionOverlay.style.pointerEvents = "none";
+    this.vwap3ExpansionOverlay.style.overflow = "hidden";
+    this.vwap3ExpansionOverlay.style.zIndex = "5";
+    this.container.appendChild(this.vwap3ExpansionOverlay);
 
     this.chart = createChart(container, {
       width: Math.max(1, container.clientWidth),
@@ -476,6 +506,7 @@ export class ChartEngine {
     this.handleVisibleRangeChange = () => {
       this.scheduleSessionBandsRender();
       this.studyRenderer.scheduleOverlayRender();
+      this.scheduleVwap3OverlayRender();
     };
 
     this.handleCrosshairMove = (param) => {
@@ -1055,6 +1086,7 @@ export class ChartEngine {
 
     this.studyRenderer.scheduleOverlayRender();
     this.scheduleSessionBandsRender();
+    this.scheduleVwap3OverlayRender();
   }
 
   setBars(bars: CleanBar[]): void {
@@ -1084,6 +1116,7 @@ export class ChartEngine {
     this.renderStudies();
     this.renderFxAnalysis();
     this.scheduleSessionBandsRender();
+    this.scheduleVwap3OverlayRender();
   }
 
   updateBar(bar: CleanBar): void {
@@ -1154,6 +1187,7 @@ export class ChartEngine {
     if (!isSameBar) {
       this.scheduleSessionBandsRender();
     }
+    this.scheduleVwap3OverlayRender();
   }
 
   setStudyVisibility(visibility: StudyVisibility): void {
@@ -1298,9 +1332,14 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     return;
   }
 
+  const symbolChanged = this.symbol !== nextSymbol;
   this.symbol = nextSymbol;
   this.timeframe = nextTimeframe;
   this.invalidateDerivedStateCache();
+
+  if (symbolChanged && this.vwap3SetupOverlay?.symbol !== nextSymbol) {
+    this.setVwap3SetupOverlay(null);
+  }
 
   this.autoScaleManager.clearFocusedPriceRange();
   this.autoScaleManager.clearVerticalPan();
@@ -1309,6 +1348,120 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   this.positionOverlayEngine.setSymbol(symbol);
   this.analysisStore.setWorkspace(symbol, timeframe);
 }
+  setVwap3SetupOverlay(setup: Vwap3ChartSetupOverlay | null): void {
+    this.vwap3SetupOverlay = setup;
+
+    if (this.vwap3UpperPriceLine) {
+      this.series.candles.removePriceLine(this.vwap3UpperPriceLine);
+      this.vwap3UpperPriceLine = null;
+    }
+    if (this.vwap3LowerPriceLine) {
+      this.series.candles.removePriceLine(this.vwap3LowerPriceLine);
+      this.vwap3LowerPriceLine = null;
+    }
+
+    const upper = Number(setup?.freezeUpper3Std ?? 0);
+    const lower = Number(setup?.freezeLower3Std ?? 0);
+    if (setup && Number.isFinite(upper) && upper > 0) {
+      this.vwap3UpperPriceLine = this.series.candles.createPriceLine({
+        price: upper,
+        color: "#38bdf8",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: "+3 VWAP",
+      });
+    }
+    if (setup && Number.isFinite(lower) && lower > 0) {
+      this.vwap3LowerPriceLine = this.series.candles.createPriceLine({
+        price: lower,
+        color: "#fb7185",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: "-3 VWAP",
+      });
+    }
+
+    this.scheduleVwap3OverlayRender();
+  }
+
+  private scheduleVwap3OverlayRender(): void {
+    if (this.vwap3OverlayRenderFrame != null) return;
+    this.vwap3OverlayRenderFrame = window.requestAnimationFrame(() => {
+      this.vwap3OverlayRenderFrame = null;
+      this.renderVwap3ExpansionMarker();
+    });
+  }
+
+  private renderVwap3ExpansionMarker(): void {
+    this.vwap3ExpansionOverlay.replaceChildren();
+    const setup = this.vwap3SetupOverlay;
+    if (!setup || !setup.displacementTime || !this.bars.length) return;
+
+    // The scanner displacement is a native 5-minute candle. Show the exact
+    // EXP marker only on the 5m chart; the frozen +/-3 lines remain visible
+    // on every timeframe without requiring any recalculation.
+    const normalizedTimeframe = String(this.timeframe ?? "").trim().toLowerCase();
+    if (normalizedTimeframe !== "5m") return;
+
+    const targetMs = Date.parse(setup.displacementTime);
+    if (!Number.isFinite(targetMs)) return;
+    const targetSeconds = Math.floor(targetMs / 1000);
+
+    let nearest = this.bars[0];
+    let nearestDistance = Math.abs(Number(nearest.time) - targetSeconds);
+    for (const bar of this.bars) {
+      const distance = Math.abs(Number(bar.time) - targetSeconds);
+      if (distance < nearestDistance) {
+        nearest = bar;
+        nearestDistance = distance;
+      }
+    }
+    if (nearestDistance > 10 * 60) return;
+
+    const x = this.chart.timeScale().timeToCoordinate(nearest.time);
+    const markerPrice = Number(setup.displacementHigh ?? nearest.high);
+    const y = this.series.candles.priceToCoordinate(markerPrice);
+    if (x == null || y == null) return;
+
+    const badge = document.createElement("div");
+    const invalid =
+      String(setup.outcome ?? "") === "invalidated" ||
+      String(setup.status ?? "") === "INVALIDATED" ||
+      String(setup.outcome ?? "") === "target_hit_after_invalidation";
+    badge.textContent = invalid
+      ? `EXP ${setup.grade ?? ""} · INVALID`
+      : `EXP ${setup.grade ?? ""}`;
+    badge.style.position = "absolute";
+    badge.style.left = `${Math.round(x)}px`;
+    badge.style.top = `${Math.max(4, Math.round(y) - 30)}px`;
+    badge.style.transform = "translateX(-50%)";
+    badge.style.padding = "3px 6px";
+    badge.style.borderRadius = "5px";
+    badge.style.border = invalid
+      ? "1px solid rgba(248,113,113,0.95)"
+      : "1px solid rgba(56,189,248,0.95)";
+    badge.style.background = "rgba(8,15,28,0.92)";
+    badge.style.color = invalid ? "#fca5a5" : "#bae6fd";
+    badge.style.fontSize = "10px";
+    badge.style.fontWeight = "800";
+    badge.style.whiteSpace = "nowrap";
+    badge.style.boxShadow = "0 1px 4px rgba(0,0,0,0.35)";
+
+    const stem = document.createElement("div");
+    stem.style.position = "absolute";
+    stem.style.left = `${Math.round(x)}px`;
+    stem.style.top = `${Math.max(18, Math.round(y) - 10)}px`;
+    stem.style.height = "10px";
+    stem.style.borderLeft = invalid
+      ? "1px dotted rgba(248,113,113,0.9)"
+      : "1px dotted rgba(56,189,248,0.9)";
+
+    this.vwap3ExpansionOverlay.appendChild(badge);
+    this.vwap3ExpansionOverlay.appendChild(stem);
+  }
+
   private buildAutoScalePriceRange(
     baseRange: { minValue: number; maxValue: number } | null,
   ): { minValue: number; maxValue: number } | null {
@@ -1637,6 +1790,13 @@ setMarketContext(symbol?: string, timeframe?: string): void {
 
     this.studyRenderer.destroy();
     this.clearSessionBands();
+    this.setVwap3SetupOverlay(null);
+    this.vwap3ExpansionOverlay.replaceChildren();
+
+    if (this.vwap3OverlayRenderFrame != null) {
+      window.cancelAnimationFrame(this.vwap3OverlayRenderFrame);
+      this.vwap3OverlayRenderFrame = null;
+    }
 
     if (this.sessionRenderFrame != null) {
       window.cancelAnimationFrame(this.sessionRenderFrame);
@@ -1644,6 +1804,7 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     }
 
     this.sessionOverlay.remove();
+    this.vwap3ExpansionOverlay.remove();
     this.bars = [];
     this.chart.remove();
   }

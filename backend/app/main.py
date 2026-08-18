@@ -3847,6 +3847,13 @@ VWAP3_TARGET_HIT_ARCHIVE_DIR = (
     / "vwap3_target_hits"
 )
 
+VWAP3_SETUP_ARCHIVE_DIR = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "scanner_history"
+    / "vwap3_setups"
+)
+
 
 def _normalize_vwap3_history_date(value: Optional[str]) -> str:
     raw = str(value or "").strip()
@@ -3888,6 +3895,87 @@ async def scanner_v2_vwap3_target_hits(
         "trade_date": selected_date,
         "pacific_today": datetime.now(PT).date().isoformat(),
         "count": len(rows),
+        "rows": rows,
+    }
+
+
+@app.get("/scanner-v2/vwap3/setups")
+async def scanner_v2_vwap3_setups(
+    trade_date: Optional[str] = Query(None),
+):
+    """Return every archived VWAP3 setup for one Pacific review date.
+
+    Unlike target-hits, this endpoint includes active, invalidated, expired,
+    valid target hits, and target hits after invalidation so the scanner UI
+    can show a real denominator and failure counts.
+    """
+    selected_date = _normalize_vwap3_history_date(trade_date)
+    path = VWAP3_SETUP_ARCHIVE_DIR / f"{selected_date}.json"
+    rows: List[Dict[str, Any]] = []
+
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text())
+            rows = [
+                dict(row)
+                for row in (payload.get("rows") or [])
+                if isinstance(row, dict)
+            ]
+        except Exception as exc:
+            print(
+                f"[vwap3-setup-history] load failed date={selected_date} error={exc}",
+                flush=True,
+            )
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    counts = {
+        "total": len(rows),
+        "active": 0,
+        "resolved": 0,
+        "valid_hits": 0,
+        "target_hits_after_invalidation": 0,
+        "invalidated": 0,
+        "expired": 0,
+        "failed": 0,
+    }
+    for row in rows:
+        outcome = str(row.get("outcome") or "active")
+        if outcome == "target_hit":
+            counts["valid_hits"] += 1
+            counts["resolved"] += 1
+        elif outcome == "target_hit_after_invalidation":
+            counts["target_hits_after_invalidation"] += 1
+            counts["resolved"] += 1
+            counts["failed"] += 1
+        elif outcome == "invalidated":
+            counts["invalidated"] += 1
+            counts["resolved"] += 1
+            counts["failed"] += 1
+        elif outcome == "expired":
+            counts["expired"] += 1
+            counts["resolved"] += 1
+            counts["failed"] += 1
+        else:
+            counts["active"] += 1
+
+    counts["valid_hit_rate_pct"] = round(
+        (counts["valid_hits"] / counts["resolved"] * 100.0)
+        if counts["resolved"]
+        else 0.0,
+        2,
+    )
+    counts["failure_rate_pct"] = round(
+        (counts["failed"] / counts["resolved"] * 100.0)
+        if counts["resolved"]
+        else 0.0,
+        2,
+    )
+
+    return {
+        "trade_date": selected_date,
+        "pacific_today": datetime.now(PT).date().isoformat(),
+        "count": len(rows),
+        "counts": counts,
         "rows": rows,
     }
 

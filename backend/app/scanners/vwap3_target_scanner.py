@@ -462,6 +462,10 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
         status = "TARGET HIT AFTER INVALIDATION"
     elif target_hit_time:
         status = "TARGET HIT"
+    elif invalidation_time:
+        # Once the displacement low is touched/broken, the original 3-VWAP
+        # thesis is no longer actionable even if price later recovers.
+        status = "INVALIDATED"
     elif strong_confirmation_time:
         status = "STRONG CONFIRMED"
     elif confirmation_time:
@@ -1125,6 +1129,12 @@ class VWAP3TargetScanner(ScannerBase):
                 "freeze_upper_3std": round(full_target, 6),
                 "freeze_lower_3std": round(lower_3std, 6),
 
+                # Preserve the quality assigned when the setup first froze.
+                # score/runner_score remain the LIVE actionable score and may
+                # later be downgraded to zero after invalidation.
+                "score_at_freeze": base_score,
+                "original_score": base_score,
+                "current_score": base_score,
                 "score": base_score,
                 "runner_score": base_score,
                 "notes": notes,
@@ -1299,15 +1309,30 @@ class VWAP3TargetScanner(ScannerBase):
             row["is_live_top20_now"] = current_rank is not None and current_rank <= 20
             row["is_live_top50_now"] = current_rank is not None and current_rank <= 50
             row["last_updated_at"] = datetime.now(timezone.utc).isoformat()
-            base_score = _grade_base_score(str(row.get("grade") or ""))
-            if row.get("confirmation_status") == "CONFIRMED":
-                base_score += 3
-            elif row.get("confirmation_status") == "STRONG CONFIRMED":
-                base_score += 6
-            elif row.get("confirmation_status") == "TARGET HIT":
-                base_score = 100
-            row["score"] = min(100, base_score)
-            row["runner_score"] = row["score"]
+            freeze_score = int(
+                row.get("score_at_freeze")
+                or row.get("original_score")
+                or _grade_base_score(str(row.get("grade") or ""))
+            )
+            row["score_at_freeze"] = freeze_score
+            row["original_score"] = freeze_score
+
+            live_score = freeze_score
+            status = str(row.get("confirmation_status") or "")
+            if status == "CONFIRMED":
+                live_score += 3
+            elif status == "STRONG CONFIRMED":
+                live_score += 6
+            elif status == "TARGET HIT":
+                live_score = 100
+            elif status in {"INVALIDATED", "TARGET HIT AFTER INVALIDATION"}:
+                # An invalidated setup stays in research history, but it must
+                # not compete with actionable setups in the live ranking.
+                live_score = 0
+
+            row["current_score"] = min(100, max(0, live_score))
+            row["score"] = row["current_score"]
+            row["runner_score"] = row["current_score"]
             self._tracked[key] = row
 
         self._archive_target_hits()
@@ -1321,6 +1346,8 @@ class VWAP3TargetScanner(ScannerBase):
             "CONFIRMED": 1,
             "WAITING": 2,
             "TARGET HIT": 3,
+            "INVALIDATED": 4,
+            "TARGET HIT AFTER INVALIDATION": 5,
         }
         rows.sort(
             key=lambda row: (
@@ -1337,8 +1364,19 @@ class VWAP3TargetScanner(ScannerBase):
             row for row in rows
             if str(row.get("trade_date") or "") == current_trade_date
         ]
-        active_rows = [row for row in current_rows if not row.get("target_hit")]
+        active_rows = [
+            row for row in current_rows
+            if str(row.get("outcome") or "active") == "active"
+        ]
         target_hit_rows = [row for row in current_rows if row.get("target_hit")]
+        invalidated_rows = [
+            row for row in current_rows
+            if str(row.get("outcome") or "") == "invalidated"
+        ]
+        target_after_invalidation_rows = [
+            row for row in current_rows
+            if str(row.get("outcome") or "") == "target_hit_after_invalidation"
+        ]
         # The live scanner list contains active setups only. Completed targets are
         # returned separately for the Target Hits review tab.
         rows = active_rows[:max_rows]
@@ -1368,6 +1406,8 @@ class VWAP3TargetScanner(ScannerBase):
                 "tracked_count": len(self._tracked),
                 "active_count": len(active_rows),
                 "target_hit_count": len(target_hit_rows),
+                "invalidated_count": len(invalidated_rows),
+                "target_hit_after_invalidation_count": len(target_after_invalidation_rows),
                 "target_hit_archive_dir": str(_hit_archive_dir()),
                 "setup_archive_dir": str(_setup_archive_dir()),
                 "pushover_configured": bool(
@@ -1411,6 +1451,7 @@ class VWAP3TargetScanner(ScannerBase):
                     },
                     "confirmation": "5m close above displacement close/body",
                     "strong_confirmation": "5m close above displacement high/wick",
+                    "invalidation": "later 5m low touches/breaks displacement low; actionable score becomes 0",
                 },
                 "discovery": (
                     "saved AH + live gainers + live actives + live losers + "
