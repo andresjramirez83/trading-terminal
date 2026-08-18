@@ -33,6 +33,7 @@ function formatTime(value: number | null): string {
   if (!value) return "—";
 
   return new Date(value).toLocaleTimeString([], {
+    timeZone: "America/Los_Angeles",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",

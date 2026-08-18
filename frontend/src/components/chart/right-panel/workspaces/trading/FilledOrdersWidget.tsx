@@ -83,16 +83,18 @@ function formatTradeTime(timestamp: number): string {
   if (!timestamp) return "—";
 
   return new Date(timestamp).toLocaleString([], {
+    timeZone: "America/Los_Angeles",
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZoneName: "short",
   });
 }
 
 function marketDateKey(timestamp: number): string {
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
+    timeZone: "America/Los_Angeles",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

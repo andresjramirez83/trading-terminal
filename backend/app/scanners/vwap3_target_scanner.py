@@ -1364,7 +1364,17 @@ class VWAP3TargetScanner(ScannerBase):
             row for row in rows
             if str(row.get("trade_date") or "") == current_trade_date
         ]
+
+        # IMPORTANT: actionable setups survive the Eastern market-date rollover.
+        # A frozen setup is still actionable until it hits +3, invalidates, or
+        # expires.  Filtering active rows to now_et.date() made the scanner look
+        # empty at 9:00 PM Pacific / midnight Eastern even when an older setup was
+        # still valid.  _cleanup_state() already enforces the maximum tracking age.
         active_rows = [
+            row for row in rows
+            if str(row.get("outcome") or "active") == "active"
+        ]
+        active_current_session_rows = [
             row for row in current_rows
             if str(row.get("outcome") or "active") == "active"
         ]
@@ -1377,8 +1387,18 @@ class VWAP3TargetScanner(ScannerBase):
             row for row in current_rows
             if str(row.get("outcome") or "") == "target_hit_after_invalidation"
         ]
-        # The live scanner list contains active setups only. Completed targets are
-        # returned separately for the Target Hits review tab.
+
+        # Rank the actionable list by the live score first.  The original score
+        # remains on each row for research, while invalidated setups stay at 0 and
+        # are never returned as actionable rows.
+        active_rows.sort(
+            key=lambda row: (
+                -_safe_float(row.get("current_score", row.get("score", 0))),
+                _grade_sort_order(str(row.get("grade") or "")),
+                _safe_float(row.get("target_distance_pct")),
+                str(row.get("freeze_time") or ""),
+            )
+        )
         rows = active_rows[:max_rows]
         elapsed_ms = round((time_module.perf_counter() - started) * 1000.0, 1)
 
@@ -1392,7 +1412,11 @@ class VWAP3TargetScanner(ScannerBase):
             "scanner_name": self.name,
             "description": self.description,
             "workflow": "live",
+            # trade_day is the market-session date (Eastern) for backward
+            # compatibility.  All user-facing timestamps are rendered Pacific.
             "trade_day": now_et.date().isoformat(),
+            "market_trade_day_et": now_et.date().isoformat(),
+            "display_date_pt": now_et.astimezone(PT).date().isoformat(),
             "count": len(rows),
             "rows": rows,
             "target_hits": target_hit_rows,
@@ -1405,6 +1429,7 @@ class VWAP3TargetScanner(ScannerBase):
                 "newly_qualified": newly_qualified,
                 "tracked_count": len(self._tracked),
                 "active_count": len(active_rows),
+                "active_current_market_day_count": len(active_current_session_rows),
                 "target_hit_count": len(target_hit_rows),
                 "invalidated_count": len(invalidated_rows),
                 "target_hit_after_invalidation_count": len(target_after_invalidation_rows),

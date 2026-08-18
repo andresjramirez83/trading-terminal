@@ -144,9 +144,10 @@ export class MarketStoryBuilder {
     const keyEvents = ordered.map(
       (event) =>
         `${new Date(event.timestamp).toLocaleTimeString([], {
+          timeZone: "America/Los_Angeles",
           hour: "2-digit",
           minute: "2-digit",
-        })} - ${event.title}`,
+        })} PT - ${event.title}`,
     );
 
     const avgConfidence =

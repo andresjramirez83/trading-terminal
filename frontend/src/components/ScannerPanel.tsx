@@ -460,8 +460,8 @@ export default function ScannerPanel({
   const [sortKey, setSortKey] = useState<keyof ScannerRow>("runner_score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [vwap3ResultTab, setVwap3ResultTab] = useState<
-    "active" | "hits" | "after_invalid" | "invalidated"
-  >("active");
+    "all" | "active" | "hits" | "after_invalid" | "invalidated" | "expired"
+  >("all");
   const [vwap3HitDate, setVwap3HitDate] = useState(() => pacificTodayIso());
   const [vwap3SetupHistoryRows, setVwap3SetupHistoryRows] = useState<ScannerRow[]>([]);
   const [vwap3HistoryCounts, setVwap3HistoryCounts] = useState<Vwap3SetupHistoryCounts | null>(null);
@@ -988,15 +988,31 @@ export default function ScannerPanel({
     () => sortVwap3Rows(vwap3HistoryRows.filter((row) => String(row.outcome ?? "") === "invalidated")),
     [vwap3HistoryRows, sortKey, sortDir],
   );
+  const vwap3ExpiredRows = useMemo(
+    () => sortVwap3Rows(vwap3HistoryRows.filter((row) => String(row.outcome ?? "") === "expired")),
+    [vwap3HistoryRows, sortKey, sortDir],
+  );
+
+  // "All Setups" is intentionally history + any currently actionable setup.
+  // This keeps an unresolved setup visible across the 9 PM Pacific / midnight
+  // Eastern market-date rollover instead of making Refresh appear to erase it.
+  const vwap3AllRows = useMemo(
+    () => sortVwap3Rows(dedupeScannerRows([...vwap3ActiveRows, ...vwap3HistoryRows])),
+    [vwap3ActiveRows, vwap3HistoryRows, sortKey, sortDir],
+  );
 
   const vwap3DisplayedRows =
-    vwap3ResultTab === "hits"
-      ? vwap3TargetHitRows
-      : vwap3ResultTab === "after_invalid"
-        ? vwap3AfterInvalidRows
-        : vwap3ResultTab === "invalidated"
-          ? vwap3InvalidatedRows
-          : vwap3ActiveRows;
+    vwap3ResultTab === "all"
+      ? vwap3AllRows
+      : vwap3ResultTab === "hits"
+        ? vwap3TargetHitRows
+        : vwap3ResultTab === "after_invalid"
+          ? vwap3AfterInvalidRows
+          : vwap3ResultTab === "invalidated"
+            ? vwap3InvalidatedRows
+            : vwap3ResultTab === "expired"
+              ? vwap3ExpiredRows
+              : vwap3ActiveRows;
 
   const runnerCounts = useMemo(() => {
     const momentum = rows.filter(
@@ -1640,14 +1656,16 @@ export default function ScannerPanel({
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8 }}>
             {[
+              ["Active Now", vwap3ActiveRows.length],
               ["Total Setups", vwap3HistoryCounts?.total ?? vwap3HistoryRows.length],
               ["Resolved", vwap3HistoryCounts?.resolved ?? 0],
               ["Valid Hits", vwap3HistoryCounts?.valid_hits ?? vwap3TargetHitRows.length],
               ["Failed", vwap3HistoryCounts?.failed ?? 0],
               ["Hit After Invalid", vwap3HistoryCounts?.target_hits_after_invalidation ?? vwap3AfterInvalidRows.length],
               ["Invalidated", vwap3HistoryCounts?.invalidated ?? vwap3InvalidatedRows.length],
-              ["Expired", vwap3HistoryCounts?.expired ?? 0],
+              ["Expired", vwap3HistoryCounts?.expired ?? vwap3ExpiredRows.length],
               ["Valid Hit Rate", `${formatMaybe(vwap3HistoryCounts?.valid_hit_rate_pct ?? 0)}%`],
+              ["Failure Rate", `${formatMaybe(vwap3HistoryCounts?.failure_rate_pct ?? 0)}%`],
             ].map(([label, value]) => (
               <div key={String(label)} style={{ border: "1px solid #2a2f3a", borderRadius: 9, padding: "9px 10px", background: "#0b0f14" }}>
                 <div style={{ fontSize: 11, opacity: 0.68, marginBottom: 4 }}>{label}</div>
@@ -1718,6 +1736,13 @@ export default function ScannerPanel({
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <button
                   type="button"
+                  onClick={() => setVwap3ResultTab("all")}
+                  style={vwap3ResultTab === "all" ? activeButtonStyle : buttonStyle}
+                >
+                  All Setups ({vwap3AllRows.length})
+                </button>
+                <button
+                  type="button"
                   onClick={() => setVwap3ResultTab("active")}
                   style={vwap3ResultTab === "active" ? activeButtonStyle : buttonStyle}
                 >
@@ -1743,6 +1768,13 @@ export default function ScannerPanel({
                   style={vwap3ResultTab === "invalidated" ? activeButtonStyle : buttonStyle}
                 >
                   Invalidated ({vwap3InvalidatedRows.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVwap3ResultTab("expired")}
+                  style={vwap3ResultTab === "expired" ? activeButtonStyle : buttonStyle}
+                >
+                  Expired ({vwap3ExpiredRows.length})
                 </button>
                 {vwap3ResultTab !== "active" ? (
                   <>
@@ -1786,7 +1818,7 @@ export default function ScannerPanel({
                   </>
                 ) : null}
                 <span style={{ fontSize: 12, opacity: 0.72 }}>
-                  Invalidated setups are removed from Active and their actionable score becomes 0.
+                  All displayed clock times are Pacific. Invalidated setups leave Active and their actionable score becomes 0.
                 </span>
               </div>
             )}
@@ -2055,13 +2087,17 @@ export default function ScannerPanel({
               {!loading && vwap3DisplayedRows.length === 0 ? (
                 <tr>
                   <td colSpan={30} style={{ padding: 16, opacity: 0.7 }}>
-                    {vwap3ResultTab === "hits"
-                      ? `No valid VWAP +3 target hits saved for ${vwap3HitDate} PT.`
-                      : vwap3ResultTab === "after_invalid"
-                        ? `No target hits after invalidation saved for ${vwap3HitDate} PT.`
-                        : vwap3ResultTab === "invalidated"
-                          ? `No invalidated VWAP +3 setups saved for ${vwap3HitDate} PT.`
-                          : "No active VWAP +3 target setups are active right now."}
+                    {vwap3ResultTab === "all"
+                      ? `No VWAP +3 setups saved for ${vwap3HitDate} PT and no unresolved setups are currently active.`
+                      : vwap3ResultTab === "hits"
+                        ? `No valid VWAP +3 target hits saved for ${vwap3HitDate} PT.`
+                        : vwap3ResultTab === "after_invalid"
+                          ? `No target hits after invalidation saved for ${vwap3HitDate} PT.`
+                          : vwap3ResultTab === "invalidated"
+                            ? `No invalidated VWAP +3 setups saved for ${vwap3HitDate} PT.`
+                            : vwap3ResultTab === "expired"
+                              ? `No expired VWAP +3 setups saved for ${vwap3HitDate} PT.`
+                              : "No unresolved VWAP +3 target setups are active right now."}
                   </td>
                 </tr>
               ) : null}

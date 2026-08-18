@@ -34,6 +34,7 @@ export function getOrderCreatedAt(order: any): string {
   if (Number.isNaN(date.getTime())) return String(raw);
 
   return date.toLocaleTimeString([], {
+    timeZone: "America/Los_Angeles",
     hour: "2-digit",
     minute: "2-digit",
   });
@@ -53,12 +54,15 @@ export function getOrderDateTime(order: any): string {
   if (Number.isNaN(date.getTime())) return String(raw);
 
   return `${date.toLocaleDateString([], {
+    timeZone: "America/Los_Angeles",
     month: "short",
     day: "2-digit",
     year: "numeric",
   })} ${date.toLocaleTimeString([], {
+    timeZone: "America/Los_Angeles",
     hour: "2-digit",
     minute: "2-digit",
+    timeZoneName: "short",
   })}`;
 }
 

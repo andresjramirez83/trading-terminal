@@ -66,10 +66,11 @@ export default function DecisionEngineWidget() {
           {evaluatedAt ? (
             <div style={{ color: "#64748b", fontVariantNumeric: "tabular-nums" }}>
               {new Date(evaluatedAt).toLocaleTimeString([], {
+                timeZone: "America/Los_Angeles",
                 hour: "2-digit",
                 minute: "2-digit",
                 second: "2-digit",
-              })}
+              })} PT
             </div>
           ) : null}
         </div>

@@ -78,7 +78,7 @@ function TradingViewExpandedChart({ symbol, timeframe }: Props) {
         autosize: true,
         symbol: `NASDAQ:${safeSymbol}`,
         interval,
-        timezone: "America/New_York",
+        timezone: "America/Los_Angeles",
         theme: "dark",
         style: "1",
         locale: "en",

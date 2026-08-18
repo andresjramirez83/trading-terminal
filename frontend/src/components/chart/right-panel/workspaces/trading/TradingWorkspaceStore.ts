@@ -20,6 +20,7 @@ function safeNumber(value: number): number {
 
 function getOrderTime(): string {
   return new Date().toLocaleTimeString([], {
+    timeZone: "America/Los_Angeles",
     hour: "2-digit",
     minute: "2-digit",
   });
@@ -27,6 +28,7 @@ function getOrderTime(): string {
 
 function getJournalDate(): string {
   return new Date().toLocaleDateString([], {
+    timeZone: "America/Los_Angeles",
     month: "short",
     day: "2-digit",
     year: "numeric",

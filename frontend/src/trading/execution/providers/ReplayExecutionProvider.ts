@@ -86,6 +86,7 @@ function formatOrderTime(value: string): string {
   if (!Number.isFinite(timestamp)) return value;
 
   return new Date(timestamp).toLocaleTimeString([], {
+    timeZone: "America/Los_Angeles",
     hour: "2-digit",
     minute: "2-digit",
   });
