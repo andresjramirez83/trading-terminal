@@ -34,7 +34,7 @@ _REVIEW_CACHE_TTL_SECONDS = 5.0 * 60.0
 
 _setup_rows_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 _study_rows_cache: Dict[int, Tuple[float, List[Dict[str, Any]]]] = {}
-_trade_bars_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
+_trade_bars_cache: Dict[Tuple[str, str, str], Tuple[float, List[Dict[str, Any]]]] = {}
 _review_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
@@ -264,6 +264,463 @@ def _median(values: Iterable[float]) -> Optional[float]:
     return round(float(statistics.median(clean)), 3) if clean else None
 
 
+REVIEW_VERSION = 2
+DISPLAY_TIMEZONE = "America/Los_Angeles"
+
+
+def _pt_iso(value: Any) -> Optional[str]:
+    dt = value if isinstance(value, datetime) else _parse_dt(value)
+    if dt is None:
+        return None
+    return dt.astimezone(PT).isoformat()
+
+
+def _minutes_between(later: Optional[datetime], earlier: Optional[datetime]) -> Optional[float]:
+    if later is None or earlier is None:
+        return None
+    return round(
+        (later.astimezone(timezone.utc) - earlier.astimezone(timezone.utc)).total_seconds() / 60.0,
+        2,
+    )
+
+
+def _ohlcv(row: Dict[str, Any]) -> Dict[str, float]:
+    return {
+        "open": _safe_float(row.get("open", row.get("o"))),
+        "high": _safe_float(row.get("high", row.get("h"))),
+        "low": _safe_float(row.get("low", row.get("l"))),
+        "close": _safe_float(row.get("close", row.get("c"))),
+        "volume": max(0.0, _safe_float(row.get("volume", row.get("v")))),
+    }
+
+
+def _ordered_bars(bars: List[Dict[str, Any]], through: Optional[datetime] = None) -> List[Tuple[datetime, Dict[str, float]]]:
+    limit = through.astimezone(timezone.utc) if through is not None else None
+    out: List[Tuple[datetime, Dict[str, float]]] = []
+    for raw in bars:
+        dt = _bar_dt(raw)
+        if dt is None:
+            continue
+        dt = dt.astimezone(timezone.utc)
+        if limit is not None and dt > limit:
+            continue
+        row = _ohlcv(raw)
+        if row["high"] <= 0 or row["low"] <= 0 or row["close"] <= 0:
+            continue
+        out.append((dt, row))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _ema_value(values: List[float], period: int) -> Optional[float]:
+    clean = [float(value) for value in values if value > 0 and math.isfinite(float(value))]
+    if period <= 0 or len(clean) < period:
+        return None
+    multiplier = 2.0 / (period + 1.0)
+    current = sum(clean[:period]) / period
+    for value in clean[period:]:
+        current = (value - current) * multiplier + current
+    return current
+
+
+def _vwap_value(items: List[Tuple[datetime, Dict[str, float]]]) -> Optional[float]:
+    pv = 0.0
+    volume = 0.0
+    for _, row in items:
+        if row["volume"] <= 0:
+            continue
+        typical = (row["high"] + row["low"] + row["close"]) / 3.0
+        pv += typical * row["volume"]
+        volume += row["volume"]
+    return pv / volume if volume > 0 else None
+
+
+def _atr_value(items: List[Tuple[datetime, Dict[str, float]]], period: int = 14) -> float:
+    if len(items) < 2:
+        return 0.0
+    trs: List[float] = []
+    for index in range(1, len(items)):
+        row = items[index][1]
+        prev = items[index - 1][1]
+        trs.append(max(row["high"] - row["low"], abs(row["high"] - prev["close"]), abs(row["low"] - prev["close"])))
+    sample = trs[-period:]
+    return sum(sample) / len(sample) if sample else 0.0
+
+
+def _pivot_points(items: List[Tuple[datetime, Dict[str, float]]], strength: int = 3) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    highs: List[Dict[str, Any]] = []
+    lows: List[Dict[str, Any]] = []
+    if len(items) < strength * 2 + 1:
+        return highs, lows
+    for index in range(strength, len(items) - strength):
+        row = items[index][1]
+        if all(row["high"] > items[index - offset][1]["high"] and row["high"] >= items[index + offset][1]["high"] for offset in range(1, strength + 1)):
+            highs.append({"index": index, "price": row["high"], "time": items[index][0]})
+        if all(row["low"] < items[index - offset][1]["low"] and row["low"] <= items[index + offset][1]["low"] for offset in range(1, strength + 1)):
+            lows.append({"index": index, "price": row["low"], "time": items[index][0]})
+    return highs, lows
+
+
+def _structure_context(items: List[Tuple[datetime, Dict[str, float]]]) -> Dict[str, Any]:
+    highs, lows = _pivot_points(items, 3)
+    last_high = highs[-1] if highs else None
+    prev_high = highs[-2] if len(highs) >= 2 else None
+    last_low = lows[-1] if lows else None
+    prev_low = lows[-2] if len(lows) >= 2 else None
+
+    higher_highs = bool(last_high and prev_high and last_high["price"] > prev_high["price"])
+    lower_highs = bool(last_high and prev_high and last_high["price"] < prev_high["price"])
+    higher_lows = bool(last_low and prev_low and last_low["price"] > prev_low["price"])
+    lower_lows = bool(last_low and prev_low and last_low["price"] < prev_low["price"])
+
+    if higher_highs and higher_lows:
+        trend = "bullish"
+    elif lower_highs and lower_lows:
+        trend = "bearish"
+    else:
+        trend = "neutral"
+
+    bos = False
+    choch = False
+    break_direction: Optional[str] = None
+    break_time: Optional[datetime] = None
+    lookback_start = max(0, len(items) - 12)
+    prior_highs = [point for point in highs if point["index"] < lookback_start]
+    prior_lows = [point for point in lows if point["index"] < lookback_start]
+    reference_high = prior_highs[-1] if prior_highs else (prev_high or last_high)
+    reference_low = prior_lows[-1] if prior_lows else (prev_low or last_low)
+    previous_close = items[lookback_start - 1][1]["close"] if lookback_start > 0 else 0.0
+    for index in range(lookback_start, len(items)):
+        close = items[index][1]["close"]
+        if reference_high and previous_close <= reference_high["price"] < close:
+            break_direction = "bullish"
+            break_time = items[index][0]
+        if reference_low and previous_close >= reference_low["price"] > close:
+            break_direction = "bearish"
+            break_time = items[index][0]
+        previous_close = close
+    if break_direction:
+        bos = (trend == break_direction) or trend == "neutral"
+        choch = trend != "neutral" and trend != break_direction
+
+    return {
+        "trend": trend,
+        "higher_highs": higher_highs,
+        "higher_lows": higher_lows,
+        "lower_highs": lower_highs,
+        "lower_lows": lower_lows,
+        "last_swing_high": round(last_high["price"], 6) if last_high else None,
+        "last_swing_low": round(last_low["price"], 6) if last_low else None,
+        "bos": bos,
+        "choch": choch,
+        "last_break_direction": break_direction,
+        "last_break_time": _pt_iso(break_time),
+    }
+
+
+def _trend_context(items: List[Tuple[datetime, Dict[str, float]]]) -> Dict[str, Any]:
+    if not items:
+        return {}
+    closes = [row["close"] for _, row in items]
+    last = items[-1][1]
+    ema9 = _ema_value(closes, 9)
+    ema20 = _ema_value(closes, 20)
+    ema200 = _ema_value(closes, 200)
+    ema9_prev = _ema_value(closes[:-1], 9) if len(closes) > 9 else None
+    ema20_prev = _ema_value(closes[:-1], 20) if len(closes) > 20 else None
+    vwap = _vwap_value(items)
+
+    if ema9 and ema20 and ema9 > ema20:
+        alignment = "bullish"
+    elif ema9 and ema20 and ema9 < ema20:
+        alignment = "bearish"
+    else:
+        alignment = "neutral"
+
+    def slope(current: Optional[float], previous: Optional[float]) -> str:
+        if current is None or previous is None:
+            return "unknown"
+        tolerance = max(abs(current) * 0.0002, 0.000001)
+        if current > previous + tolerance:
+            return "rising"
+        if current < previous - tolerance:
+            return "falling"
+        return "flat"
+
+    return {
+        "price": round(last["close"], 6),
+        "ema9": round(ema9, 6) if ema9 else None,
+        "ema20": round(ema20, 6) if ema20 else None,
+        "ema200": round(ema200, 6) if ema200 else None,
+        "ema9_slope": slope(ema9, ema9_prev),
+        "ema20_slope": slope(ema20, ema20_prev),
+        "ema_alignment": alignment,
+        "above_ema9": bool(ema9 and last["close"] > ema9) if ema9 else None,
+        "above_ema20": bool(ema20 and last["close"] > ema20) if ema20 else None,
+        "above_ema200": bool(ema200 and last["close"] > ema200) if ema200 else None,
+        "vwap": round(vwap, 6) if vwap else None,
+        "above_vwap": bool(vwap and last["close"] > vwap) if vwap else None,
+        "vwap_distance_pct": round(_pct_change(last["close"], vwap), 3) if vwap else None,
+    }
+
+
+def _liquidity_context(items: List[Tuple[datetime, Dict[str, float]]]) -> Dict[str, Any]:
+    if not items:
+        return {}
+    highs, lows = _pivot_points(items, 3)
+    last_price = items[-1][1]["close"]
+    atr = _atr_value(items)
+    tolerance = max(0.0001, abs(last_price) * 0.00035, atr * 0.07)
+
+    def clusters(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for point in points:
+            cluster = next((item for item in result if abs(item["anchor"] - point["price"]) <= tolerance), None)
+            if cluster is None:
+                result.append({"anchor": point["price"], "prices": [point["price"]], "indices": [point["index"]]})
+                continue
+            if point["index"] - cluster["indices"][-1] < 5:
+                continue
+            cluster["prices"].append(point["price"])
+            cluster["indices"].append(point["index"])
+            cluster["anchor"] = sum(cluster["prices"]) / len(cluster["prices"])
+        return [item for item in result if len(item["prices"]) >= 2]
+
+    high_clusters = clusters(highs)
+    low_clusters = clusters(lows)
+    levels_above = [p["price"] for p in highs] + [c["anchor"] for c in high_clusters]
+    levels_below = [p["price"] for p in lows] + [c["anchor"] for c in low_clusters]
+    nearest_above = min((level for level in levels_above if level > last_price), default=None)
+    nearest_below = max((level for level in levels_below if level < last_price), default=None)
+
+    events: List[Dict[str, Any]] = []
+    pool_levels = [("buy-side", p["price"], p["index"]) for p in highs] + [("sell-side", p["price"], p["index"]) for p in lows]
+    start = max(0, len(items) - 30)
+    for index in range(start, len(items)):
+        row = items[index][1]
+        for side, level, established_index in pool_levels:
+            if established_index >= index:
+                continue
+            if side == "buy-side" and row["high"] > level + tolerance and row["close"] < level:
+                held = index + 1 < len(items) and items[index + 1][1]["close"] <= level + tolerance
+                events.append({"side": side, "direction": "bearish", "price": level, "time": items[index][0], "reclaimed": held})
+            if side == "sell-side" and row["low"] < level - tolerance and row["close"] > level:
+                held = index + 1 < len(items) and items[index + 1][1]["close"] >= level - tolerance
+                events.append({"side": side, "direction": "bullish", "price": level, "time": items[index][0], "reclaimed": held})
+    latest = events[-1] if events else None
+    return {
+        "nearest_above": round(nearest_above, 6) if nearest_above else None,
+        "nearest_below": round(nearest_below, 6) if nearest_below else None,
+        "distance_above_pct": round(_pct_change(nearest_above, last_price), 3) if nearest_above else None,
+        "distance_below_pct": round(_pct_change(last_price, nearest_below), 3) if nearest_below else None,
+        "equal_highs": bool(high_clusters),
+        "equal_lows": bool(low_clusters),
+        "latest_sweep": None if latest is None else {
+            "side": latest["side"],
+            "direction": latest["direction"],
+            "price": round(latest["price"], 6),
+            "time": _pt_iso(latest["time"]),
+            "reclaimed": bool(latest["reclaimed"]),
+        },
+    }
+
+
+def _demand_context(items: List[Tuple[datetime, Dict[str, float]]]) -> Dict[str, Any]:
+    if len(items) < 8:
+        return {"timeframe": "5m", "zone": None}
+    highs, lows = _pivot_points(items, 2)
+    zones: List[Dict[str, Any]] = []
+    for high_point in highs:
+        high_index = high_point["index"]
+        pivot_row = items[high_index][1]
+        body_top = max(pivot_row["open"], pivot_row["close"])
+        breakout_index: Optional[int] = None
+        for index in range(high_index + 1, len(items)):
+            row = items[index][1]
+            if row["high"] > high_point["price"] and row["close"] > body_top:
+                breakout_index = index
+                break
+        if breakout_index is None:
+            continue
+        leg_lows = [point for point in lows if high_index < point["index"] < breakout_index]
+        leg_start = leg_lows[-1]["index"] if leg_lows else max(high_index + 1, breakout_index - 12)
+        selected: Optional[Tuple[int, int]] = None
+        search_end = min(len(items) - 1, breakout_index + 1)
+        for fvg_index in range(max(2, leg_start + 2), search_end + 1):
+            # Bullish 3-candle FVG: candle 3 low is above candle 1 high.
+            if items[fvg_index][1]["low"] <= items[fvg_index - 2][1]["high"]:
+                continue
+            origin_index = fvg_index - 2
+            selected = (fvg_index, origin_index)
+            break
+        if selected is None:
+            continue
+        fvg_index, origin_index = selected
+        origin = items[origin_index][1]
+        status = "fresh"
+        touch_count = 0
+        mitigation = 0.0
+        width = max(0.000001, origin["high"] - origin["low"])
+        for index in range(breakout_index + 1, len(items)):
+            row = items[index][1]
+            if row["close"] < origin["low"]:
+                status = "failed"
+                break
+            if row["low"] <= origin["high"] and row["high"] >= origin["low"]:
+                touch_count += 1
+                penetration = max(0.0, origin["high"] - max(origin["low"], row["low"]))
+                mitigation = max(mitigation, min(100.0, penetration / width * 100.0))
+                status = "mitigated" if mitigation >= 50 else "touched"
+        zones.append({
+            "bottom": origin["low"],
+            "top": origin["high"],
+            "origin_time": items[origin_index][0],
+            "confirmation_time": items[breakout_index][0],
+            "fvg_time": items[fvg_index][0],
+            "status": status,
+            "touch_count": touch_count,
+            "mitigation_pct": round(mitigation, 1),
+        })
+    if not zones:
+        return {"timeframe": "5m", "zone": None}
+    price = items[-1][1]["close"]
+    active = [zone for zone in zones if zone["status"] != "failed"]
+    candidates = active or zones
+    zone = min(
+        candidates,
+        key=lambda item: 0.0 if item["bottom"] <= price <= item["top"] else min(abs(price - item["top"]), abs(price - item["bottom"])),
+    )
+    if zone["bottom"] <= price <= zone["top"]:
+        location = "inside"
+        distance_pct = 0.0
+    elif price > zone["top"]:
+        location = "above"
+        distance_pct = round((price - zone["top"]) / price * 100.0, 3)
+    else:
+        location = "below"
+        distance_pct = round((zone["bottom"] - price) / price * 100.0, 3)
+    return {
+        "timeframe": "5m",
+        "zone": {
+            "bottom": round(zone["bottom"], 6),
+            "top": round(zone["top"], 6),
+            "origin_time": _pt_iso(zone["origin_time"]),
+            "confirmation_time": _pt_iso(zone["confirmation_time"]),
+            "fvg_time": _pt_iso(zone["fvg_time"]),
+            "status": zone["status"],
+            "touch_count": zone["touch_count"],
+            "mitigation_pct": zone["mitigation_pct"],
+            "entry_location": location,
+            "distance_pct": distance_pct,
+        },
+    }
+
+
+def _window_path_stats(
+    bars: List[Dict[str, Any]],
+    entry_dt: datetime,
+    entry_price: float,
+    side: str,
+) -> Dict[str, Any]:
+    items = _ordered_bars(bars)
+    entry_utc = entry_dt.astimezone(timezone.utc)
+    is_short = str(side or "buy").lower() in {"sell", "short"}
+    result: Dict[str, Any] = {}
+    for minutes in (5, 15, 30):
+        end = entry_utc + timedelta(minutes=minutes)
+        sample = [row for dt, row in items if entry_utc <= dt <= end]
+        if not sample or entry_price <= 0:
+            result[f"{minutes}m"] = {"mfe_pct": None, "mae_pct": None}
+            continue
+        high = max(row["high"] for row in sample)
+        low = min(row["low"] for row in sample)
+        if is_short:
+            mfe = (entry_price - low) / entry_price * 100.0
+            mae = (high - entry_price) / entry_price * 100.0
+        else:
+            mfe = (high - entry_price) / entry_price * 100.0
+            mae = (entry_price - low) / entry_price * 100.0
+        result[f"{minutes}m"] = {
+            "mfe_pct": round(max(0.0, mfe), 3),
+            "mae_pct": round(max(0.0, mae), 3),
+            "high": round(high, 6),
+            "low": round(low, 6),
+        }
+    return result
+
+
+def _first_confirmation_after_entry(
+    bars: List[Dict[str, Any]],
+    entry_dt: datetime,
+    max_minutes: int = 120,
+) -> Optional[Dict[str, Any]]:
+    all_items = _ordered_bars(bars)
+    if not all_items:
+        return None
+    entry_utc = entry_dt.astimezone(timezone.utc)
+    cutoff = entry_utc + timedelta(minutes=max_minutes)
+    for index, (dt, row) in enumerate(all_items):
+        if dt < entry_utc or dt > cutoff:
+            continue
+        history = all_items[: index + 1]
+        closes = [item[1]["close"] for item in history]
+        ema9 = _ema_value(closes, 9)
+        ema20 = _ema_value(closes, 20)
+        prev9 = _ema_value(closes[:-1], 9) if len(closes) > 9 else None
+        vwap = _vwap_value(history)
+        reasons: List[str] = []
+        if ema9 and row["close"] > ema9 and prev9 and ema9 > prev9:
+            reasons.append("price reclaimed a rising EMA9")
+        if ema9 and ema20 and ema9 > ema20:
+            reasons.append("EMA9 was above EMA20")
+        if vwap and row["close"] > vwap:
+            reasons.append("price was above VWAP")
+        if len(reasons) >= 2:
+            return {
+                "time": _pt_iso(dt),
+                "price": round(row["close"], 6),
+                "reasons": reasons,
+            }
+    return None
+
+
+def _coach_guidance(
+    *,
+    setup_valid_at_entry: bool,
+    entry_after_invalidation: bool,
+    trend_1m: Dict[str, Any],
+    structure_5m: Dict[str, Any],
+    liquidity: Dict[str, Any],
+    demand: Dict[str, Any],
+    planned_stop: float,
+) -> Tuple[List[str], List[str]]:
+    guidance: List[str] = []
+    positives: List[str] = []
+    if entry_after_invalidation or not setup_valid_at_entry:
+        guidance.append("Do not keep using the old frozen +3 target after the scanner setup invalidates; require a fresh displacement/setup or a new independent reversal thesis.")
+    if trend_1m.get("ema_alignment") == "bearish" or trend_1m.get("ema9_slope") == "falling":
+        guidance.append("Wait for price to reclaim EMA9 with EMA9 rising; stronger confirmation is EMA9 back above EMA20 instead of buying while short-term trend is still falling.")
+    if trend_1m.get("above_vwap") is False:
+        guidance.append("Price was below VWAP at entry; prefer a VWAP reclaim/hold or clearly treat the trade as a counter-trend reversal with separate confirmation.")
+    if structure_5m.get("trend") == "bearish" and not structure_5m.get("choch"):
+        guidance.append("The 5-minute structure had not produced a bullish change of character. Wait for a bullish structure shift before treating a deep selloff as a new long setup.")
+    latest_sweep = liquidity.get("latest_sweep") if isinstance(liquidity, dict) else None
+    if not latest_sweep or latest_sweep.get("direction") != "bullish" or not latest_sweep.get("reclaimed"):
+        guidance.append("For a reversal entry, prefer a sell-side liquidity sweep followed by a reclaim/hold instead of anticipating the low.")
+    zone = demand.get("zone") if isinstance(demand, dict) else None
+    if not zone:
+        guidance.append("No confirmed nearby 5-minute demand/FVG zone was found at entry; avoid using 'it looks cheap' as the support thesis.")
+    elif zone.get("status") == "failed" or zone.get("entry_location") == "below":
+        guidance.append("The nearest demand zone was failed or already lost. Wait for price to reclaim the zone or for a new demand zone to form.")
+    elif zone.get("entry_location") in {"inside", "above"}:
+        positives.append("Entry had an identifiable 5-minute demand/FVG reference nearby.")
+    if planned_stop > 0:
+        positives.append("You defined risk with a planned stop; keep that discipline even when the setup quality is weak.")
+    if not guidance:
+        guidance.append("The entry had multiple confirmations. Keep using the same checklist and focus on executing the planned stop/target rather than reacting to noise.")
+    return guidance[:6], positives[:4]
+
+
 class Vwap3TradeReviewRequest(BaseModel):
     trade_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
@@ -321,9 +778,14 @@ def _put_cached_review(payload: Vwap3TradeReviewRequest, result: Dict[str, Any])
     return response
 
 
-async def _load_trade_day_bars(symbol: str, trade_date: str) -> List[Dict[str, Any]]:
+async def _load_trade_day_bars(
+    symbol: str,
+    trade_date: str,
+    timeframe: str = "1m",
+) -> List[Dict[str, Any]]:
     normalized_symbol = symbol.upper().strip()
-    key = (normalized_symbol, trade_date)
+    normalized_timeframe = str(timeframe or "1m").strip().lower()
+    key = (normalized_symbol, trade_date, normalized_timeframe)
     now = _cache_now()
     cached = _trade_bars_cache.get(key)
 
@@ -341,7 +803,7 @@ async def _load_trade_day_bars(symbol: str, trade_date: str) -> List[Dict[str, A
     try:
         rows = await market.get_bars(
             symbol=normalized_symbol,
-            timeframe="1m",
+            timeframe=normalized_timeframe,
             session="extended",
             date=trade_date,
             limit=5000,
@@ -514,7 +976,7 @@ def _entry_quality(entry: float, setup: Dict[str, Any], detected_dt: Optional[da
 @router.post("/review-trade")
 async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
     cached_review = _get_cached_review(payload)
-    if cached_review is not None:
+    if cached_review is not None and int(cached_review.get("review_version") or 0) >= REVIEW_VERSION:
         return cached_review
 
     entry_dt = _parse_dt(payload.entry_time)
@@ -524,16 +986,23 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
     if payload.entry_price <= 0 or payload.exit_price <= 0:
         raise HTTPException(status_code=400, detail="entry_price and exit_price must be positive")
 
+    # Scanner archives are keyed by the U.S. market date (ET). Coach-facing
+    # timestamps are always returned/displayed in Pacific Time.
     trade_date = entry_dt.astimezone(ET).date().isoformat()
     setups = _load_setups_for_date(trade_date)
     matched = _match_setup(payload.symbol, entry_dt, setups)
 
     if not matched:
         result = {
+            "review_version": REVIEW_VERSION,
+            "display_timezone": DISPLAY_TIMEZONE,
             "trade_id": payload.trade_id,
             "symbol": payload.symbol.upper(),
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "entry_time_pt": _pt_iso(entry_dt),
+            "exit_time_pt": _pt_iso(exit_dt),
             "scanner_match": False,
+            "entry_verdict": "UNMATCHED",
             "headline": "No 3-VWAP scanner match",
             "summary": "No archived 3-VWAP setup for this symbol was found on the trade date.",
             "classification": "not_vwap3",
@@ -542,20 +1011,41 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
         return _put_cached_review(payload, result)
 
     detected_dt = _setup_detection_dt(matched)
+    scanner_invalidation_dt = _parse_dt(matched.get("invalidation_time"))
     entry_after_scanner = bool(detected_dt and entry_dt.astimezone(timezone.utc) >= detected_dt.astimezone(timezone.utc))
+    entry_after_invalidation = bool(
+        scanner_invalidation_dt
+        and entry_dt.astimezone(timezone.utc) >= scanner_invalidation_dt.astimezone(timezone.utc)
+    )
+    exit_after_invalidation = bool(
+        scanner_invalidation_dt
+        and exit_dt.astimezone(timezone.utc) >= scanner_invalidation_dt.astimezone(timezone.utc)
+    )
+    setup_valid_at_entry = not entry_after_invalidation
+    setup_valid_at_exit = not exit_after_invalidation
+    minutes_after_invalidation = (
+        max(0.0, _minutes_between(entry_dt, scanner_invalidation_dt) or 0.0)
+        if entry_after_invalidation
+        else None
+    )
+
     scanner_target = _safe_float(matched.get("frozen_target") or matched.get("target_price"))
     planned_target = _safe_float(payload.planned_target)
     target = scanner_target if scanner_target > 0 else planned_target
     planned_stop = _safe_float(payload.planned_stop)
     displacement_low = _safe_float(matched.get("displacement_low"))
-    invalidation = planned_stop if planned_stop > 0 else displacement_low
+    trade_invalidation = planned_stop if planned_stop > 0 else displacement_low
 
-    bars = await _load_trade_day_bars(payload.symbol, trade_date)
-    path = _path_stats(bars, entry_dt, exit_dt, target, invalidation)
+    bars_1m, bars_5m = await asyncio.gather(
+        _load_trade_day_bars(payload.symbol, trade_date, "1m"),
+        _load_trade_day_bars(payload.symbol, trade_date, "5m"),
+    )
+    path = _path_stats(bars_1m, entry_dt, exit_dt, target, trade_invalidation)
 
-    # Scanner tracking can continue across sessions/days. Prefer its durable
-    # target/invalidation timestamps when they extend beyond the single-day bar
-    # window used for detailed MFE calculations.
+    # Preserve scanner invalidation separately from the user's stop. The old
+    # setup can be invalid before a later trade stop is hit.
+    scanner_path = _path_stats(bars_1m, entry_dt, exit_dt, target, displacement_low)
+
     archived_target_hit = _parse_dt(matched.get("target_hit_time"))
     if (
         not path.get("target_hit_after_exit_time")
@@ -563,24 +1053,64 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
         and archived_target_hit.astimezone(timezone.utc) > exit_dt.astimezone(timezone.utc)
     ):
         path["target_hit_after_exit_time"] = archived_target_hit.isoformat()
-    archived_invalidation = (
-        _parse_dt(matched.get("invalidation_time")) if planned_stop <= 0 else None
-    )
-    if archived_invalidation:
-        invalidation_utc = archived_invalidation.astimezone(timezone.utc)
-        if invalidation_utc <= exit_dt.astimezone(timezone.utc):
-            path["invalidation_hit_before_exit_time"] = archived_invalidation.isoformat()
-        elif not path.get("invalidation_hit_after_exit_time"):
-            path["invalidation_hit_after_exit_time"] = archived_invalidation.isoformat()
 
     classification, classification_label, confidence_score = _review_classification(
         payload.entry_price,
         payload.exit_price,
         target,
-        invalidation,
+        trade_invalidation,
         path,
     )
+
+    entry_items_1m = _ordered_bars(bars_1m, entry_dt)
+    entry_items_5m = _ordered_bars(bars_5m, entry_dt)
+    trend_1m = _trend_context(entry_items_1m)
+    structure_1m = _structure_context(entry_items_1m)
+    structure_5m = _structure_context(entry_items_5m)
+    liquidity = _liquidity_context(entry_items_1m)
+    demand = _demand_context(entry_items_5m)
+    path_windows = _window_path_stats(bars_1m, entry_dt, payload.entry_price, payload.side)
+    first_confirmation = _first_confirmation_after_entry(bars_1m, entry_dt)
+
     entry_quality = _entry_quality(payload.entry_price, matched, detected_dt, entry_dt)
+    entry_score = int(entry_quality.get("score") or 0)
+    score_reasons: List[str] = []
+    if not setup_valid_at_entry:
+        entry_score = min(entry_score, 20)
+        entry_quality["label"] = "Invalidated setup"
+        score_reasons.append("Original 3-VWAP setup had already invalidated before entry.")
+    if trend_1m.get("ema_alignment") == "bearish":
+        entry_score = max(0, entry_score - 10)
+        score_reasons.append("EMA9 was below EMA20 at entry.")
+    if trend_1m.get("above_vwap") is False:
+        entry_score = max(0, entry_score - 6)
+        score_reasons.append("Entry was below VWAP.")
+    if structure_5m.get("trend") == "bearish" and not structure_5m.get("choch"):
+        entry_score = max(0, entry_score - 8)
+        score_reasons.append("5-minute structure remained bearish without bullish CHoCH.")
+    entry_quality["score"] = entry_score
+    entry_quality["score_reasons"] = score_reasons
+
+    if not setup_valid_at_entry:
+        entry_verdict = "AVOID"
+    elif entry_score >= 80:
+        entry_verdict = "STRONG"
+    elif entry_score >= 65:
+        entry_verdict = "ACCEPTABLE"
+    elif entry_score >= 45:
+        entry_verdict = "CAUTION"
+    else:
+        entry_verdict = "AVOID"
+
+    guidance, positives = _coach_guidance(
+        setup_valid_at_entry=setup_valid_at_entry,
+        entry_after_invalidation=entry_after_invalidation,
+        trend_1m=trend_1m,
+        structure_5m=structure_5m,
+        liquidity=liquidity,
+        demand=demand,
+        planned_stop=planned_stop,
+    )
 
     historical_rows = _study_rows(60)
     pullback_tests = _pullback_tests(historical_rows)
@@ -590,17 +1120,14 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
         if item["opportunities"] >= 5 and item["hit_rate_pct"] is not None
     ]
     best_historical_pullback = (
-        max(
-            historical_candidates,
-            key=lambda item: (item["hit_rate_pct"], item["opportunities"]),
-        )
+        max(historical_candidates, key=lambda item: (item["hit_rate_pct"], item["opportunities"]))
         if historical_candidates
         else None
     )
 
     missed_per_share = (
         max(0.0, target - payload.exit_price)
-        if target > 0 and classification == "likely_early_exit"
+        if target > 0 and classification == "likely_early_exit" and setup_valid_at_exit
         else 0.0
     )
     missed_pnl = missed_per_share * max(0.0, payload.shares)
@@ -618,53 +1145,104 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
         if payload.exit_price > 0 and max_high_after_exit > 0
         else 0.0
     )
-    setup_valid_at_exit = not bool(path.get("invalidation_hit_before_exit_time"))
 
-    if classification == "likely_early_exit":
+    if not setup_valid_at_entry:
+        wait_text = (
+            f" about {minutes_after_invalidation:.0f} minutes after invalidation"
+            if minutes_after_invalidation is not None
+            else " after invalidation"
+        )
+        summary = (
+            f"You entered{wait_text}. The original 3-VWAP thesis was already invalid, so this should not be scored as a normal pullback entry. "
+            "A better plan is to require a fresh scanner setup or a new reversal thesis confirmed by structure/liquidity/trend."
+        )
+        headline = f"AVOID · Entry after setup invalidation · {matched.get('grade') or '3-VWAP'}"
+    elif classification == "likely_early_exit":
         summary = (
             f"You exited before the frozen +3 target while the setup was still valid. "
             f"Price later reached the target{f' {minutes_exit_to_target:.0f} minutes after your exit' if minutes_exit_to_target is not None else ''}. "
-            "This is consistent with protecting open profit too early; it does not prove an emotion, but it is a repeatable behavior the coach can track."
+            "This is a repeatable early-exit behavior worth tracking."
         )
+        headline = f"{classification_label} · {matched.get('grade') or '3-VWAP'}"
     elif classification == "defensive_exit":
         summary = (
-            "You exited before the +3 target, but the price path reached or threatened the trade invalidation before a later target. "
-            "The early exit was technically defensible rather than automatically being treated as fear."
+            "You exited before the +3 target, but the price path threatened the trade invalidation before a later target. "
+            "The exit was technically defensible rather than automatically being treated as fear."
         )
+        headline = f"{classification_label} · {matched.get('grade') or '3-VWAP'}"
     elif classification == "target_exit":
         summary = "The exit captured the scanner's frozen +3 target area."
+        headline = f"{classification_label} · {matched.get('grade') or '3-VWAP'}"
     else:
-        summary = "The trade is linked to a 3-VWAP setup and the coach recorded the entry/exit path for ongoing study."
+        summary = "The trade is linked to a 3-VWAP setup. Review the setup-validity, trend, structure, liquidity, demand, and entry-path sections below for the actionable lesson."
+        headline = f"{entry_verdict} entry · {matched.get('grade') or '3-VWAP'}"
+
+    # Coach-facing path timestamps are Pacific Time.
+    for key in (
+        "target_hit_before_exit_time",
+        "target_hit_after_exit_time",
+        "invalidation_hit_before_exit_time",
+        "invalidation_hit_after_exit_time",
+    ):
+        if path.get(key):
+            path[key] = _pt_iso(path[key])
+        if scanner_path.get(key):
+            scanner_path[key] = _pt_iso(scanner_path[key])
 
     result = {
+        "review_version": REVIEW_VERSION,
+        "display_timezone": DISPLAY_TIMEZONE,
         "trade_id": payload.trade_id,
         "symbol": payload.symbol.upper(),
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "entry_time_pt": _pt_iso(entry_dt),
+        "exit_time_pt": _pt_iso(exit_dt),
         "scanner_match": True,
         "setup_key": matched.get("setup_key"),
         "scanner_grade": matched.get("grade"),
         "scanner_status": matched.get("confirmation_status"),
-        "scanner_detected_at": matched.get("scanner_detected_at"),
-        "freeze_time": matched.get("freeze_time"),
+        "scanner_detected_at": _pt_iso(matched.get("scanner_detected_at")),
+        "freeze_time": _pt_iso(matched.get("freeze_time")),
+        "setup_invalidation_time": _pt_iso(scanner_invalidation_dt),
         "freeze_price": _safe_float(matched.get("freeze_price")),
         "frozen_target": scanner_target,
         "displacement_low": displacement_low,
         "displacement_high": _safe_float(matched.get("displacement_high")),
+        "planned_stop": planned_stop if planned_stop > 0 else None,
         "entry_after_scanner": entry_after_scanner,
+        "setup_valid_at_entry": setup_valid_at_entry,
+        "entry_after_invalidation": entry_after_invalidation,
+        "minutes_after_invalidation": minutes_after_invalidation,
+        "setup_valid_at_exit": setup_valid_at_exit,
+        "entry_verdict": entry_verdict,
         "entry_quality": entry_quality,
         "classification": classification,
         "classification_label": classification_label,
         "confidence": confidence_score / 100.0,
-        "headline": f"{classification_label} · {matched.get('grade') or '3-VWAP'}",
+        "headline": headline,
         "summary": summary,
-        "setup_valid_at_exit": setup_valid_at_exit,
         "target_hit_after_exit": bool(path.get("target_hit_after_exit_time")),
         "target_hit_after_exit_time": path.get("target_hit_after_exit_time"),
         "minutes_exit_to_target": minutes_exit_to_target,
         "missed_upside_per_share": round(missed_per_share, 6),
         "estimated_missed_pnl_to_target": round(missed_pnl, 2),
         "mfe_after_exit_pct": mfe_after_exit_pct,
+        "trend_context": {
+            "timeframe": "1m",
+            **trend_1m,
+        },
+        "structure_context": {
+            "1m": structure_1m,
+            "5m": structure_5m,
+        },
+        "liquidity_context": liquidity,
+        "demand_context": demand,
+        "entry_path": path_windows,
+        "first_confirmation_after_entry": first_confirmation,
+        "next_time_guidance": guidance,
+        "what_went_well": positives,
         "path": path,
+        "scanner_path": scanner_path,
         "historical_context": {
             "study_days": 60,
             "sample_size": len(historical_rows),

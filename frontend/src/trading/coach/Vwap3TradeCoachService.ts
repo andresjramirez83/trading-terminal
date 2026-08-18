@@ -9,6 +9,7 @@ import type { TradeHistoryEntry } from "../../components/chart/right-panel/works
 
 const STORAGE_KEY = "trading.vwap3Coach.reviews.v1";
 const UPDATE_EVENT = "vwap3-trade-coach-updated";
+const COACH_REVIEW_VERSION = 2;
 
 export type Vwap3PersonalCoachSummary = {
   reviewedTrades: number;
@@ -17,6 +18,7 @@ export type Vwap3PersonalCoachSummary = {
   defensiveExits: number;
   targetExits: number;
   targetHitAfterExit: number;
+  entriesAfterInvalidation: number;
   estimatedMissedPnlToTarget: number;
   averageEntryQuality: number | null;
 };
@@ -77,6 +79,7 @@ export class Vwap3TradeCoachService {
       defensiveExits: matched.filter((row) => row.classification === "defensive_exit").length,
       targetExits: matched.filter((row) => row.classification === "target_exit").length,
       targetHitAfterExit: matched.filter((row) => row.target_hit_after_exit).length,
+      entriesAfterInvalidation: matched.filter((row) => row.entry_after_invalidation).length,
       estimatedMissedPnlToTarget: matched
         .filter((row) => row.classification === "likely_early_exit")
         .reduce(
@@ -127,14 +130,18 @@ export class Vwap3TradeCoachService {
       const lastRequest = this.lastRequestedAt.get(trade.id) ?? 0;
       const reviewedAt = existing?.reviewed_at ? Date.parse(existing.reviewed_at) : 0;
       const reviewAge = reviewedAt > 0 ? now - reviewedAt : Number.POSITIVE_INFINITY;
+      const needsVersionRefresh = Boolean(
+        existing && Number(existing.review_version ?? 0) < COACH_REVIEW_VERSION,
+      );
       const needsFollowUp = Boolean(
         existing &&
-          (existing.classification === "early_exit_unresolved" ||
+          (needsVersionRefresh ||
+            existing.classification === "early_exit_unresolved" ||
             (!existing.scanner_match && reviewAge < 24 * 60 * 60_000)),
       );
 
       if (existing && !needsFollowUp) continue;
-      if (needsFollowUp && reviewAge < 5 * 60_000) continue;
+      if (needsFollowUp && !needsVersionRefresh && reviewAge < 5 * 60_000) continue;
       if (now - lastRequest < 60_000 || this.inflight.has(trade.id)) continue;
 
       candidates.push(trade);

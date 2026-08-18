@@ -1350,37 +1350,134 @@ export type Vwap3TradeCoachEntryQuality = {
   entry_vs_freeze_pct?: number | null;
   target_remaining_pct_at_entry?: number | null;
   risk_to_displacement_low_pct?: number | null;
+  score_reasons?: string[];
+};
+
+export type Vwap3CoachTrendContext = {
+  timeframe?: string;
+  price?: number;
+  ema9?: number | null;
+  ema20?: number | null;
+  ema200?: number | null;
+  ema9_slope?: "rising" | "falling" | "flat" | "unknown" | string;
+  ema20_slope?: "rising" | "falling" | "flat" | "unknown" | string;
+  ema_alignment?: "bullish" | "bearish" | "neutral" | string;
+  above_ema9?: boolean | null;
+  above_ema20?: boolean | null;
+  above_ema200?: boolean | null;
+  vwap?: number | null;
+  above_vwap?: boolean | null;
+  vwap_distance_pct?: number | null;
+};
+
+export type Vwap3CoachStructureContext = {
+  trend?: "bullish" | "bearish" | "neutral" | string;
+  higher_highs?: boolean;
+  higher_lows?: boolean;
+  lower_highs?: boolean;
+  lower_lows?: boolean;
+  last_swing_high?: number | null;
+  last_swing_low?: number | null;
+  bos?: boolean;
+  choch?: boolean;
+  last_break_direction?: string | null;
+  last_break_time?: string | null;
+};
+
+export type Vwap3CoachLiquidityContext = {
+  nearest_above?: number | null;
+  nearest_below?: number | null;
+  distance_above_pct?: number | null;
+  distance_below_pct?: number | null;
+  equal_highs?: boolean;
+  equal_lows?: boolean;
+  latest_sweep?: {
+    side?: "buy-side" | "sell-side" | string;
+    direction?: "bullish" | "bearish" | string;
+    price?: number;
+    time?: string | null;
+    reclaimed?: boolean;
+  } | null;
+};
+
+export type Vwap3CoachDemandContext = {
+  timeframe?: string;
+  zone?: {
+    bottom: number;
+    top: number;
+    origin_time?: string | null;
+    confirmation_time?: string | null;
+    fvg_time?: string | null;
+    status?: "fresh" | "touched" | "mitigated" | "failed" | string;
+    touch_count?: number;
+    mitigation_pct?: number;
+    entry_location?: "inside" | "above" | "below" | string;
+    distance_pct?: number;
+  } | null;
+};
+
+export type Vwap3CoachEntryPathWindow = {
+  mfe_pct?: number | null;
+  mae_pct?: number | null;
+  high?: number;
+  low?: number;
 };
 
 export type Vwap3TradeCoachReview = {
+  review_version?: number;
+  display_timezone?: string;
   trade_id: string;
   symbol: string;
   reviewed_at: string;
+  entry_time_pt?: string | null;
+  exit_time_pt?: string | null;
   scanner_match: boolean;
   setup_key?: string;
   scanner_grade?: string;
   scanner_status?: string;
-  scanner_detected_at?: string;
-  freeze_time?: string;
+  scanner_detected_at?: string | null;
+  freeze_time?: string | null;
+  setup_invalidation_time?: string | null;
   freeze_price?: number;
   frozen_target?: number;
   displacement_low?: number;
   displacement_high?: number;
+  planned_stop?: number | null;
   entry_after_scanner?: boolean;
+  setup_valid_at_entry?: boolean;
+  entry_after_invalidation?: boolean;
+  minutes_after_invalidation?: number | null;
+  setup_valid_at_exit?: boolean;
+  entry_verdict?: "STRONG" | "ACCEPTABLE" | "CAUTION" | "AVOID" | "UNMATCHED" | string;
   entry_quality?: Vwap3TradeCoachEntryQuality;
   classification: string;
   classification_label?: string;
   confidence: number;
   headline: string;
   summary: string;
-  setup_valid_at_exit?: boolean;
   target_hit_after_exit?: boolean;
   target_hit_after_exit_time?: string | null;
   minutes_exit_to_target?: number | null;
   missed_upside_per_share?: number;
   estimated_missed_pnl_to_target?: number;
   mfe_after_exit_pct?: number;
+  trend_context?: Vwap3CoachTrendContext;
+  structure_context?: {
+    "1m"?: Vwap3CoachStructureContext;
+    "5m"?: Vwap3CoachStructureContext;
+  };
+  liquidity_context?: Vwap3CoachLiquidityContext;
+  demand_context?: Vwap3CoachDemandContext;
+  entry_path?: Record<string, Vwap3CoachEntryPathWindow>;
+  first_confirmation_after_entry?: {
+    time?: string | null;
+    price?: number;
+    reasons?: string[];
+  } | null;
+  next_time_guidance?: string[];
+  what_went_well?: string[];
   path?: Record<string, unknown>;
+  scanner_path?: Record<string, unknown>;
   historical_context?: {
     study_days?: number;
     sample_size?: number;

@@ -25,6 +25,8 @@ function pct(value: number | null | undefined): string {
 }
 
 function reviewColor(review: Vwap3TradeCoachReview): string {
+  if (review.entry_verdict === "AVOID") return "#ef4444";
+  if (review.entry_verdict === "CAUTION") return "#f59e0b";
   if (review.classification === "likely_early_exit") return "#f59e0b";
   if (review.classification === "defensive_exit") return "#22c55e";
   if (review.classification === "target_exit") return "#22c55e";
@@ -53,8 +55,10 @@ export default function TradeJournalWidget({
 
       <div style={styles.notice}>
         Closed trades are automatically checked against the 3-VWAP scanner. The
-        coach compares your entry, exit, frozen target, invalidation, and what
-        price did after you exited.
+        coach compares your entry and exit with the frozen target and scanner
+        invalidation, then reconstructs EMA/VWAP trend, 1m/5m structure,
+        liquidity, demand/FVG context, and the price path after entry. Coach
+        timestamps display in Pacific Time.
       </div>
 
       {personalSummary && personalSummary.scannerMatchedTrades > 0 ? (
@@ -83,6 +87,10 @@ export default function TradeJournalWidget({
             <Meta
               label="Target Hit After Exit"
               value={String(personalSummary.targetHitAfterExit)}
+            />
+            <Meta
+              label="Entries After Invalidation"
+              value={String(personalSummary.entriesAfterInvalidation)}
             />
           </div>
           {personalSummary.estimatedMissedPnlToTarget > 0 ? (
@@ -211,8 +219,58 @@ export default function TradeJournalWidget({
   );
 }
 
+function coachPrice(value: number | null | undefined): string {
+  if (!Number.isFinite(value)) return "—";
+  const number = Number(value);
+  return number >= 1 ? `$${number.toFixed(2)}` : `$${number.toFixed(4)}`;
+}
+
+function coachTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return value;
+  return new Date(parsed).toLocaleString("en-US", {
+    timeZone: "America/Los_Angeles",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  });
+}
+
+function yesNo(value: boolean | null | undefined): string {
+  if (value == null) return "—";
+  return value ? "Yes" : "No";
+}
+
+function CoachSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={styles.coachSection}>
+      <div style={styles.coachSectionTitle}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
 function CoachReview({ review }: { review: Vwap3TradeCoachReview }) {
   const color = reviewColor(review);
+  const trend = review.trend_context;
+  const structure1m = review.structure_context?.["1m"];
+  const structure5m = review.structure_context?.["5m"];
+  const liquidity = review.liquidity_context;
+  const demand = review.demand_context?.zone;
+  const sweep = liquidity?.latest_sweep;
+  const path5 = review.entry_path?.["5m"];
+  const path15 = review.entry_path?.["15m"];
+  const path30 = review.entry_path?.["30m"];
 
   return (
     <div
@@ -224,7 +282,7 @@ function CoachReview({ review }: { review: Vwap3TradeCoachReview }) {
     >
       <div style={styles.coachHeader}>
         <div>
-          <div style={styles.coachKicker}>AI Trade Coach</div>
+          <div style={styles.coachKicker}>AI Trade Coach · Pacific Time</div>
           <strong style={{ color }}>{review.headline}</strong>
         </div>
         {review.scanner_match ? (
@@ -237,54 +295,240 @@ function CoachReview({ review }: { review: Vwap3TradeCoachReview }) {
       <div style={styles.coachSummary}>{review.summary}</div>
 
       {review.scanner_match ? (
-        <div style={styles.coachMetrics}>
-          <Meta
-            label="Scanner Entry?"
-            value={review.entry_after_scanner ? "Yes" : "Before signal"}
-          />
-          <Meta
-            label="Entry Quality"
-            value={
-              review.entry_quality
-                ? `${review.entry_quality.score}/100 · ${review.entry_quality.label}`
-                : "—"
-            }
-          />
-          <Meta
-            label="Vs Freeze"
-            value={pct(review.entry_quality?.entry_vs_freeze_pct)}
-          />
-          <Meta
-            label="Target Left at Entry"
-            value={pct(review.entry_quality?.target_remaining_pct_at_entry)}
-          />
+        <>
+          <CoachSection title="Entry Verdict">
+            <div style={styles.coachMetrics}>
+              <Meta label="Overall" value={review.entry_verdict || "—"} />
+              <Meta
+                label="Entry Quality"
+                value={
+                  review.entry_quality
+                    ? `${review.entry_quality.score}/100 · ${review.entry_quality.label}`
+                    : "—"
+                }
+              />
+              <Meta
+                label="Setup Valid at Entry"
+                value={yesNo(review.setup_valid_at_entry)}
+              />
+              <Meta
+                label="Entry After Invalidation"
+                value={yesNo(review.entry_after_invalidation)}
+              />
+              {review.entry_after_invalidation ? (
+                <Meta
+                  label="Late by"
+                  value={
+                    review.minutes_after_invalidation != null
+                      ? `${review.minutes_after_invalidation.toFixed(0)}m`
+                      : "—"
+                  }
+                />
+              ) : null}
+              <Meta
+                label="Scanner Invalidation"
+                value={coachTime(review.setup_invalidation_time)}
+              />
+              <Meta label="Your Entry" value={coachTime(review.entry_time_pt)} />
+              <Meta
+                label="Scanner Entry?"
+                value={review.entry_after_scanner ? "Yes" : "Before signal"}
+              />
+              <Meta
+                label="Vs Freeze"
+                value={pct(review.entry_quality?.entry_vs_freeze_pct)}
+              />
+              <Meta
+                label="Target Left at Entry"
+                value={pct(review.entry_quality?.target_remaining_pct_at_entry)}
+              />
+              <Meta label="Freeze" value={coachPrice(review.freeze_price)} />
+              <Meta label="Frozen +3" value={coachPrice(review.frozen_target)} />
+              <Meta
+                label="Displacement Low"
+                value={coachPrice(review.displacement_low)}
+              />
+              <Meta label="Your Stop" value={coachPrice(review.planned_stop)} />
+            </div>
+            {review.entry_quality?.score_reasons?.length ? (
+              <ul style={styles.coachBullets}>
+                {review.entry_quality.score_reasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            ) : null}
+          </CoachSection>
+
+          <CoachSection title="Trend · EMA / VWAP at Entry">
+            <div style={styles.coachMetrics}>
+              <Meta label="EMA9" value={coachPrice(trend?.ema9)} />
+              <Meta label="EMA20" value={coachPrice(trend?.ema20)} />
+              <Meta label="EMA200" value={coachPrice(trend?.ema200)} />
+              <Meta label="VWAP" value={coachPrice(trend?.vwap)} />
+              <Meta label="EMA Alignment" value={trend?.ema_alignment || "—"} />
+              <Meta label="EMA9 Slope" value={trend?.ema9_slope || "—"} />
+              <Meta label="EMA20 Slope" value={trend?.ema20_slope || "—"} />
+              <Meta label="Above VWAP" value={yesNo(trend?.above_vwap)} />
+              <Meta label="Above EMA9" value={yesNo(trend?.above_ema9)} />
+              <Meta label="Above EMA20" value={yesNo(trend?.above_ema20)} />
+              <Meta label="VWAP Distance" value={pct(trend?.vwap_distance_pct)} />
+            </div>
+          </CoachSection>
+
+          <CoachSection title="Market Structure at Entry">
+            <div style={styles.coachMetrics}>
+              <Meta label="1m Structure" value={structure1m?.trend || "—"} />
+              <Meta label="5m Structure" value={structure5m?.trend || "—"} />
+              <Meta label="5m BOS" value={yesNo(structure5m?.bos)} />
+              <Meta label="5m CHoCH" value={yesNo(structure5m?.choch)} />
+              <Meta
+                label="5m Swing High"
+                value={coachPrice(structure5m?.last_swing_high)}
+              />
+              <Meta
+                label="5m Swing Low"
+                value={coachPrice(structure5m?.last_swing_low)}
+              />
+              <Meta label="5m HH" value={yesNo(structure5m?.higher_highs)} />
+              <Meta label="5m HL" value={yesNo(structure5m?.higher_lows)} />
+              <Meta label="5m LH" value={yesNo(structure5m?.lower_highs)} />
+              <Meta label="5m LL" value={yesNo(structure5m?.lower_lows)} />
+            </div>
+          </CoachSection>
+
+          <CoachSection title="Liquidity at Entry">
+            <div style={styles.coachMetrics}>
+              <Meta
+                label="Liquidity Above"
+                value={coachPrice(liquidity?.nearest_above)}
+              />
+              <Meta
+                label="Liquidity Below"
+                value={coachPrice(liquidity?.nearest_below)}
+              />
+              <Meta label="Equal Highs" value={yesNo(liquidity?.equal_highs)} />
+              <Meta label="Equal Lows" value={yesNo(liquidity?.equal_lows)} />
+              <Meta
+                label="Latest Sweep"
+                value={
+                  sweep
+                    ? `${sweep.side === "sell-side" ? "Sell-side" : "Buy-side"} @ ${coachPrice(sweep.price)}`
+                    : "None confirmed"
+                }
+              />
+              <Meta
+                label="Sweep Reclaimed"
+                value={sweep ? yesNo(sweep.reclaimed) : "—"}
+              />
+              {sweep?.time ? (
+                <Meta label="Sweep Time" value={coachTime(sweep.time)} />
+              ) : null}
+            </div>
+          </CoachSection>
+
+          <CoachSection title="Demand / FVG Context">
+            {demand ? (
+              <div style={styles.coachMetrics}>
+                <Meta
+                  label="5m Demand Zone"
+                  value={`${coachPrice(demand.bottom)}–${coachPrice(demand.top)}`}
+                />
+                <Meta label="Zone Status" value={demand.status || "—"} />
+                <Meta label="Entry Location" value={demand.entry_location || "—"} />
+                <Meta label="Distance" value={pct(demand.distance_pct)} />
+                <Meta
+                  label="Mitigation"
+                  value={pct(demand.mitigation_pct)}
+                />
+                <Meta
+                  label="Zone Confirmed"
+                  value={coachTime(demand.confirmation_time)}
+                />
+              </div>
+            ) : (
+              <div style={styles.coachSectionEmpty}>
+                No confirmed nearby 5-minute demand/FVG zone was found at entry.
+              </div>
+            )}
+          </CoachSection>
+
+          <CoachSection title="What Happened After Entry">
+            <div style={styles.coachMetrics}>
+              <Meta
+                label="First 5m"
+                value={`MFE ${pct(path5?.mfe_pct)} · MAE ${pct(path5?.mae_pct)}`}
+              />
+              <Meta
+                label="First 15m"
+                value={`MFE ${pct(path15?.mfe_pct)} · MAE ${pct(path15?.mae_pct)}`}
+              />
+              <Meta
+                label="First 30m"
+                value={`MFE ${pct(path30?.mfe_pct)} · MAE ${pct(path30?.mae_pct)}`}
+              />
+              <Meta
+                label="Setup Valid at Exit"
+                value={yesNo(review.setup_valid_at_exit)}
+              />
+              <Meta
+                label="Target After Exit"
+                value={review.target_hit_after_exit ? "Yes" : "No"}
+              />
+              <Meta
+                label="MFE After Exit"
+                value={pct(review.mfe_after_exit_pct)}
+              />
+            </div>
+          </CoachSection>
+
+          {review.first_confirmation_after_entry ? (
+            <CoachSection title="First Later Technical Confirmation">
+              <div style={styles.coachMetrics}>
+                <Meta
+                  label="Time"
+                  value={coachTime(review.first_confirmation_after_entry.time)}
+                />
+                <Meta
+                  label="Price"
+                  value={coachPrice(review.first_confirmation_after_entry.price)}
+                />
+              </div>
+              {review.first_confirmation_after_entry.reasons?.length ? (
+                <ul style={styles.coachBullets}>
+                  {review.first_confirmation_after_entry.reasons.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </CoachSection>
+          ) : null}
+
+          {review.what_went_well?.length ? (
+            <CoachSection title="What You Did Well">
+              <ul style={styles.coachBullets}>
+                {review.what_went_well.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </CoachSection>
+          ) : null}
+
+          {review.next_time_guidance?.length ? (
+            <CoachSection title="Next Time">
+              <ul style={styles.coachBullets}>
+                {review.next_time_guidance.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </CoachSection>
+          ) : null}
+
           {review.historical_context?.best_observed_pullback ? (
-            <Meta
-              label="Study Entry Reference"
-              value={`${review.historical_context.best_observed_pullback.pullback_pct}% pullback · ${pct(review.historical_context.best_observed_pullback.hit_rate_pct)}`}
-            />
+            <div style={styles.coachStudyRef}>
+              Study reference: {review.historical_context.best_observed_pullback.pullback_pct}% pullback · {pct(review.historical_context.best_observed_pullback.hit_rate_pct)} valid target rate in the observed sample. This is research context, not a required entry rule.
+            </div>
           ) : null}
-          <Meta
-            label="Setup Valid at Exit"
-            value={review.setup_valid_at_exit ? "Yes" : "No"}
-          />
-          <Meta
-            label="Target After Exit"
-            value={review.target_hit_after_exit ? "Yes" : "No"}
-          />
-          {review.minutes_exit_to_target != null ? (
-            <Meta
-              label="Exit → Target"
-              value={`${review.minutes_exit_to_target.toFixed(0)}m`}
-            />
-          ) : null}
-          {Number(review.estimated_missed_pnl_to_target) > 0 ? (
-            <Meta
-              label="Missed to Target"
-              value={money(Number(review.estimated_missed_pnl_to_target))}
-            />
-          ) : null}
-        </div>
+        </>
       ) : null}
     </div>
   );
@@ -464,6 +708,41 @@ const styles: Record<string, React.CSSProperties> = {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
     gap: 6,
+  },
+  coachSection: {
+    marginTop: 10,
+    borderTop: "1px solid rgba(148,163,184,.14)",
+    paddingTop: 9,
+  },
+  coachSectionTitle: {
+    marginBottom: 7,
+    color: "#e2e8f0",
+    fontSize: 10,
+    fontWeight: 900,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
+  coachSectionEmpty: {
+    color: "#94a3b8",
+    fontSize: 10,
+    lineHeight: 1.4,
+  },
+  coachBullets: {
+    margin: "8px 0 0 18px",
+    padding: 0,
+    color: "#cbd5e1",
+    fontSize: 10,
+    lineHeight: 1.45,
+  },
+  coachStudyRef: {
+    marginTop: 10,
+    border: "1px solid rgba(168,85,247,.2)",
+    background: "rgba(88,28,135,.08)",
+    borderRadius: 10,
+    padding: 8,
+    color: "#c4b5fd",
+    fontSize: 9,
+    lineHeight: 1.4,
   },
   replayButton: {
     width: "100%",
