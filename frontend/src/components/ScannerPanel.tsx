@@ -1867,12 +1867,15 @@ export default function ScannerPanel({
         style={{
           ...panelStyle,
           overflowX: "auto",
-          overflowY: "visible",
+          overflowY: isWorkspace ? "auto" : "visible",
           WebkitOverflowScrolling: "touch",
+          overscrollBehavior: isWorkspace ? "contain" : undefined,
+          scrollbarGutter: isWorkspace ? "stable" : undefined,
           width: "100%",
           maxWidth: "100%",
+          maxHeight: isWorkspace ? "60vh" : undefined,
           minWidth: 0,
-          minHeight: 0,
+          minHeight: isWorkspace ? 320 : 0,
           padding: isWorkspace ? 0 : 10,
         }}
       >
@@ -1941,7 +1944,7 @@ export default function ScannerPanel({
                 position: "sticky",
                 top: 0,
                 background: "#161d29",
-                zIndex: 1,
+                zIndex: 6,
               }}
             >
               <tr>
@@ -2131,7 +2134,7 @@ export default function ScannerPanel({
                 position: "sticky",
                 top: 0,
                 background: "#161d29",
-                zIndex: 1,
+                zIndex: 6,
               }}
             >
               <tr>
@@ -2386,7 +2389,10 @@ function getStickyHeaderCellStyle(
     position: "sticky",
     top: 0,
     background: "#161d29",
-    zIndex: sticky ? 7 : 3,
+    zIndex: sticky ? 9 : 7,
+    boxShadow: sticky
+      ? "2px 2px 0 rgba(17, 24, 39, 0.95)"
+      : "0 2px 0 rgba(17, 24, 39, 0.95)",
     ...(sticky
       ? {
           left: sticky.left,
@@ -2394,7 +2400,6 @@ function getStickyHeaderCellStyle(
           minWidth: sticky.width,
           maxWidth: sticky.width,
           boxSizing: "border-box",
-          boxShadow: "2px 0 0 rgba(17, 24, 39, 0.95)",
         }
       : {}),
   };
