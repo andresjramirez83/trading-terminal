@@ -350,14 +350,16 @@ function createDemandZoneElement(
    * border and DZ× label show that the zone failed, while the original demand
    * color preserves where the setup existed.
    */
-  const border = continuation ? "#22c55e" : "#38bdf8";
+  // Keep automatic demand zones visually distinct from bullish FVGs.
+  // Bullish FVGs use green; demand zones use light-blue/cyan shades.
+  const border = continuation ? "#38bdf8" : "#7dd3fc";
   const fill = continuation
     ? invalidated
-      ? "rgba(34, 197, 94, 0.12)"
-      : "rgba(34, 197, 94, 0.18)"
-    : invalidated
       ? "rgba(56, 189, 248, 0.10)"
-      : "rgba(56, 189, 248, 0.15)";
+      : "rgba(56, 189, 248, 0.17)"
+    : invalidated
+      ? "rgba(125, 211, 252, 0.09)"
+      : "rgba(125, 211, 252, 0.14)";
   const width = Math.max(8, right - left);
   const height = Math.max(2, bottomY - topY);
   const label = invalidated
