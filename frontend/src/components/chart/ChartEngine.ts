@@ -1399,29 +1399,50 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     const setup = this.vwap3SetupOverlay;
     if (!setup || !setup.displacementTime || !this.bars.length) return;
 
-    // The scanner displacement is a native 5-minute candle. Show the exact
-    // EXP marker only on the 5m chart; the frozen +/-3 lines remain visible
-    // on every timeframe without requiring any recalculation.
+    // The scanner displacement is always a native 5-minute candle. On 5m the
+    // marker lands on the exact candle. On other chart timeframes, mark the bar
+    // that contains the 5m displacement time and label it "5m EXP" so we do not
+    // imply the larger/smaller chart candle itself qualified as the setup.
     const normalizedTimeframe = String(this.timeframe ?? "").trim().toLowerCase();
-    if (normalizedTimeframe !== "5m") return;
-
     const targetMs = Date.parse(setup.displacementTime);
     if (!Number.isFinite(targetMs)) return;
     const targetSeconds = Math.floor(targetMs / 1000);
 
-    let nearest = this.bars[0];
-    let nearestDistance = Math.abs(Number(nearest.time) - targetSeconds);
-    for (const bar of this.bars) {
-      const distance = Math.abs(Number(bar.time) - targetSeconds);
-      if (distance < nearestDistance) {
-        nearest = bar;
-        nearestDistance = distance;
+    let markerBar = this.bars[0];
+    let markerIndex = 0;
+    for (let index = 0; index < this.bars.length; index += 1) {
+      const barTime = Number(this.bars[index].time);
+      if (!Number.isFinite(barTime)) continue;
+      if (barTime <= targetSeconds) {
+        markerBar = this.bars[index];
+        markerIndex = index;
+        continue;
       }
+      break;
     }
-    if (nearestDistance > 10 * 60) return;
 
-    const x = this.chart.timeScale().timeToCoordinate(nearest.time);
-    const markerPrice = Number(setup.displacementHigh ?? nearest.high);
+    const markerSeconds = Number(markerBar.time);
+    const nextSeconds =
+      markerIndex + 1 < this.bars.length
+        ? Number(this.bars[markerIndex + 1].time)
+        : Number.NaN;
+    const inferredBarSeconds =
+      Number.isFinite(nextSeconds) && nextSeconds > markerSeconds
+        ? nextSeconds - markerSeconds
+        : this.bars.length > 1
+          ? Math.max(60, Number(this.bars[1].time) - Number(this.bars[0].time))
+          : 5 * 60;
+
+    // Reject markers whose displacement time is outside the loaded chart data.
+    if (
+      targetSeconds < Number(this.bars[0].time) - inferredBarSeconds ||
+      targetSeconds > Number(this.bars[this.bars.length - 1].time) + inferredBarSeconds
+    ) {
+      return;
+    }
+
+    const x = this.chart.timeScale().timeToCoordinate(markerBar.time);
+    const markerPrice = Number(setup.displacementHigh ?? markerBar.high);
     const y = this.series.candles.priceToCoordinate(markerPrice);
     if (x == null || y == null) return;
 
@@ -1430,9 +1451,10 @@ setMarketContext(symbol?: string, timeframe?: string): void {
       String(setup.outcome ?? "") === "invalidated" ||
       String(setup.status ?? "") === "INVALIDATED" ||
       String(setup.outcome ?? "") === "target_hit_after_invalidation";
+    const expPrefix = normalizedTimeframe === "5m" ? "EXP" : "5m EXP";
     badge.textContent = invalid
-      ? `EXP ${setup.grade ?? ""} · INVALID`
-      : `EXP ${setup.grade ?? ""}`;
+      ? `${expPrefix} ${setup.grade ?? ""} · INVALID`
+      : `${expPrefix} ${setup.grade ?? ""}`;
     badge.style.position = "absolute";
     badge.style.left = `${Math.round(x)}px`;
     badge.style.top = `${Math.max(4, Math.round(y) - 30)}px`;

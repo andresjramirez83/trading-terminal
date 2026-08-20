@@ -156,6 +156,8 @@ type SnapshotResponse =
   | string[]
   | { snapshot_dates?: string[]; dates?: string[]; latest?: string | null };
 
+const VWAP3_SELECTED_SETUP_STORAGE_KEY = "trading.vwap3Chart.selectedSetup.v1";
+
 function formatVolume(value?: number | null): string {
   const safe = value ?? 0;
   if (safe >= 1_000_000_000) return `${(safe / 1_000_000_000).toFixed(2)}B`;
@@ -1125,9 +1127,20 @@ export default function ScannerPanel({
     cacheStatus?.all_data,
   ]);
 
-  function handleScannerSymbolSelect(symbol: string) {
+  function handleScannerSymbolSelect(symbol: string, row?: ScannerRow) {
     const clean = normalizeSymbol(symbol);
     if (!clean) return;
+
+    if (isVwap3TargetScanner && row) {
+      try {
+        window.localStorage.setItem(
+          VWAP3_SELECTED_SETUP_STORAGE_KEY,
+          JSON.stringify({ ...row, symbol: clean }),
+        );
+      } catch {
+        // Chart overlay persistence is best-effort only.
+      }
+    }
 
     setActiveSymbol(clean, "scanner");
     onSelectSymbol?.(clean);
@@ -1905,7 +1918,7 @@ export default function ScannerPanel({
                 <button
                   key={`scanner-card-${symbol}-${index}`}
                   type="button"
-                  onClick={() => handleScannerSymbolSelect(symbol)}
+                  onClick={() => handleScannerSymbolSelect(symbol, row)}
                   style={{
                     textAlign: "left",
                     padding: "10px 12px",
@@ -2020,7 +2033,7 @@ export default function ScannerPanel({
                 return (
                   <tr
                     key={`vwap3-row-${symbol}-${index}`}
-                    onClick={() => handleScannerSymbolSelect(symbol)}
+                    onClick={() => handleScannerSymbolSelect(symbol, row)}
                     style={{
                       cursor: "pointer",
                       background: isSelected
@@ -2199,7 +2212,7 @@ export default function ScannerPanel({
                 return (
                   <tr
                     key={`scanner-row-${symbol}-${index}`}
-                    onClick={() => handleScannerSymbolSelect(symbol)}
+                    onClick={() => handleScannerSymbolSelect(symbol, row)}
                     style={{
                       cursor: "pointer",
                       background: isSelected

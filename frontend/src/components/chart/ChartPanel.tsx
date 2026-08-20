@@ -65,6 +65,7 @@ import {
 import {
   API_BASE,
   fetchAutoTradeStatus,
+  fetchScannerCache,
   fetchVwap3SetupHistory,
   updateOvernightProtectedOrderPrice,
   type AutoTradeStatus,
@@ -83,6 +84,7 @@ const CHART_PREFERENCES_POLL_MS = 15_000;
 const CHART_PREFERENCES_SAVE_DELAY_MS = 180;
 const LIVE_CHART_STATE_THROTTLE_MS = 250;
 const VWAP3_CHART_OVERLAY_REFRESH_MS = 15_000;
+const VWAP3_SELECTED_SETUP_STORAGE_KEY = "trading.vwap3Chart.selectedSetup.v1";
 
 function pacificTodayIsoForChart(): string {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -109,6 +111,29 @@ function latestVwap3SetupForSymbol(
     return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
   });
   return matches[0] ?? null;
+}
+
+function readSelectedVwap3SetupForSymbol(
+  symbol: string,
+): Vwap3SetupHistoryRow | null {
+  try {
+    const raw = window.localStorage.getItem(VWAP3_SELECTED_SETUP_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Vwap3SetupHistoryRow;
+    const selectedSymbol = String(parsed?.symbol ?? "").trim().toUpperCase();
+    if (!selectedSymbol || selectedSymbol !== symbol.trim().toUpperCase()) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function scannerCacheRowsForVwap3(cache: unknown): Vwap3SetupHistoryRow[] {
+  if (!cache || typeof cache !== "object") return [];
+  const data = (cache as { data?: unknown }).data;
+  if (!data || typeof data !== "object") return [];
+  const rows = (data as { rows?: unknown }).rows;
+  return Array.isArray(rows) ? (rows as Vwap3SetupHistoryRow[]) : [];
 }
 
 const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
@@ -1750,9 +1775,31 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       }
 
       try {
-        const history = await fetchVwap3SetupHistory(pacificTodayIsoForChart());
+        // Prefer the live scanner cache. Actionable setups can survive an
+        // Eastern market-date rollover, so this catches carry-forward setups and
+        // ensures a new live setup wins over an older historical selection.
+        const cache = await fetchScannerCache("vwap3_target");
         if (cancelled) return;
-        const setup = latestVwap3SetupForSymbol(history.rows ?? [], symbol);
+        let setup = latestVwap3SetupForSymbol(
+          scannerCacheRowsForVwap3(cache),
+          symbol,
+        );
+
+        // Next use the exact VWAP3 setup the user clicked in the scanner. This is
+        // important for prior-day setups and resolved-history rows, which may not
+        // be present in today's Pacific history file.
+        if (!setup) {
+          setup = readSelectedVwap3SetupForSymbol(symbol);
+        }
+
+        // Fall back to today's Pacific history for symbols selected outside the
+        // scanner (watchlists/search) or after a cache restart.
+        if (!setup) {
+          const history = await fetchVwap3SetupHistory(pacificTodayIsoForChart());
+          if (cancelled) return;
+          setup = latestVwap3SetupForSymbol(history.rows ?? [], symbol);
+        }
+
         if (!setup) {
           engine.setVwap3SetupOverlay(null);
           return;
