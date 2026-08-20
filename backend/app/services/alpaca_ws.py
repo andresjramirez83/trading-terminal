@@ -86,6 +86,45 @@ def _client_key(symbol: str, timeframe: str) -> str:
     return f"{_normalize_symbol(symbol)}::{_normalize_timeframe(timeframe)}"
 
 
+
+
+def _minute_trade_update_flags(message: Dict[str, Any]) -> tuple[bool, bool]:
+    """Return (updates_ohlc, updates_volume) using Alpaca/SIP minute-bar rules.
+
+    The raw trade channel includes prints such as odd lots, average-price
+    trades, prior-reference prices, and out-of-sequence trades. Those can be
+    valid trades but must not change a minute bar's OHLC. Alpaca's historical
+    bars apply these condition rules, so the live chart must do the same.
+    """
+    tape = str(message.get("z") or "").upper().strip()
+    raw_conditions = message.get("c") or []
+    if isinstance(raw_conditions, str):
+        conditions = {raw_conditions.strip()}
+    else:
+        conditions = {str(item).strip() for item in raw_conditions}
+
+    update_price = True
+    update_volume = True
+
+    # Conditions that do not update minute-bar OHLC on the SIP tapes.
+    blocked_price = {"C", "H", "I", "M", "N", "P", "Q", "R", "U", "V", "Z", "4", "7", "9"}
+    if conditions & blocked_price:
+        update_price = False
+
+    # Same letter can mean a different condition depending on tape.
+    if "B" in conditions and tape in {"A", "B"}:
+        update_price = False  # Average Price Trade
+    if "G" in conditions and tape == "C":
+        update_price = False  # Bunched Sold Trade
+    if "W" in conditions and tape in {"C", "O"}:
+        update_price = False  # Average Price Trade
+
+    # These conditions do not update minute-bar volume either.
+    if conditions & {"M", "Q", "9"}:
+        update_volume = False
+
+    return update_price, update_volume
+
 def _timestamp_ms(value: Any) -> int:
     """Convert Alpaca RFC-3339 or epoch timestamps to Unix milliseconds."""
     if value is None:
@@ -498,11 +537,15 @@ class AlpacaWSManager:
                     ):
                         continue
 
+                    update_price, update_volume = _minute_trade_update_flags(message)
+
                     updated_bars = live_bar_aggregator.update_trade(
                         symbol=symbol,
                         price=price,
                         volume=volume,
                         timestamp=timestamp,
+                        update_price=update_price,
+                        update_volume=update_volume,
                     )
 
                     for bar in updated_bars:

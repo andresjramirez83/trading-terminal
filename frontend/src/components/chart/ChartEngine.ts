@@ -1153,19 +1153,43 @@ export class ChartEngine {
 
   updateBar(bar: CleanBar): void {
     const lastBar = this.bars[this.bars.length - 1];
-    const isSameBar =
-      Boolean(lastBar) && Number(lastBar?.time) === Number(bar.time);
+    const lastTime = lastBar ? Number(lastBar.time) : null;
+    const incomingTime = Number(bar.time);
+
+    // Never append an older websocket candle after a newer chart candle. Late
+    // SIP prints/corrections are reconciled by historical bars instead of
+    // corrupting the time order of the live series.
+    if (lastTime != null && incomingTime < lastTime) {
+      return;
+    }
+
+    const isSameBar = lastTime != null && lastTime === incomingTime;
+
+    // A websocket subscription can begin in the middle of a candle. The live
+    // aggregator therefore only knows trades observed after subscription,
+    // while the historical bar already contains the true beginning of the
+    // interval. Merge same-time updates instead of replacing that OHLC history.
+    const nextBar: CleanBar = isSameBar && lastBar
+      ? {
+          time: bar.time,
+          open: lastBar.open,
+          high: Math.max(lastBar.high, bar.high, bar.open, bar.close),
+          low: Math.min(lastBar.low, bar.low, bar.open, bar.close),
+          close: bar.close,
+          volume: Math.max(lastBar.volume, bar.volume),
+        }
+      : bar;
 
     if (isSameBar) {
-      this.bars[this.bars.length - 1] = bar;
+      this.bars[this.bars.length - 1] = nextBar;
     } else {
-      this.bars.push(bar);
+      this.bars.push(nextBar);
     }
 
     this.bars = trimBarsForTimeframe(this.bars, this.timeframe);
 
     if (isSameBar) {
-      this.updateLiveIndicatorValues(bar);
+      this.updateLiveIndicatorValues(nextBar);
     } else {
       // Rebuild once per completed candle so any timeframe trimming remains
       // exactly consistent with the historical calculation.
@@ -1173,47 +1197,47 @@ export class ChartEngine {
       this.rebuildLiveIndicatorState();
     }
 
-    this.lastCrosshairInfo = buildCrosshairInfoFromBar(bar);
-    this.positionOverlayEngine.updateMarketPrice(bar.close);
+    this.lastCrosshairInfo = buildCrosshairInfoFromBar(nextBar);
+    this.positionOverlayEngine.updateMarketPrice(nextBar.close);
 
     this.series.candles.update({
-      time: bar.time,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
+      time: nextBar.time,
+      open: nextBar.open,
+      high: nextBar.high,
+      low: nextBar.low,
+      close: nextBar.close,
     });
 
     this.series.volume.update({
-      time: bar.time,
-      value: bar.volume,
-      color: volumeColor(bar),
+      time: nextBar.time,
+      value: nextBar.volume,
+      color: volumeColor(nextBar),
     });
 
     if (this.currentVwapValue != null) {
       this.series.vwap.update({
-        time: bar.time,
+        time: nextBar.time,
         value: this.currentVwapValue,
       });
     }
 
     if (this.currentEma9Value != null) {
       this.series.ema9.update({
-        time: bar.time,
+        time: nextBar.time,
         value: this.currentEma9Value,
       });
     }
 
     if (this.currentEma20Value != null) {
       this.series.ema20.update({
-        time: bar.time,
+        time: nextBar.time,
         value: this.currentEma20Value,
       });
     }
 
     if (this.currentEma50Value != null) {
       this.series.ema50.update({
-        time: bar.time,
+        time: nextBar.time,
         value: this.currentEma50Value,
       });
     }

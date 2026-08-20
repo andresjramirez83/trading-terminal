@@ -18,6 +18,12 @@ class LiveBar:
 
     volume: float = 0.0
 
+    # Trade-time bounds keep OHLC deterministic when SIP messages arrive a
+    # little out of order. These are internal aggregation fields and are not
+    # exposed in the chart payload.
+    first_price_timestamp: int = 0
+    last_price_timestamp: int = 0
+
     complete: bool = False
 
     def update(
