@@ -121,6 +121,10 @@ type ScannerRow = {
   std_band_width_pct?: number;
   target_method?: string;
   target_distance_pct?: number;
+  target_distance_bucket?: string;
+  target_distance_quality?: string;
+  target_distance_penalty?: number;
+  grade_base_score?: number;
   displacement_pct?: number;
   displacement_open?: number;
   displacement_high?: number;
@@ -1427,7 +1431,11 @@ export default function ScannerPanel({
         <div style={panelStyle}>
           <div style={{ fontWeight: 800, marginBottom: 8 }}>VWAP +3 Target Rules</div>
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 13 }}>
-            <span><strong>A+</strong> = frozen target &lt; 10% from freeze close</span>
+            <span><strong>A+</strong> = frozen target 1-10% from freeze close</span>
+            <span><strong>A+ Prime</strong> = 5-10% (full score)</span>
+            <span><strong>3-5%</strong> = -6 score</span>
+            <span><strong>1-3%</strong> = -24 score</span>
+            <span><strong>&lt;1%</strong> = target too close / rejected</span>
             <span><strong>A</strong> = frozen target 10-15%</span>
             <span><strong>Confirmed</strong> = 5m close above displacement close/body</span>
             <span><strong>Strong</strong> = 5m close above displacement high/wick</span>
@@ -1976,6 +1984,7 @@ export default function ScannerPanel({
                   ["lower_3std_price", "-3 STD"],
                   ["std_band_width_pct", "+3/-3 Range"],
                   ["target_distance_pct", "Target Dist"],
+                  ["target_distance_quality", "Target Fit"],
                   ["displacement_pct", "Displacement"],
                   ["displacement_close", "Disp Close"],
                   ["displacement_high", "Disp High"],
@@ -2084,6 +2093,28 @@ export default function ScannerPanel({
                     </td>
                     <td style={cellRight}>
                       {formatMaybe(row.target_distance_pct)}%
+                    </td>
+                    <td
+                      style={{
+                        ...cellLeft,
+                        fontWeight: 800,
+                        color:
+                          row.target_distance_quality === "PRIME"
+                            ? "#66d17a"
+                            : row.target_distance_quality === "TIGHT"
+                              ? "#f0c36a"
+                              : row.target_distance_quality === "VERY TIGHT" ||
+                                  row.target_distance_quality === "TARGET TOO CLOSE"
+                                ? "#ff8a8a"
+                                : "#cbd5e1",
+                      }}
+                      title={
+                        Number(row.target_distance_penalty ?? 0) > 0
+                          ? `Target-distance penalty: -${row.target_distance_penalty} score`
+                          : undefined
+                      }
+                    >
+                      {row.target_distance_quality ?? "-"}
                     </td>
                     <td style={cellRight}>
                       {formatMaybe(row.displacement_pct)}%

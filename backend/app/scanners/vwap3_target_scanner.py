@@ -29,6 +29,14 @@ MIN_VOLUME = 50_000.0
 MIN_CLOSE_LOCATION = 0.65
 A_PLUS_MAX_DISTANCE_PCT = 10.0
 A_MAX_DISTANCE_PCT = 15.0
+# Very small remaining targets are less useful for entry quality even though
+# they are easier to hit. Keep them for research, but downgrade their
+# actionable ranking. Sub-1% targets are rejected as effectively already met.
+MIN_ACTIONABLE_TARGET_DISTANCE_PCT = 1.0
+A_PLUS_TIGHT_MAX_DISTANCE_PCT = 3.0
+A_PLUS_GOOD_MAX_DISTANCE_PCT = 5.0
+A_PLUS_GOOD_PENALTY = 6
+A_PLUS_TIGHT_PENALTY = 24
 
 PM_RUNNER_MIN_DISTANCE_PCT = 20.0
 PM_RUNNER_MAX_DISTANCE_PCT = 25.0
@@ -67,6 +75,26 @@ def _grade_base_score(grade: str) -> int:
         "PM RUNNER": 72,
         "PM EXTREME RUNNER WATCH": 64,
     }.get(str(grade or ""), 60)
+
+
+def _target_distance_profile(grade: str, target_distance_pct: float) -> Dict[str, Any]:
+    """Describe how useful the remaining frozen +3 distance is for a fresh entry."""
+    distance = max(0.0, float(target_distance_pct or 0.0))
+    if str(grade or "") != "A+":
+        return {"bucket": "STANDARD", "quality": "STANDARD", "penalty": 0, "reject": False}
+    if distance < MIN_ACTIONABLE_TARGET_DISTANCE_PCT:
+        return {"bucket": "UNDER_1", "quality": "TARGET TOO CLOSE", "penalty": 100, "reject": True}
+    if distance < A_PLUS_TIGHT_MAX_DISTANCE_PCT:
+        return {"bucket": "1_TO_3", "quality": "VERY TIGHT", "penalty": A_PLUS_TIGHT_PENALTY, "reject": False}
+    if distance < A_PLUS_GOOD_MAX_DISTANCE_PCT:
+        return {"bucket": "3_TO_5", "quality": "TIGHT", "penalty": A_PLUS_GOOD_PENALTY, "reject": False}
+    return {"bucket": "5_TO_10", "quality": "PRIME", "penalty": 0, "reject": False}
+
+
+def _score_at_freeze(grade: str, target_distance_pct: float) -> int:
+    base = _grade_base_score(grade)
+    profile = _target_distance_profile(grade, target_distance_pct)
+    return max(0, min(100, base - int(profile.get("penalty") or 0)))
 
 
 def _grade_sort_order(grade: str) -> int:
@@ -576,7 +604,7 @@ class VWAP3TargetScanner(ScannerBase):
         "The +3 STD target is frozen on the completed displacement candle and alerted immediately. "
         "The matching -3 STD level from that same candle is frozen as a downside reference/range, not an execution stop. "
         "Watches saved AH runners plus live gainers/actives/losers and pins symbols after displacement. "
-        "A+ is under 10%; A is 10-15%; validated premarket Runner classes are tracked separately."
+        "A+ is 1-10% with target-distance score penalties below 5%; sub-1% targets are rejected. A is 10-15%; validated premarket Runner classes are tracked separately."
     )
 
     def __init__(self) -> None:
@@ -1025,6 +1053,11 @@ class VWAP3TargetScanner(ScannerBase):
             else:
                 continue
 
+            target_profile = _target_distance_profile(grade, target_distance_pct)
+            if bool(target_profile.get("reject")):
+                # Effectively already at +3; do not rank as a fresh actionable setup.
+                continue
+
             freeze_time = str(freeze.get("dt_et") or "")
             setup_key = f"{symbol}|{pool}|{freeze_time}"
 
@@ -1035,7 +1068,9 @@ class VWAP3TargetScanner(ScannerBase):
 
             seen_setup_keys.add(setup_key)
 
-            base_score = _grade_base_score(grade)
+            grade_base_score = _grade_base_score(grade)
+            target_distance_penalty = int(target_profile.get("penalty") or 0)
+            base_score = _score_at_freeze(grade, target_distance_pct)
 
             notes: List[str] = []
 
@@ -1082,6 +1117,12 @@ class VWAP3TargetScanner(ScannerBase):
                         f"+3/-3 band {std_band_width_pct:.2f}%",
                     ]
                 )
+
+                if grade == "A+":
+                    notes.append(
+                        f"Target fit {target_profile.get('quality')}"
+                        + (f" (-{target_distance_penalty} score)" if target_distance_penalty > 0 else "")
+                    )
 
                 if grade == "PM RUNNER":
                     notes.append(
@@ -1167,6 +1208,10 @@ class VWAP3TargetScanner(ScannerBase):
                 # Preserve the quality assigned when the setup first froze.
                 # score/runner_score remain the LIVE actionable score and may
                 # later be downgraded to zero after invalidation.
+                "grade_base_score": grade_base_score,
+                "target_distance_bucket": target_profile.get("bucket"),
+                "target_distance_quality": target_profile.get("quality"),
+                "target_distance_penalty": target_distance_penalty,
                 "score_at_freeze": base_score,
                 "original_score": base_score,
                 "current_score": base_score,
@@ -1344,11 +1389,14 @@ class VWAP3TargetScanner(ScannerBase):
             row["is_live_top20_now"] = current_rank is not None and current_rank <= 20
             row["is_live_top50_now"] = current_rank is not None and current_rank <= 50
             row["last_updated_at"] = datetime.now(timezone.utc).isoformat()
-            freeze_score = int(
-                row.get("score_at_freeze")
-                or row.get("original_score")
-                or _grade_base_score(str(row.get("grade") or ""))
-            )
+            grade_text = str(row.get("grade") or "")
+            target_distance = _safe_float(row.get("target_distance_pct"))
+            target_profile = _target_distance_profile(grade_text, target_distance)
+            freeze_score = _score_at_freeze(grade_text, target_distance)
+            row["grade_base_score"] = _grade_base_score(grade_text)
+            row["target_distance_bucket"] = target_profile.get("bucket")
+            row["target_distance_quality"] = target_profile.get("quality")
+            row["target_distance_penalty"] = int(target_profile.get("penalty") or 0)
             row["score_at_freeze"] = freeze_score
             row["original_score"] = freeze_score
 
@@ -1386,10 +1434,11 @@ class VWAP3TargetScanner(ScannerBase):
         }
         rows.sort(
             key=lambda row: (
-                _grade_sort_order(str(row.get("grade") or "")),
+                -_safe_float(row.get("current_score", row.get("score", 0))),
                 status_order.get(str(row.get("confirmation_status") or ""), 9),
-                _safe_float(row.get("target_distance_pct")),
+                _grade_sort_order(str(row.get("grade") or "")),
                 int(row.get("rank_at_freeze") or 999),
+                _safe_float(row.get("target_distance_pct")),
             )
         )
 
@@ -1488,6 +1537,12 @@ class VWAP3TargetScanner(ScannerBase):
                     "alert_timing": "first scanner cycle after completed displacement candle qualifies",
                     "requires_3_contractions": False,
                     "a_plus_target_distance_lt_pct": A_PLUS_MAX_DISTANCE_PCT,
+                    "a_plus_target_distance_scoring": {
+                        "reject_below_pct": MIN_ACTIONABLE_TARGET_DISTANCE_PCT,
+                        "very_tight_1_to_3_penalty": A_PLUS_TIGHT_PENALTY,
+                        "tight_3_to_5_penalty": A_PLUS_GOOD_PENALTY,
+                        "prime_5_to_10_penalty": 0,
+                    },
                     "a_target_distance_range_pct": [
                         A_PLUS_MAX_DISTANCE_PCT,
                         A_MAX_DISTANCE_PCT,
