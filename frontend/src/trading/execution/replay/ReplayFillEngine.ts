@@ -305,15 +305,7 @@ export class ReplayFillEngine {
 
   processBar(symbol: string, bar: CleanBar): ReplayBarProcessResult {
     const safeSymbol = cleanSymbol(symbol);
-    const result: ReplayBarProcessResult = {
-      changed: false,
-      filledOrders: [],
-      createdPositions: [],
-      updatedPositions: [],
-      closedPositions: [],
-      fills: [],
-      closedTrades: [],
-    };
+    const result = this.createProcessResult();
 
     if (!safeSymbol) return result;
 
@@ -332,11 +324,59 @@ export class ReplayFillEngine {
     return result;
   }
 
+  fillMarketOrderAtCurrentBar(
+    orderId: string,
+    bar: CleanBar,
+  ): ReplayBarProcessResult {
+    const result = this.createProcessResult();
+    const order = this.orders.get(orderId);
+
+    if (
+      !order ||
+      order.status !== "accepted" ||
+      order.type !== "market"
+    ) {
+      return result;
+    }
+
+    const fillPrice = Number(bar.close);
+    if (!Number.isFinite(fillPrice) || fillPrice <= 0) {
+      return result;
+    }
+
+    // A market order placed while replay is paused should execute at the
+    // price currently visible to the trader. Do not run bracket protection
+    // against the already-completed candle here; only future replay candles
+    // are eligible to hit the new target/stop.
+    this.fillOrder(order, fillPrice, bar, result);
+    this.markToMarket(order.symbol, bar, result);
+
+    result.changed =
+      result.filledOrders.length > 0 ||
+      result.createdPositions.length > 0 ||
+      result.updatedPositions.length > 0 ||
+      result.fills.length > 0;
+
+    return result;
+  }
+
   reset(): void {
     this.orders.clear();
     this.positions.clear();
     this.fills = [];
     this.closedTrades = [];
+  }
+
+  private createProcessResult(): ReplayBarProcessResult {
+    return {
+      changed: false,
+      filledOrders: [],
+      createdPositions: [],
+      updatedPositions: [],
+      closedPositions: [],
+      fills: [],
+      closedTrades: [],
+    };
   }
 
   private processWorkingOrders(

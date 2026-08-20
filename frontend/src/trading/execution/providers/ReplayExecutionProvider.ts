@@ -161,6 +161,7 @@ export class ReplayExecutionProvider extends BaseExecutionProvider {
   private initialized = false;
   private startingBalance = STARTING_BALANCE;
   private currentSymbol = "";
+  private currentBar: CleanBar | null = null;
   private currentBarTime: number | null = null;
   private lastProcessedBarKey = "";
 
@@ -194,6 +195,7 @@ export class ReplayExecutionProvider extends BaseExecutionProvider {
 
   setReplayContext(symbol: string, bar: CleanBar | null): void {
     this.currentSymbol = cleanSymbol(symbol);
+    this.currentBar = bar ? { ...bar } : null;
     this.currentBarTime = bar ? Number(bar.time) : null;
   }
 
@@ -300,8 +302,33 @@ export class ReplayExecutionProvider extends BaseExecutionProvider {
       return this.fail("Practice order was rejected.", "submit-order");
     }
 
-    this.rebuildSnapshot("Practice order accepted.");
     this.events.orderAccepted(accepted);
+
+    if (
+      accepted.type === "market" &&
+      this.currentSymbol === symbol &&
+      this.currentBar != null
+    ) {
+      const result = this.fillEngine.fillMarketOrderAtCurrentBar(
+        accepted.id,
+        this.currentBar,
+      );
+
+      if (result.filledOrders.length > 0) {
+        const filled = result.filledOrders[0];
+        this.rebuildSnapshot(
+          "Practice market order filled at the current replay price.",
+        );
+        this.events.replayBarProcessed(result, this.snapshot);
+
+        return {
+          ok: true,
+          order: this.toRawOrder(filled),
+        };
+      }
+    }
+
+    this.rebuildSnapshot("Practice order accepted.");
     this.events.snapshotUpdated(this.snapshot);
 
     return {
@@ -494,6 +521,7 @@ export class ReplayExecutionProvider extends BaseExecutionProvider {
     this.startingBalance = positive(startingBalance);
     this.fillEngine.reset();
     this.currentSymbol = "";
+    this.currentBar = null;
     this.currentBarTime = null;
     this.lastProcessedBarKey = "";
     this.snapshot = createSnapshot(this.startingBalance);
