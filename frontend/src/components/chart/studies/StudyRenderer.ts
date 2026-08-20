@@ -20,6 +20,120 @@ import {
   type AutomaticDemandZone,
 } from "../DemandZoneEngine";
 
+
+type FairValueGapDirection = "bullish" | "bearish";
+
+type FairValueGap = {
+  direction: FairValueGapDirection;
+  startTime: Time;
+  endTime: Time | null;
+  top: number;
+  bottom: number;
+  filled: boolean;
+};
+
+function buildFairValueGaps(
+  bars: CleanBar[],
+  direction: FairValueGapDirection,
+  maxGaps = 32,
+): FairValueGap[] {
+  if (bars.length < 3) return [];
+
+  const gaps: FairValueGap[] = [];
+
+  for (let index = 2; index < bars.length; index += 1) {
+    const first = bars[index - 2];
+    const displacement = bars[index - 1];
+    const third = bars[index];
+
+    const bullish = third.low > first.high;
+    const bearish = third.high < first.low;
+    if (direction === "bullish" ? !bullish : !bearish) continue;
+
+    const bottom = direction === "bullish" ? first.high : third.high;
+    const top = direction === "bullish" ? third.low : first.low;
+    if (!Number.isFinite(bottom) || !Number.isFinite(top) || top <= bottom) {
+      continue;
+    }
+
+    let endTime: Time | null = null;
+    for (let futureIndex = index + 1; futureIndex < bars.length; futureIndex += 1) {
+      const future = bars[futureIndex];
+      const fullyFilled =
+        direction === "bullish"
+          ? future.low <= bottom
+          : future.high >= top;
+      if (fullyFilled) {
+        endTime = future.time;
+        break;
+      }
+    }
+
+    gaps.push({
+      direction,
+      // Start at the imbalance/displacement candle so the box visually begins
+      // where the FVG was created, while the third candle confirms it.
+      startTime: displacement.time,
+      endTime,
+      top,
+      bottom,
+      filled: endTime != null,
+    });
+  }
+
+  return gaps.slice(-maxGaps);
+}
+
+function createFvgElement(
+  gap: FairValueGap,
+  left: number,
+  right: number,
+  topY: number,
+  bottomY: number,
+): HTMLDivElement {
+  const bullish = gap.direction === "bullish";
+  const element = document.createElement("div");
+  const width = Math.max(4, right - left);
+  const height = Math.max(2, bottomY - topY);
+  const border = bullish ? "#22c55e" : "#ef4444";
+  const fill = bullish
+    ? gap.filled
+      ? "rgba(34, 197, 94, 0.055)"
+      : "rgba(34, 197, 94, 0.11)"
+    : gap.filled
+      ? "rgba(239, 68, 68, 0.05)"
+      : "rgba(239, 68, 68, 0.10)";
+
+  element.title = `${bullish ? "Bullish" : "Bearish"} FVG ${gap.bottom.toFixed(4)} - ${gap.top.toFixed(4)}${gap.filled ? " | filled" : " | open"}`;
+  element.style.position = "absolute";
+  element.style.left = `${left}px`;
+  element.style.top = `${topY}px`;
+  element.style.width = `${width}px`;
+  element.style.height = `${height}px`;
+  element.style.boxSizing = "border-box";
+  element.style.background = fill;
+  element.style.borderTop = `1px ${gap.filled ? "dashed" : "solid"} ${border}`;
+  element.style.borderBottom = `1px ${gap.filled ? "dashed" : "solid"} ${border}`;
+  element.style.pointerEvents = "none";
+
+  const badge = document.createElement("span");
+  badge.textContent = bullish ? "B FVG" : "S FVG";
+  badge.style.position = "absolute";
+  badge.style.left = "3px";
+  badge.style.top = "1px";
+  badge.style.padding = "0 3px";
+  badge.style.borderRadius = "3px";
+  badge.style.background = "rgba(2, 6, 23, 0.82)";
+  badge.style.color = border;
+  badge.style.fontSize = "8px";
+  badge.style.fontWeight = "900";
+  badge.style.lineHeight = "12px";
+  badge.style.whiteSpace = "nowrap";
+  element.appendChild(badge);
+
+  return element;
+}
+
 function average(values: number[]): number {
   if (!values.length) return 0;
   return values.reduce((total, value) => total + value, 0) / values.length;
@@ -301,8 +415,12 @@ export class StudyRenderer {
   private structureLines: StructureStudyLine[] = [];
   private liquiditySweepEvents: LiquidityEvent[] = [];
   private demandZones: AutomaticDemandZone[] = [];
+  private bullishFvgs: FairValueGap[] = [];
+  private bearishFvgs: FairValueGap[] = [];
   private structureVisible = true;
   private demandZonesVisible = true;
+  private bullishFvgVisible = false;
+  private bearishFvgVisible = false;
 
   private lastResult: StudyRenderResult = {
     atrExpansionMarkers: [],
@@ -345,6 +463,12 @@ export class StudyRenderer {
      * consumers still receive active zones only.
      */
     this.demandZones = detectedDemandZones;
+    this.bullishFvgs = this.bullishFvgVisible
+      ? buildFairValueGaps(context.bars, "bullish")
+      : [];
+    this.bearishFvgs = this.bearishFvgVisible
+      ? buildFairValueGaps(context.bars, "bearish")
+      : [];
 
     this.lastResult = {
       atrExpansionMarkers: atrSettings.enabled
@@ -383,6 +507,24 @@ export class StudyRenderer {
         ? buildStructureStudyLines(this.latestContext.bars)
         : [];
 
+    this.scheduleOverlayRender();
+  }
+
+  setFvgVisibility(bullishVisible: boolean, bearishVisible: boolean): void {
+    const bullishChanged = this.bullishFvgVisible !== bullishVisible;
+    const bearishChanged = this.bearishFvgVisible !== bearishVisible;
+    if (!bullishChanged && !bearishChanged) return;
+
+    this.bullishFvgVisible = bullishVisible;
+    this.bearishFvgVisible = bearishVisible;
+
+    const bars = this.latestContext?.bars ?? [];
+    this.bullishFvgs = bullishVisible
+      ? buildFairValueGaps(bars, "bullish")
+      : [];
+    this.bearishFvgs = bearishVisible
+      ? buildFairValueGaps(bars, "bearish")
+      : [];
     this.scheduleOverlayRender();
   }
 
@@ -429,6 +571,8 @@ export class StudyRenderer {
     this.structureLines = [];
     this.liquiditySweepEvents = [];
     this.demandZones = [];
+    this.bullishFvgs = [];
+    this.bearishFvgs = [];
   }
 
   private renderOverlay(): void {
@@ -464,6 +608,43 @@ export class StudyRenderer {
         : lastBarX;
 
     if (zoneEndX != null && Number.isFinite(zoneEndX)) {
+      for (const gap of [...this.bullishFvgs, ...this.bearishFvgs]) {
+        const startX = timeScale.timeToCoordinate(gap.startTime as Time);
+        const endX =
+          gap.endTime != null
+            ? timeScale.timeToCoordinate(gap.endTime as Time)
+            : zoneEndX;
+        const topY = this.series.priceToCoordinate(gap.top);
+        const bottomY = this.series.priceToCoordinate(gap.bottom);
+
+        if (
+          startX == null ||
+          endX == null ||
+          topY == null ||
+          bottomY == null ||
+          !Number.isFinite(startX) ||
+          !Number.isFinite(endX) ||
+          !Number.isFinite(topY) ||
+          !Number.isFinite(bottomY)
+        ) {
+          continue;
+        }
+
+        const gapLeft = Math.min(startX, endX);
+        const gapRight = Math.max(startX, endX);
+        if (!intersectsVisibleX(gapLeft, gapRight)) continue;
+
+        fragment.appendChild(
+          createFvgElement(
+            gap,
+            gapLeft,
+            gapRight,
+            Math.min(topY, bottomY),
+            Math.max(topY, bottomY),
+          ),
+        );
+      }
+
       for (const zone of this.demandZones) {
         const startX = timeScale.timeToCoordinate(zone.originTime as Time);
         const invalidationX =

@@ -34,7 +34,11 @@ export interface StudyVisibility {
   vwap: boolean;
   ema9: boolean;
   ema20: boolean;
+  ema50: boolean;
   volume: boolean;
+  vwap3Expansion: boolean;
+  bullishFvg: boolean;
+  bearishFvg: boolean;
 
   /**
    * Controls only the automatic HH/HL/LH/LL study.
@@ -52,6 +56,7 @@ export type ChartSeriesBundle = {
   vwap: ISeriesApi<"Line">;
   ema9: ISeriesApi<"Line">;
   ema20: ISeriesApi<"Line">;
+  ema50: ISeriesApi<"Line">;
 };
 
 export type PriceLineKind =

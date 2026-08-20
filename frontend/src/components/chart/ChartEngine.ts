@@ -315,9 +315,12 @@ export class ChartEngine {
   private vwapPrefixVolume = 0;
   private ema9PreviousValue: number | null = null;
   private ema20PreviousValue: number | null = null;
+  private ema50PreviousValue: number | null = null;
   private currentVwapValue: number | null = null;
   private currentEma9Value: number | null = null;
   private currentEma20Value: number | null = null;
+  private currentEma50Value: number | null = null;
+  private vwap3ExpansionVisible = true;
   private lastLiveStudyRenderAt = 0;
   private liveStudyRenderTimer: number | null = null;
 
@@ -446,12 +449,21 @@ export class ChartEngine {
       title: "EMA 20",
     });
 
+    const ema50 = this.chart.addSeries(LineSeries, {
+      color: "#f97316",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      title: "EMA 50",
+    });
+
     this.series = {
       candles,
       volume,
       vwap,
       ema9,
       ema20,
+      ema50,
     };
 
     this.analysisRenderer = new AnalysisRenderer(this.chart);
@@ -497,6 +509,7 @@ export class ChartEngine {
       this.series.vwap,
       this.series.ema9,
       this.series.ema20,
+      this.series.ema50,
     ]) {
       (priceSeries as unknown as {
         applyOptions?: (options: Record<string, unknown>) => void;
@@ -809,16 +822,20 @@ export class ChartEngine {
     this.vwapPrefixVolume = 0;
     this.ema9PreviousValue = null;
     this.ema20PreviousValue = null;
+    this.ema50PreviousValue = null;
     this.currentVwapValue = null;
     this.currentEma9Value = null;
     this.currentEma20Value = null;
+    this.currentEma50Value = null;
 
     if (!this.bars.length) return;
 
     const ema9Multiplier = 2 / 10;
     const ema20Multiplier = 2 / 21;
+    const ema50Multiplier = 2 / 51;
     let ema9: number | null = null;
     let ema20: number | null = null;
+    let ema50: number | null = null;
 
     for (let index = 0; index < this.bars.length - 1; index += 1) {
       const bar = this.bars[index];
@@ -835,16 +852,22 @@ export class ChartEngine {
         ema20 == null
           ? bar.close
           : bar.close * ema20Multiplier + ema20 * (1 - ema20Multiplier);
+      ema50 =
+        ema50 == null
+          ? bar.close
+          : bar.close * ema50Multiplier + ema50 * (1 - ema50Multiplier);
     }
 
     this.ema9PreviousValue = ema9;
     this.ema20PreviousValue = ema20;
+    this.ema50PreviousValue = ema50;
     this.updateLiveIndicatorValues(this.bars[this.bars.length - 1]);
   }
 
   private updateLiveIndicatorValues(bar: CleanBar): void {
     const ema9Multiplier = 2 / 10;
     const ema20Multiplier = 2 / 21;
+    const ema50Multiplier = 2 / 51;
 
     this.currentEma9Value =
       this.ema9PreviousValue == null
@@ -857,6 +880,12 @@ export class ChartEngine {
         ? bar.close
         : bar.close * ema20Multiplier +
           this.ema20PreviousValue * (1 - ema20Multiplier);
+
+    this.currentEma50Value =
+      this.ema50PreviousValue == null
+        ? bar.close
+        : bar.close * ema50Multiplier +
+          this.ema50PreviousValue * (1 - ema50Multiplier);
 
     const typicalPrice = (bar.high + bar.low + bar.close) / 3;
     const cumulativePriceVolume =
@@ -1115,6 +1144,7 @@ export class ChartEngine {
     this.series.vwap.setData(buildVwapBars(this.bars));
     this.series.ema9.setData(buildEmaBars(this.bars, 9));
     this.series.ema20.setData(buildEmaBars(this.bars, 20));
+    this.series.ema50.setData(buildEmaBars(this.bars, 50));
     this.renderStudies();
     this.renderFxAnalysis();
     this.scheduleSessionBandsRender();
@@ -1181,6 +1211,13 @@ export class ChartEngine {
       });
     }
 
+    if (this.currentEma50Value != null) {
+      this.series.ema50.update({
+        time: bar.time,
+        value: this.currentEma50Value,
+      });
+    }
+
     // Structure, demand-zone and liquidity calculations are expensive. Run
     // immediately on a new candle, but throttle repeated updates to the same
     // live candle.
@@ -1195,10 +1232,14 @@ export class ChartEngine {
   setStudyVisibility(visibility: StudyVisibility): void {
     this.studyRenderer.setStructureVisible(visibility.marketStructure);
     this.studyRenderer.setDemandZonesVisible(visibility.demandZones);
+    this.studyRenderer.setFvgVisibility(visibility.bullishFvg, visibility.bearishFvg);
     this.series.vwap.applyOptions({ visible: visibility.vwap });
     this.series.ema9.applyOptions({ visible: visibility.ema9 });
     this.series.ema20.applyOptions({ visible: visibility.ema20 });
+    this.series.ema50.applyOptions({ visible: visibility.ema50 });
     this.series.volume.applyOptions({ visible: visibility.volume });
+    this.vwap3ExpansionVisible = visibility.vwap3Expansion;
+    this.scheduleVwap3OverlayRender();
   }
 
   fitContent(): void {
@@ -1435,6 +1476,7 @@ setMarketContext(symbol?: string, timeframe?: string): void {
 
   private renderVwap3ExpansionMarker(): void {
     this.vwap3ExpansionOverlay.replaceChildren();
+    if (!this.vwap3ExpansionVisible) return;
     const setup = this.vwap3SetupOverlay;
     if (!setup || !setup.displacementTime || !this.bars.length) return;
 

@@ -140,7 +140,11 @@ const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
   vwap: true,
   ema9: true,
   ema20: true,
+  ema50: true,
   volume: true,
+  vwap3Expansion: true,
+  bullishFvg: false,
+  bearishFvg: false,
   marketStructure: true,
   demandZones: true,
 };
