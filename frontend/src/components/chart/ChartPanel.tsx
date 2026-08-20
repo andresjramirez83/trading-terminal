@@ -7,10 +7,12 @@ import type { ChartState } from "./ChartState";
 import type { CrosshairInfo, LiveStatus, StudyVisibility } from "./ChartTypes";
 import { connectLiveBars, loadHistoricalBars } from "./LiveDataEngine";
 import { getSharedReplayRuntime } from "../../trading/replay/ReplayRuntime";
-import type {
-  MarketDataMode,
-  ReplaySnapshot,
-  ReplaySpeed,
+import {
+  MARKET_DATA_MODE_CHANGE_EVENT,
+  MARKET_DATA_MODE_STORAGE_KEY,
+  type MarketDataMode,
+  type ReplaySnapshot,
+  type ReplaySpeed,
 } from "../../trading/replay/ReplayTypes";
 import {
   readSavedPracticeReplayRequest,
@@ -79,7 +81,6 @@ const DRAWING_STYLE_STORAGE_KEY = "chartv2.drawingStyle";
 const FX_ANALYSIS_TOOL_STORAGE_KEY = "chartv2.fxAnalysisTool";
 const FX_ANALYSIS_SETTINGS_STORAGE_KEY = "chartv2.fxAnalysisSettings";
 const CHART_SETTINGS_STORAGE_KEY = "chartv2.chartSettings";
-const MARKET_DATA_MODE_STORAGE_KEY = "chartv2.marketDataMode";
 const CHART_PREFERENCES_POLL_MS = 15_000;
 const CHART_PREFERENCES_SAVE_DELAY_MS = 180;
 const LIVE_CHART_STATE_THROTTLE_MS = 250;
@@ -1507,6 +1508,11 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     localStorage.setItem(
       MARKET_DATA_MODE_STORAGE_KEY,
       marketDataMode,
+    );
+    window.dispatchEvent(
+      new CustomEvent<MarketDataMode>(MARKET_DATA_MODE_CHANGE_EVENT, {
+        detail: marketDataMode,
+      }),
     );
 
     if (marketDataMode === "live") {

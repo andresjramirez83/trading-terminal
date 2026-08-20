@@ -5,6 +5,9 @@ import type { ReplaySession, ReplayStartMode } from "./ReplaySessionManager";
 
 export type MarketDataMode = "live" | "replay";
 
+export const MARKET_DATA_MODE_STORAGE_KEY = "chartv2.marketDataMode";
+export const MARKET_DATA_MODE_CHANGE_EVENT = "trading.marketDataModeChange";
+
 export type ReplayPlaybackState =
   | "idle"
   | "loading"

@@ -219,6 +219,7 @@ class DailyWatchlistStore:
         self,
         scanner_caches: Dict[str, Dict[str, Any]],
         trade_date: Optional[str] = None,
+        manual_symbols: Optional[Iterable[Any]] = None,
     ) -> Dict[str, Any]:
         date_key = self._date(trade_date)
         now = datetime.now(ET).isoformat()
@@ -244,6 +245,24 @@ class DailyWatchlistStore:
 
         with self._locked():
             payload = self._read_unlocked(date_key)
+
+            if manual_symbols is not None:
+                clean_manual = _normalize_symbols(manual_symbols)
+                previous_manual = (
+                    payload.get("manual")
+                    if isinstance(payload.get("manual"), dict)
+                    else {}
+                )
+                seen_manual = _normalize_symbols([
+                    *(previous_manual.get("seenSymbols") or previous_manual.get("symbols") or []),
+                    *clean_manual,
+                ])
+                payload["manual"] = {
+                    "symbols": clean_manual,
+                    "seenSymbols": seen_manual,
+                    "updatedAt": now,
+                }
+
             previous_scanners = payload.get("scanners") if isinstance(payload.get("scanners"), dict) else {}
             for scanner_id, scanner_payload in scanners_payload.items():
                 previous = previous_scanners.get(scanner_id) if isinstance(previous_scanners.get(scanner_id), dict) else {}
@@ -264,6 +283,11 @@ class DailyWatchlistStore:
         self._mirror_rows_to_backtest_db(
             trade_date=date_key,
             scanner_rows=rows_for_db,
+            manual_symbols=(
+                _normalize_symbols(manual_symbols)
+                if manual_symbols is not None
+                else None
+            ),
         )
         return payload
 

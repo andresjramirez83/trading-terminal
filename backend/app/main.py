@@ -2788,7 +2788,12 @@ async def run_background_scanner_loop() -> None:
             scanner_run_count += 1
 
             try:
-                daily_watchlist_store.save_scanner_cycle(scanner_caches)
+                with _locked_alpaca_state():
+                    current_state = _read_alpaca_state_unlocked()
+                daily_watchlist_store.save_scanner_cycle(
+                    scanner_caches,
+                    manual_symbols=current_state.get("manualWatchlist") or [],
+                )
             except Exception as archive_exc:
                 print(f"[scanner-loop] daily watchlist archive failed: {archive_exc}", flush=True)
 

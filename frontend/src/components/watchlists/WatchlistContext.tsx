@@ -15,6 +15,15 @@ import {
 } from "../../services/api";
 
 import { dailyPracticeUniverseEngine } from "../../trading/practice/DailyPracticeUniverseEngine";
+import {
+  readSelectedPracticeTradingDate,
+  subscribeToSelectedPracticeTradingDate,
+} from "../../trading/practice/PracticeReplayLauncher";
+import {
+  MARKET_DATA_MODE_CHANGE_EVENT,
+  MARKET_DATA_MODE_STORAGE_KEY,
+  type MarketDataMode,
+} from "../../trading/replay/ReplayTypes";
 
 export type WatchlistType = "manual" | "scanner" | "custom" | "favorites";
 
@@ -93,6 +102,9 @@ const SCANNER_WATCHLIST_POLL_MS = 45_000;
 type CachedScannerRow = {
   symbol?: unknown;
   score?: number;
+  score_at_freeze?: number;
+  original_score?: number;
+  current_score?: number;
   ah_score?: number;
   runner_score?: number;
   pm_runner_score?: number;
@@ -116,6 +128,31 @@ type CachedScannerResult = {
   scanner_name?: string;
   description?: string;
   rows?: CachedScannerRow[];
+};
+
+type ArchivedScannerWatchlist = {
+  symbols?: string[];
+  seenSymbols?: string[];
+  rows?: CachedScannerRow[];
+  count?: number;
+  updatedAt?: string | null;
+  workflow?: string | null;
+  source?: string | null;
+};
+
+type ArchivedDailyWatchlist = {
+  tradeDate?: string;
+  updatedAt?: string | null;
+  manual?: {
+    symbols?: string[];
+    seenSymbols?: string[];
+    updatedAt?: string | null;
+  };
+  scanners?: Record<string, ArchivedScannerWatchlist>;
+  scannerSymbols?: string[];
+  scannerSeenSymbols?: string[];
+  combinedSymbols?: string[];
+  combinedSeenSymbols?: string[];
 };
 
 type ManualWatchlistApiResponse = {
@@ -181,6 +218,192 @@ async function setManualWatchlistSymbol(
   );
 
   return parseManualWatchlistResponse(response);
+}
+
+function readMarketDataMode(): MarketDataMode {
+  if (typeof window === "undefined") return "live";
+  return window.localStorage.getItem(MARKET_DATA_MODE_STORAGE_KEY) === "replay"
+    ? "replay"
+    : "live";
+}
+
+async function fetchArchivedDailyWatchlist(
+  tradingDate: string,
+): Promise<ArchivedDailyWatchlist | null> {
+  const normalized = String(tradingDate ?? "").trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null;
+
+  const response = await fetch(
+    `${API_BASE}/backtests/watchlists/${encodeURIComponent(normalized)}`,
+    { headers: { Accept: "application/json" } },
+  );
+
+  if (response.status === 404) return null;
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Archived watchlist request failed: ${response.status} ${text}`,
+    );
+  }
+
+  const payload = JSON.parse(text) as ArchivedDailyWatchlist;
+  return payload && typeof payload === "object" ? payload : null;
+}
+
+function cachedScannerRowToWatchlistSymbol(
+  row: CachedScannerRow,
+  definition: ScannerWatchlistDefinition,
+): WatchlistSymbol | null {
+  const symbol = normalizeSymbol(row.symbol);
+  if (!symbol) return null;
+
+  const rawScore = Number(
+    row.score_at_freeze ??
+      row.original_score ??
+      row.current_score ??
+      row.score ??
+      row.ah_score ??
+      row.runner_score ??
+      row.pm_runner_score ??
+      row.compression_score ??
+      row.breakout_score ??
+      0,
+  );
+  const score = Number.isFinite(rawScore)
+    ? Math.max(0, Math.min(100, Math.round(rawScore)))
+    : 0;
+
+  return normalizeWatchlistSymbol({
+    symbol,
+    score,
+    tone: score >= 70 ? "ready" : score <= 45 ? "weak" : "watch",
+    setup: row.runner_type ?? row.source ?? definition.name,
+    scanner: definition.name,
+    note: row.notes?.join(" · ") ?? "",
+    lastPrice: row.last_price ?? row.price,
+    percentChange: row.pm_gap_pct ?? row.gap_pct ?? row.change_pct,
+    volume: row.pm_volume ?? row.ah_volume ?? row.volume,
+    source: row.source ?? row.runner_type ?? definition.id,
+  });
+}
+
+function buildReplayWatchlistsFromArchive(
+  payload: ArchivedDailyWatchlist | null,
+  tradingDate: string,
+): Watchlist[] {
+  const manualRaw = payload?.manual;
+  const manualSymbols = uniqueSymbolStrings(
+    manualRaw?.symbols?.length
+      ? manualRaw.symbols
+      : manualRaw?.seenSymbols ?? [],
+  );
+
+  const manual: Watchlist = {
+    id: "manual",
+    name: "Manual Watchlist",
+    type: "manual",
+    description: `Archived manual watchlist for replay ${tradingDate}.`,
+    symbols: manualSymbols
+      .map((symbol) => normalizeWatchlistSymbol(symbol))
+      .filter((item): item is WatchlistSymbol => item !== null),
+  };
+
+  const definition = VWAP3_TARGET_WATCHLIST;
+  const archivedScanner = payload?.scanners?.[definition.id];
+  const rowSymbols = (Array.isArray(archivedScanner?.rows)
+    ? archivedScanner.rows
+    : []
+  )
+    .map((row) => cachedScannerRowToWatchlistSymbol(row, definition))
+    .filter((item): item is WatchlistSymbol => item !== null);
+
+  const seenScannerSymbols = uniqueSymbolStrings(
+    archivedScanner?.seenSymbols?.length
+      ? archivedScanner.seenSymbols
+      : archivedScanner?.symbols?.length
+        ? archivedScanner.symbols
+        : payload?.scannerSeenSymbols?.length
+          ? payload.scannerSeenSymbols
+          : payload?.scannerSymbols ?? [],
+  );
+
+  const rowBySymbol = new Map(rowSymbols.map((item) => [item.symbol, item]));
+  const scannerSymbols = seenScannerSymbols.map((symbol) =>
+    rowBySymbol.get(symbol) ??
+    normalizeWatchlistSymbol({
+      symbol,
+      score: 0,
+      tone: "watch",
+      setup: "Replay scanner pick",
+      scanner: definition.name,
+      source: definition.id,
+    })!,
+  );
+
+  const scanner: Watchlist = {
+    id: definition.id,
+    name: definition.name,
+    type: "scanner",
+    description: `Archived scanner watchlist for replay ${tradingDate}.`,
+    symbols: uniqueWatchlistSymbols(scannerSymbols),
+  };
+
+  return [manual, scanner];
+}
+
+function buildReplayWatchlistsFromLocalUniverse(tradingDate: string): Watchlist[] {
+  const universe = dailyPracticeUniverseEngine.getUniverse(tradingDate);
+  if (!universe) return buildReplayWatchlistsFromArchive(null, tradingDate);
+
+  const manualSymbols = universe.symbols
+    .filter((item) => item.wasOnManualWatchlist)
+    .map((item) => item.symbol);
+  const scannerSymbols = universe.symbols
+    .filter((item) =>
+      item.scannerIds.includes(VWAP3_TARGET_WATCHLIST.id) ||
+      item.sourceTypes.includes("scanner"),
+    )
+    .map((item) => {
+      const summary = item.scannerSummaries.find(
+        (entry) => entry.scannerId === VWAP3_TARGET_WATCHLIST.id,
+      );
+      return normalizeWatchlistSymbol({
+        symbol: item.symbol,
+        score: summary?.bestScore ?? 0,
+        tone:
+          (summary?.bestScore ?? 0) >= 70
+            ? "ready"
+            : (summary?.bestScore ?? 0) <= 45
+              ? "weak"
+              : "watch",
+        setup: summary?.setups?.[0] ?? "Replay scanner pick",
+        scanner: VWAP3_TARGET_WATCHLIST.name,
+        lastPrice: summary?.latestPrice ?? undefined,
+        percentChange: summary?.latestPercentChange ?? undefined,
+        volume: summary?.latestVolume ?? undefined,
+        source: VWAP3_TARGET_WATCHLIST.id,
+      });
+    })
+    .filter((item): item is WatchlistSymbol => item !== null);
+
+  return [
+    {
+      id: "manual",
+      name: "Manual Watchlist",
+      type: "manual",
+      description: `Locally recorded manual watchlist for replay ${tradingDate}.`,
+      symbols: uniqueSymbolStrings(manualSymbols)
+        .map((symbol) => normalizeWatchlistSymbol(symbol))
+        .filter((item): item is WatchlistSymbol => item !== null),
+    },
+    {
+      id: VWAP3_TARGET_WATCHLIST.id,
+      name: VWAP3_TARGET_WATCHLIST.name,
+      type: "scanner",
+      description: `Locally recorded scanner watchlist for replay ${tradingDate}.`,
+      symbols: uniqueWatchlistSymbols(scannerSymbols),
+    },
+  ];
 }
 
 const LEGACY_MANUAL_KEYS = [
@@ -489,13 +712,61 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   const [watchlists, setWatchlists] = useState<Watchlist[]>(loadWatchlists);
   const [activeWatchlistId, setActiveWatchlistId] = useState(loadActiveWatchlistId);
   const [backendSyncReady, setBackendSyncReady] = useState(false);
+  const [marketDataMode, setWatchlistMarketDataMode] = useState<MarketDataMode>(
+    readMarketDataMode,
+  );
+  const [replayTradingDate, setReplayTradingDate] = useState(
+    () => readSelectedPracticeTradingDate(),
+  );
   const didBootstrapBackendRef = useRef(false);
   const initialManualSymbolsRef = useRef<string[]>(getManualSymbols(watchlists));
+  const liveWatchlistsRef = useRef<Watchlist[]>(watchlists);
   const manualMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const previousManualSymbolsRef = useRef<Set<string>>(new Set());
   const didCaptureInitialManualRef = useRef(false);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const applyMode = (next: MarketDataMode) => {
+      if (next === "live") {
+        setWatchlists(liveWatchlistsRef.current);
+      }
+      setWatchlistMarketDataMode(next);
+    };
+
+    const handleModeChange = (event: Event) => {
+      const custom = event as CustomEvent<MarketDataMode>;
+      applyMode(custom.detail === "replay" ? "replay" : "live");
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== MARKET_DATA_MODE_STORAGE_KEY) return;
+      applyMode(event.newValue === "replay" ? "replay" : "live");
+    };
+
+    window.addEventListener(MARKET_DATA_MODE_CHANGE_EVENT, handleModeChange);
+    window.addEventListener("storage", handleStorage);
+    const unsubscribeDate = subscribeToSelectedPracticeTradingDate(
+      setReplayTradingDate,
+    );
+
+    return () => {
+      unsubscribeDate();
+      window.removeEventListener(MARKET_DATA_MODE_CHANGE_EVENT, handleModeChange);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (marketDataMode === "live") {
+      liveWatchlistsRef.current = watchlists;
+    }
+  }, [marketDataMode, watchlists]);
+
+  useEffect(() => {
+    if (marketDataMode === "replay") return;
+
     let cancelled = false;
     let refreshInFlight = false;
 
@@ -540,37 +811,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
               const cached = cachedById.get(definition.id);
               const rows = Array.isArray(cached?.rows) ? cached.rows : [];
               const symbols = rows
-                .map((row) => {
-                  const symbol = normalizeSymbol(row.symbol);
-                  if (!symbol) return null;
-
-                  const rawScore = Number(
-                    row.score ??
-                      row.ah_score ??
-                      row.runner_score ??
-                      row.pm_runner_score ??
-                      row.compression_score ??
-                      row.breakout_score ??
-                      0
-                  );
-                  const score = Number.isFinite(rawScore)
-                    ? Math.max(0, Math.min(100, Math.round(rawScore)))
-                    : 0;
-
-                  return normalizeWatchlistSymbol({
-                    symbol,
-                    score,
-                    tone: score >= 70 ? "ready" : score <= 45 ? "weak" : "watch",
-                    setup: row.runner_type ?? row.source ?? definition.name,
-                    scanner: definition.name,
-                    note: row.notes?.join(" · ") ?? "",
-                    lastPrice: row.last_price ?? row.price,
-                    percentChange:
-                      row.pm_gap_pct ?? row.gap_pct ?? row.change_pct,
-                    volume: row.pm_volume ?? row.ah_volume ?? row.volume,
-                    source: row.source ?? row.runner_type ?? definition.id,
-                  });
-                })
+                .map((row) => cachedScannerRowToWatchlistSymbol(row, definition))
                 .filter((item): item is WatchlistSymbol => item !== null);
 
               return {
@@ -611,7 +852,50 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       window.clearInterval(pollTimer);
     };
-  }, []);
+  }, [marketDataMode]);
+
+  useEffect(() => {
+    if (marketDataMode !== "replay" || !replayTradingDate) return;
+
+    let cancelled = false;
+
+    async function loadReplayWatchlists() {
+      try {
+        const archived = await fetchArchivedDailyWatchlist(replayTradingDate);
+        if (cancelled) return;
+
+        const next = archived
+          ? buildReplayWatchlistsFromArchive(archived, replayTradingDate)
+          : buildReplayWatchlistsFromLocalUniverse(replayTradingDate);
+
+        setWatchlists(next);
+        setActiveWatchlistId((current) =>
+          next.some((watchlist) => watchlist.id === current)
+            ? current
+            : "manual",
+        );
+      } catch (error) {
+        console.warn(
+          `[WatchlistContext] replay watchlist load failed for ${replayTradingDate}`,
+          error,
+        );
+        if (cancelled) return;
+        const fallback = buildReplayWatchlistsFromLocalUniverse(replayTradingDate);
+        setWatchlists(fallback);
+        setActiveWatchlistId((current) =>
+          fallback.some((watchlist) => watchlist.id === current)
+            ? current
+            : "manual",
+        );
+      }
+    }
+
+    void loadReplayWatchlists();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [marketDataMode, replayTradingDate]);
 
   const queueManualMutation = useCallback(
     (operation: () => Promise<ManualWatchlistApiResponse>) => {
@@ -631,7 +915,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || marketDataMode === "replay") return;
 
     // Scanner watchlists are runtime data refreshed from the backend every 45s.
     // Persisting every scanner row (price, volume, notes, scores, etc.) can easily
@@ -660,16 +944,18 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       // Browser storage must never be allowed to take down the trading terminal.
       console.warn("[WatchlistContext] local watchlist persistence skipped", error);
     }
-  }, [watchlists]);
+  }, [watchlists, marketDataMode]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || marketDataMode === "replay") return;
 
     const manualSymbols = getManualSymbols(watchlists);
     writeLegacyManualSymbols(manualSymbols);
-  }, [watchlists]);
+  }, [watchlists, marketDataMode]);
 
   useEffect(() => {
+    if (marketDataMode === "replay") return;
+
     const currentManualSymbols = new Set(getManualSymbols(watchlists));
 
     if (!didCaptureInitialManualRef.current) {
@@ -696,7 +982,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     }
 
     previousManualSymbolsRef.current = currentManualSymbols;
-  }, [watchlists]);
+  }, [watchlists, marketDataMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -739,9 +1025,11 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
         if (cancelled) return;
 
-        setWatchlists((current) => {
-          return setManualSymbols(current, authoritativeManual);
-        });
+        if (marketDataMode !== "replay") {
+          setWatchlists((current) => {
+            return setManualSymbols(current, authoritativeManual);
+          });
+        }
 
         setBackendSyncReady(true);
       } catch (error) {
@@ -754,10 +1042,14 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [marketDataMode]);
 
   useEffect(() => {
-    if (!backendSyncReady || typeof window === "undefined") return;
+    if (
+      !backendSyncReady ||
+      typeof window === "undefined" ||
+      marketDataMode === "replay"
+    ) return;
 
     let cancelled = false;
     let refreshInFlight = false;
@@ -817,7 +1109,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [backendSyncReady]);
+  }, [backendSyncReady, marketDataMode]);
 
   const activeWatchlist = useMemo(
     () =>
@@ -895,7 +1187,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
       if (!normalizedId || !normalized) return;
 
-      if (normalizedId === "manual") {
+      if (normalizedId === "manual" && marketDataMode !== "replay") {
         dailyPracticeUniverseEngine.recordManualWatchlistSymbol({
           symbol: normalized.symbol,
         });
@@ -924,7 +1216,10 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
             normalized,
           ]);
 
-          if (watchlist.type === "scanner" || normalizedId === "scanner") {
+          if (
+            marketDataMode !== "replay" &&
+            (watchlist.type === "scanner" || normalizedId === "scanner")
+          ) {
             recordScannerWatchlistSymbols(
               normalizedId,
               watchlist.name,
@@ -939,13 +1234,13 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         });
       });
 
-      if (normalizedId === "manual") {
+      if (normalizedId === "manual" && marketDataMode !== "replay") {
         queueManualMutation(() =>
           setManualWatchlistSymbol(normalized.symbol, true)
         );
       }
     },
-    [queueManualMutation]
+    [marketDataMode, queueManualMutation]
   );
 
   const removeSymbol = useCallback((watchlistId: string, symbol: string) => {
@@ -954,7 +1249,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
     if (!normalizedId || !normalizedSymbol) return;
 
-    if (normalizedId === "manual") {
+    if (normalizedId === "manual" && marketDataMode !== "replay") {
       dailyPracticeUniverseEngine.removeManualWatchlistSymbol({
         symbol: normalizedSymbol,
       });
@@ -973,12 +1268,12 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       )
     );
 
-    if (normalizedId === "manual") {
+    if (normalizedId === "manual" && marketDataMode !== "replay") {
       queueManualMutation(() =>
         setManualWatchlistSymbol(normalizedSymbol, false)
       );
     }
-  }, [queueManualMutation]);
+  }, [marketDataMode, queueManualMutation]);
 
   const replaceSymbols = useCallback(
     (
@@ -1002,7 +1297,11 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         existingWatchlist?.name ||
         titleCaseFromId(normalizedId);
 
-      if (resolvedType === "scanner" && normalizedId) {
+      if (
+        marketDataMode !== "replay" &&
+        resolvedType === "scanner" &&
+        normalizedId
+      ) {
         recordScannerWatchlistSymbols(
           normalizedId,
           resolvedName,
@@ -1010,7 +1309,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         );
       }
 
-      if (normalizedId === "manual") {
+      if (normalizedId === "manual" && marketDataMode !== "replay") {
         const nextManualSymbols = new Set(
           normalizedSymbols.map((item) => item.symbol)
         );
@@ -1033,7 +1332,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         replaceSymbolsInternal(current, watchlistId, symbols, options)
       );
 
-      if (normalizedId === "manual") {
+      if (normalizedId === "manual" && marketDataMode !== "replay") {
         queueManualMutation(() =>
           saveManualWatchlist(normalizedSymbols.map((item) => item.symbol))
         );
@@ -1043,7 +1342,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         setActiveWatchlistId(normalizedId);
       }
     },
-    [queueManualMutation, watchlists]
+    [marketDataMode, queueManualMutation, watchlists]
   );
 
   const syncScannerWatchlists = useCallback(
