@@ -67,6 +67,7 @@ export type Vwap3ChartSetupOverlay = {
   displacementLow?: number;
   freezeUpper3Std?: number;
   freezeLower3Std?: number;
+  targetPrice?: number;
   currentScore?: number;
   scoreAtFreeze?: number;
 };
@@ -303,6 +304,7 @@ export class ChartEngine {
   private vwap3SetupOverlay: Vwap3ChartSetupOverlay | null = null;
   private vwap3UpperPriceLine: IPriceLine | null = null;
   private vwap3LowerPriceLine: IPriceLine | null = null;
+  private vwap3TargetPriceLine: IPriceLine | null = null;
   private vwap3ExpansionOverlay: HTMLDivElement;
   private vwap3OverlayRenderFrame: number | null = null;
 
@@ -1359,17 +1361,36 @@ setMarketContext(symbol?: string, timeframe?: string): void {
       this.series.candles.removePriceLine(this.vwap3LowerPriceLine);
       this.vwap3LowerPriceLine = null;
     }
+    if (this.vwap3TargetPriceLine) {
+      this.series.candles.removePriceLine(this.vwap3TargetPriceLine);
+      this.vwap3TargetPriceLine = null;
+    }
 
     const upper = Number(setup?.freezeUpper3Std ?? 0);
     const lower = Number(setup?.freezeLower3Std ?? 0);
+    const target = Number(setup?.targetPrice ?? 0);
+    const targetMatchesUpper =
+      Number.isFinite(target) &&
+      target > 0 &&
+      Number.isFinite(upper) &&
+      upper > 0 &&
+      Math.abs(target - upper) <= Math.max(0.000001, Math.abs(upper) * 0.000001);
+
     if (setup && Number.isFinite(upper) && upper > 0) {
+      const isExtremeRunner = String(setup.grade ?? "")
+        .toUpperCase()
+        .includes("EXTREME");
       this.vwap3UpperPriceLine = this.series.candles.createPriceLine({
         price: upper,
         color: "#38bdf8",
         lineWidth: 1,
         lineStyle: LineStyle.Dotted,
         axisLabelVisible: true,
-        title: "+3 VWAP",
+        title: targetMatchesUpper
+          ? "+3 TARGET"
+          : isExtremeRunner
+            ? "+3 T2"
+            : "+3 VWAP",
       });
     }
     if (setup && Number.isFinite(lower) && lower > 0) {
@@ -1380,6 +1401,24 @@ setMarketContext(symbol?: string, timeframe?: string): void {
         lineStyle: LineStyle.Dotted,
         axisLabelVisible: true,
         title: "-3 VWAP",
+      });
+    }
+    if (
+      setup &&
+      Number.isFinite(target) &&
+      target > 0 &&
+      !targetMatchesUpper
+    ) {
+      const isExtremeRunner = String(setup.grade ?? "")
+        .toUpperCase()
+        .includes("EXTREME");
+      this.vwap3TargetPriceLine = this.series.candles.createPriceLine({
+        price: target,
+        color: "#22c55e",
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: isExtremeRunner ? "T1 TARGET" : "TARGET",
       });
     }
 

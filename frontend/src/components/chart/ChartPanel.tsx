@@ -1816,6 +1816,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           displacementLow: Number(setup.displacement_low ?? 0) || undefined,
           freezeUpper3Std: Number(setup.freeze_upper_3std ?? setup.frozen_target ?? setup.target_price ?? 0) || undefined,
           freezeLower3Std: Number(setup.freeze_lower_3std ?? 0) || undefined,
+          targetPrice: Number(setup.target_price ?? setup.frozen_target ?? setup.freeze_upper_3std ?? 0) || undefined,
           currentScore: Number(setup.current_score ?? setup.score ?? 0),
           scoreAtFreeze: Number(setup.score_at_freeze ?? setup.original_score ?? 0),
         });
