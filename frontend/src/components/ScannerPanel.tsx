@@ -460,8 +460,8 @@ export default function ScannerPanel({
   const [sortKey, setSortKey] = useState<keyof ScannerRow>("runner_score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [vwap3ResultTab, setVwap3ResultTab] = useState<
-    "all" | "active" | "hits" | "after_invalid" | "invalidated" | "expired"
-  >("all");
+    "setups" | "all" | "hits" | "after_invalid" | "invalidated" | "expired"
+  >("setups");
   const [vwap3HitDate, setVwap3HitDate] = useState(() => pacificTodayIso());
   const [vwap3SetupHistoryRows, setVwap3SetupHistoryRows] = useState<ScannerRow[]>([]);
   const [vwap3HistoryCounts, setVwap3HistoryCounts] = useState<Vwap3SetupHistoryCounts | null>(null);
@@ -1002,9 +1002,11 @@ export default function ScannerPanel({
   );
 
   const vwap3DisplayedRows =
-    vwap3ResultTab === "all"
-      ? vwap3AllRows
-      : vwap3ResultTab === "hits"
+    vwap3ResultTab === "setups"
+      ? vwap3ActiveRows
+      : vwap3ResultTab === "all"
+        ? vwap3AllRows
+        : vwap3ResultTab === "hits"
         ? vwap3TargetHitRows
         : vwap3ResultTab === "after_invalid"
           ? vwap3AfterInvalidRows
@@ -1166,9 +1168,9 @@ export default function ScannerPanel({
   const cacheSummary = `Cache: ${cacheStatus?.status ?? "loading"} | Last PT: ${lastRunText} | Count: ${data?.count ?? rows.length}`;
 
   const summaryText = isWorkspace
-    ? isVwap3TargetScanner && vwap3ResultTab !== "active"
+    ? isVwap3TargetScanner && vwap3ResultTab !== "setups"
       ? `History PT: ${vwap3HitDate} | ${cacheSummary}`
-      : `Trade day: ${data?.trade_day ?? "--"} | ${cacheSummary}`
+      : `Live setups | ${cacheSummary}`
     : cacheSummary;
 
   return (
@@ -1736,17 +1738,17 @@ export default function ScannerPanel({
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <button
                   type="button"
-                  onClick={() => setVwap3ResultTab("all")}
-                  style={vwap3ResultTab === "all" ? activeButtonStyle : buttonStyle}
+                  onClick={() => setVwap3ResultTab("setups")}
+                  style={vwap3ResultTab === "setups" ? activeButtonStyle : buttonStyle}
                 >
-                  All Setups ({vwap3AllRows.length})
+                  Setups ({vwap3ActiveRows.length})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setVwap3ResultTab("active")}
-                  style={vwap3ResultTab === "active" ? activeButtonStyle : buttonStyle}
+                  onClick={() => setVwap3ResultTab("all")}
+                  style={vwap3ResultTab === "all" ? activeButtonStyle : buttonStyle}
                 >
-                  Active Targets ({vwap3ActiveRows.length})
+                  All Results ({vwap3AllRows.length})
                 </button>
                 <button
                   type="button"
@@ -1776,7 +1778,7 @@ export default function ScannerPanel({
                 >
                   Expired ({vwap3ExpiredRows.length})
                 </button>
-                {vwap3ResultTab !== "active" ? (
+                {vwap3ResultTab !== "setups" ? (
                   <>
                     <button
                       type="button"
@@ -1823,7 +1825,7 @@ export default function ScannerPanel({
               </div>
             )}
             {isVwap3TargetScanner &&
-            vwap3ResultTab !== "active" &&
+            vwap3ResultTab !== "setups" &&
             vwap3HistoryError ? (
               <div style={{ color: "#ff7b7b", fontSize: 12, marginTop: 8 }}>
                 {vwap3HistoryError}
@@ -1976,9 +1978,9 @@ export default function ScannerPanel({
                         ? toggleSort(key as keyof ScannerRow)
                         : undefined
                     }
-                    style={{
-                      textAlign:
-                        header === "Symbol" ||
+                    style={getStickyHeaderCellStyle(
+                      String(key),
+                      header === "Symbol" ||
                         header === "Grade" ||
                         header === "Session" ||
                         header === "Status" ||
@@ -1986,14 +1988,8 @@ export default function ScannerPanel({
                         header === "Alert"
                           ? "left"
                           : "right",
-                      padding: "10px 12px",
-                      borderBottom: "1px solid #2a2f3a",
-                      whiteSpace: "nowrap",
-                      cursor:
-                        key !== "notes" && key !== "alert"
-                          ? "pointer"
-                          : "default",
-                    }}
+                      key !== "notes" && key !== "alert",
+                    )}
                   >
                     {header}
                   </th>
@@ -2029,8 +2025,24 @@ export default function ScannerPanel({
                         : "transparent",
                     }}
                   >
-                    <td style={cellLeft}>{renderAlertArmButton(symbol)}</td>
-                    <td style={cellLeft}><strong>{symbol}</strong></td>
+                    <td
+                      style={getStickyBodyCellStyle(
+                        cellLeft,
+                        "alert",
+                        isSelected ? "rgba(120, 90, 255, 0.18)" : "#0b1220",
+                      )}
+                    >
+                      {renderAlertArmButton(symbol)}
+                    </td>
+                    <td
+                      style={getStickyBodyCellStyle(
+                        cellLeft,
+                        "symbol",
+                        isSelected ? "rgba(120, 90, 255, 0.18)" : "#0b1220",
+                      )}
+                    >
+                      <strong>{symbol}</strong>
+                    </td>
                     <td style={{ ...cellLeft, color: gradeColor, fontWeight: 900 }}>
                       {row.grade ?? "-"}
                     </td>
@@ -2087,9 +2099,11 @@ export default function ScannerPanel({
               {!loading && vwap3DisplayedRows.length === 0 ? (
                 <tr>
                   <td colSpan={30} style={{ padding: 16, opacity: 0.7 }}>
-                    {vwap3ResultTab === "all"
-                      ? `No VWAP +3 setups saved for ${vwap3HitDate} PT and no unresolved setups are currently active.`
-                      : vwap3ResultTab === "hits"
+                    {vwap3ResultTab === "setups"
+                      ? "No live VWAP +3 setups are actionable right now. New WAITING / CONFIRMED / STRONG CONFIRMED picks will appear here automatically."
+                      : vwap3ResultTab === "all"
+                        ? `No VWAP +3 results saved for ${vwap3HitDate} PT and no unresolved setups are currently active.`
+                        : vwap3ResultTab === "hits"
                         ? `No valid VWAP +3 target hits saved for ${vwap3HitDate} PT.`
                         : vwap3ResultTab === "after_invalid"
                           ? `No target hits after invalidation saved for ${vwap3HitDate} PT.`
@@ -2152,22 +2166,16 @@ export default function ScannerPanel({
                         ? toggleSort(key as keyof ScannerRow)
                         : undefined
                     }
-                    style={{
-                      textAlign:
-                        header === "Symbol" ||
+                    style={getStickyHeaderCellStyle(
+                      String(key),
+                      header === "Symbol" ||
                         header === "Type" ||
                         header === "Notes" ||
                         header === "Alert"
                           ? "left"
                           : "right",
-                      padding: "10px 12px",
-                      borderBottom: "1px solid #2a2f3a",
-                      whiteSpace: "nowrap",
-                      cursor:
-                        key !== "notes" && key !== "alert"
-                          ? "pointer"
-                          : "default",
-                    }}
+                      key !== "notes" && key !== "alert",
+                    )}
                   >
                     {header}
                   </th>
@@ -2196,8 +2204,22 @@ export default function ScannerPanel({
                         : "transparent",
                     }}
                   >
-                    <td style={cellLeft}>{renderAlertArmButton(symbol)}</td>
-                    <td style={cellLeft}>
+                    <td
+                      style={getStickyBodyCellStyle(
+                        cellLeft,
+                        "alert",
+                        isSelected ? "rgba(120, 90, 255, 0.18)" : "#0b1220",
+                      )}
+                    >
+                      {renderAlertArmButton(symbol)}
+                    </td>
+                    <td
+                      style={getStickyBodyCellStyle(
+                        cellLeft,
+                        "symbol",
+                        isSelected ? "rgba(120, 90, 255, 0.18)" : "#0b1220",
+                      )}
+                    >
                       <strong>{symbol}</strong>
                     </td>
                     <td style={cellLeft}>
@@ -2337,6 +2359,67 @@ const labelStyle: React.CSSProperties = {
 const labelTextStyle: React.CSSProperties = {
   marginBottom: 4,
 };
+
+const stickyAlertWidth = 52;
+const stickySymbolWidth = 108;
+
+function getStickyColumnMeta(
+  key: string,
+): { left: number; width: number } | null {
+  if (key === "alert") return { left: 0, width: stickyAlertWidth };
+  if (key === "symbol") return { left: stickyAlertWidth, width: stickySymbolWidth };
+  return null;
+}
+
+function getStickyHeaderCellStyle(
+  key: string,
+  textAlign: React.CSSProperties["textAlign"],
+  isSortable: boolean,
+): React.CSSProperties {
+  const sticky = getStickyColumnMeta(key);
+  return {
+    textAlign,
+    padding: "10px 12px",
+    borderBottom: "1px solid #2a2f3a",
+    whiteSpace: "nowrap",
+    cursor: isSortable ? "pointer" : "default",
+    position: "sticky",
+    top: 0,
+    background: "#161d29",
+    zIndex: sticky ? 7 : 3,
+    ...(sticky
+      ? {
+          left: sticky.left,
+          width: sticky.width,
+          minWidth: sticky.width,
+          maxWidth: sticky.width,
+          boxSizing: "border-box",
+          boxShadow: "2px 0 0 rgba(17, 24, 39, 0.95)",
+        }
+      : {}),
+  };
+}
+
+function getStickyBodyCellStyle(
+  base: React.CSSProperties,
+  key: string,
+  background: string,
+): React.CSSProperties {
+  const sticky = getStickyColumnMeta(key);
+  if (!sticky) return base;
+  return {
+    ...base,
+    position: "sticky",
+    left: sticky.left,
+    zIndex: 2,
+    background,
+    width: sticky.width,
+    minWidth: sticky.width,
+    maxWidth: sticky.width,
+    boxSizing: "border-box",
+    boxShadow: "2px 0 0 rgba(17, 24, 39, 0.95)",
+  };
+}
 
 const cellLeft: React.CSSProperties = {
   textAlign: "left",

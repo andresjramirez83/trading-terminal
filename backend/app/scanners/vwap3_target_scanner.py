@@ -44,6 +44,10 @@ WARMUP_CALENDAR_DAYS = 30
 MAX_NATIVE_5M_BARS = 5000
 TRACKED_MAX_AGE_DAYS = 14
 COMPLETED_KEEP_DAYS = 1
+# Keep a setup actionable on its freeze session and the next trading day.
+# This prevents a valid setup from disappearing at midnight Eastern while still
+# avoiding a stale multi-day actionable list. Weekend days do not count.
+SETUP_ACTIVE_TRADING_DAYS = 2
 
 # VWAP3 discovery is intentionally broader than the old Top-20-only gate.
 # Saved AH runners are especially important because they let the scanner watch
@@ -72,6 +76,25 @@ def _grade_sort_order(grade: str) -> int:
         "PM RUNNER": 2,
         "PM EXTREME RUNNER WATCH": 3,
     }.get(str(grade or ""), 9)
+
+
+def _trading_days_elapsed(start_date, end_date) -> int:
+    """Count weekday market dates after start_date through end_date.
+
+    A Monday setup returns 1 on Tuesday and 2 on Wednesday. A Friday setup
+    returns 1 on Monday, so weekends do not prematurely expire it. Exchange
+    holidays are intentionally not counted here; the scanner's bar evaluation
+    remains the source of truth for target/invalidation.
+    """
+    if end_date <= start_date:
+        return 0
+    elapsed = 0
+    cursor = start_date
+    while cursor < end_date:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            elapsed += 1
+    return elapsed
 
 
 def _state_path() -> Path:
@@ -499,9 +522,21 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
     elif invalidation_time:
         outcome = "invalidated"
     else:
+        # Do not expire a valid setup merely because Eastern midnight passed.
+        # The strategy can remain actionable into the next trading session.
+        # Freeze day + next trading day are kept active; on the following
+        # trading date the unresolved setup becomes an expired research result.
         try:
             freeze_dt = datetime.fromisoformat(str(record.get("freeze_time"))).astimezone(ET)
-            outcome = "expired" if datetime.now(ET).date() > freeze_dt.date() else "active"
+            trading_days_elapsed = _trading_days_elapsed(
+                freeze_dt.date(),
+                datetime.now(ET).date(),
+            )
+            outcome = (
+                "expired"
+                if trading_days_elapsed >= SETUP_ACTIVE_TRADING_DAYS
+                else "active"
+            )
         except Exception:
             outcome = "active"
 

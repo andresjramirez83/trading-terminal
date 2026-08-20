@@ -3910,23 +3910,44 @@ async def scanner_v2_vwap3_setups(
     can show a real denominator and failure counts.
     """
     selected_date = _normalize_vwap3_history_date(trade_date)
-    path = VWAP3_SETUP_ARCHIVE_DIR / f"{selected_date}.json"
-    rows: List[Dict[str, Any]] = []
+    selected_pt_date = date.fromisoformat(selected_date)
+    rows_by_key: Dict[str, Dict[str, Any]] = {}
 
-    if path.exists():
+    # Archive files are keyed by the scanner's Eastern market date, while this
+    # endpoint is user-facing Pacific time. A Pacific calendar date spans the
+    # same ET date plus the first three ET hours of the following date, so load
+    # both candidate files and filter by the setup's actual freeze timestamp.
+    candidate_dates = [selected_pt_date, selected_pt_date + timedelta(days=1)]
+    for candidate_date in candidate_dates:
+        path = VWAP3_SETUP_ARCHIVE_DIR / f"{candidate_date.isoformat()}.json"
+        if not path.exists():
+            continue
         try:
             payload = json.loads(path.read_text())
-            rows = [
-                dict(row)
-                for row in (payload.get("rows") or [])
-                if isinstance(row, dict)
-            ]
+            for raw_row in payload.get("rows") or []:
+                if not isinstance(raw_row, dict):
+                    continue
+                row = dict(raw_row)
+                raw_freeze = str(row.get("freeze_time") or row.get("displacement_time") or "").strip()
+                try:
+                    freeze_pt = datetime.fromisoformat(raw_freeze.replace("Z", "+00:00")).astimezone(PT)
+                except Exception:
+                    continue
+                if freeze_pt.date() != selected_pt_date:
+                    continue
+                key = str(row.get("setup_key") or "").strip() or f"{row.get('symbol')}|{raw_freeze}"
+                rows_by_key[key] = row
         except Exception as exc:
             print(
-                f"[vwap3-setup-history] load failed date={selected_date} error={exc}",
+                f"[vwap3-setup-history] load failed date={candidate_date.isoformat()} error={exc}",
                 flush=True,
             )
             raise HTTPException(status_code=500, detail=str(exc))
+
+    rows = sorted(
+        rows_by_key.values(),
+        key=lambda row: str(row.get("freeze_time") or row.get("displacement_time") or ""),
+    )
 
     counts = {
         "total": len(rows),
