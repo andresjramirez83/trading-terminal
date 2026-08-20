@@ -17,6 +17,11 @@ export type ExecutionOrderPatch = {
   qty?: number;
   limit_price?: number;
   stop_price?: number;
+  // Practice/replay bracket levels live on the parent simulated order rather
+  // than Alpaca-style child legs. These fields are ignored by live execution
+  // paths and let replay preserve draggable target/stop edits before fill.
+  target_price?: number;
+  bracket_stop_price?: number;
   time_in_force?: string;
 };
 

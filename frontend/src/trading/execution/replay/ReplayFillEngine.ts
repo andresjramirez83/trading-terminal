@@ -279,6 +279,30 @@ export class ReplayFillEngine {
     return cloneOrder(order);
   }
 
+  replacePositionProtection(
+    symbol: string,
+    patch: { targetPrice?: number; stopPrice?: number },
+  ): ReplayPosition | null {
+    const position = this.getPosition(symbol);
+    if (!position || position.shares <= 0) return null;
+
+    if (patch.targetPrice !== undefined) {
+      const targetPrice = positive(patch.targetPrice);
+      if (targetPrice <= 0) return null;
+      position.targetPrice = targetPrice;
+    }
+
+    if (patch.stopPrice !== undefined) {
+      const stopPrice = positive(patch.stopPrice);
+      if (stopPrice <= 0) return null;
+      position.stopPrice = stopPrice;
+    }
+
+    position.updatedAt = new Date().toISOString();
+    this.positions.set(position.id, position);
+    return clonePosition(position);
+  }
+
   processBar(symbol: string, bar: CleanBar): ReplayBarProcessResult {
     const safeSymbol = cleanSymbol(symbol);
     const result: ReplayBarProcessResult = {

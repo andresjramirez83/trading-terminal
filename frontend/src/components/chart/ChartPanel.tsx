@@ -783,6 +783,101 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           }
         }
 
+        // Replay brackets are simulated locally. They do not have Alpaca-style
+        // child leg order IDs, so trying to resolve a stop/target leg makes the
+        // optimistic drag snap back. Update the replay parent bracket before
+        // fill, or the active replay position protection after fill.
+        if (
+          executionService.getMode() === "practice" &&
+          (change.level === "stop" || change.level === "target")
+        ) {
+          const snapshot = executionService.getSnapshot();
+          const safeSymbol = change.symbol.trim().toUpperCase();
+          const activePosition = snapshot.positions.find(
+            (position) =>
+              position.symbol.trim().toUpperCase() === safeSymbol &&
+              Number(position.shares) > 0,
+          );
+
+          let updated: unknown | null = null;
+          let linkedOrderId: string | null = null;
+
+          if (activePosition) {
+            updated = await executionService.modifyPositionProtection(
+              safeSymbol,
+              change.level === "stop"
+                ? { stopPrice: change.price }
+                : { targetPrice: change.price },
+            );
+          } else {
+            const workingBracket = snapshot.openOrders.find(
+              (order) =>
+                order.symbol.trim().toUpperCase() === safeSymbol &&
+                (Number(order.targetPrice) > 0 || Number(order.stopPrice) > 0),
+            );
+
+            if (workingBracket) {
+              linkedOrderId = workingBracket.id;
+              updated = await executionService.modifyOrder(
+                workingBracket.id,
+                change.level === "stop"
+                  ? { bracket_stop_price: change.price }
+                  : { target_price: change.price },
+              );
+            }
+          }
+
+          if (!updated) return false;
+
+          const selectedTrade = tradeEngine.getSelectedTrade();
+          const replayTrade =
+            selectedTrade &&
+            selectedTrade.symbol.trim().toUpperCase() === safeSymbol &&
+            !["closed", "cancelled", "rejected"].includes(selectedTrade.status)
+              ? selectedTrade
+              : tradeEngine
+                  .getTrades()
+                  .filter(
+                    (trade) =>
+                      trade.symbol.trim().toUpperCase() === safeSymbol &&
+                      !["closed", "cancelled", "rejected"].includes(trade.status),
+                  )
+                  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ??
+                null;
+
+          if (replayTrade) {
+            if (change.level === "stop") {
+              tradeEngine.updateStop(replayTrade.id, change.price);
+            } else {
+              tradeEngine.updateTarget(replayTrade.id, change.price);
+            }
+
+            const latestTrade =
+              tradeEngine.getTrade(replayTrade.id) ?? replayTrade;
+            tradeEngine.updateTrade(replayTrade.id, {
+              status: activePosition ? "managing" : latestTrade.status,
+              links: linkedOrderId
+                ? {
+                    ...latestTrade.links,
+                    alpacaOrderIds: Array.from(
+                      new Set([
+                        ...(latestTrade.links.alpacaOrderIds ?? []),
+                        linkedOrderId,
+                      ]),
+                    ),
+                  }
+                : latestTrade.links,
+            });
+
+            if (tradeEngine.getSelectedTradeId() !== replayTrade.id) {
+              tradeEngine.selectTrade(replayTrade.id);
+            }
+          }
+
+          executionService.queueRefresh();
+          return true;
+        }
+
         const resolveBracketLegOrderId = (
           level: "stop" | "target",
         ): string | null => {
@@ -1303,7 +1398,22 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       }
 
       if (protection) {
-        positionOverlayRef.current?.update(protection);
+        if (executionService.getMode() === "practice") {
+          positionOverlayRef.current?.updateWorkingOrder({
+            id: `replay-position-${safeSymbol}`,
+            symbol: safeSymbol,
+            entry: protection.position.entry,
+            stop: protection.stopPrice,
+            target: protection.targetPrice,
+            entryIsLive: false,
+            entryCanDrag: false,
+            entryCanCancel: false,
+            stopCanDrag: protection.stopPrice > 0,
+            targetCanDrag: protection.targetPrice > 0,
+          });
+        } else {
+          positionOverlayRef.current?.update(protection);
+        }
         return;
       }
 

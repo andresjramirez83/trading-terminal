@@ -338,6 +338,14 @@ export class ReplayExecutionProvider extends BaseExecutionProvider {
         patch.stop_price !== undefined
           ? positive(patch.stop_price)
           : undefined,
+      targetPrice:
+        patch.target_price !== undefined
+          ? positive(patch.target_price)
+          : undefined,
+      bracketStopPrice:
+        patch.bracket_stop_price !== undefined
+          ? positive(patch.bracket_stop_price)
+          : undefined,
     });
 
     if (!updated) return null;
@@ -345,6 +353,18 @@ export class ReplayExecutionProvider extends BaseExecutionProvider {
     this.rebuildSnapshot("Practice order updated.");
     this.events.snapshotUpdated(this.snapshot);
     return this.toRawOrder(updated);
+  }
+
+  async modifyPositionProtection(
+    symbol: string,
+    patch: { targetPrice?: number; stopPrice?: number },
+  ): Promise<ReplayPosition | null> {
+    const updated = this.fillEngine.replacePositionProtection(symbol, patch);
+    if (!updated) return null;
+
+    this.rebuildSnapshot("Practice position protection updated.");
+    this.events.snapshotUpdated(this.snapshot);
+    return updated;
   }
 
   async closePosition(

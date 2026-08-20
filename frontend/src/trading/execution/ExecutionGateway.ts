@@ -156,6 +156,14 @@ export class ExecutionGateway {
     ).modifyOrder(orderId, patch);
   }
 
+  async modifyPositionProtection(
+    symbol: string,
+    patch: { targetPrice?: number; stopPrice?: number },
+  ): Promise<unknown | null> {
+    if (this.getMode() !== "practice") return null;
+    return getReplayExecutionProvider().modifyPositionProtection(symbol, patch);
+  }
+
   async closePosition(
     symbol: string,
     options?: ClosePositionOptions,
