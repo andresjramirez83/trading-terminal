@@ -213,7 +213,7 @@ export default function RightInfoPanel({
 
           {workspace === "scanner" && <ScannerWorkspacePanel />}
 
-          {workspace === "news" && <NewsWorkspacePanel />}
+          {workspace === "news" && <NewsWorkspacePanel symbol={symbol} />}
         </Suspense>
       </div>
     </aside>

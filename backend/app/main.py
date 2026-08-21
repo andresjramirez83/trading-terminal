@@ -59,6 +59,7 @@ from app.services.signal_engine import (
 )
 from app.routes.auto_trade import router as professional_auto_trade_router
 from app.routes.vwap3_coach import router as vwap3_coach_router
+from app.routes.symbol_intelligence import router as symbol_intelligence_router
 from app.backtests.routes import router as backtest_router
 
 DEBUG_BARS = os.getenv("DEBUG_BARS", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -97,6 +98,7 @@ app.add_middleware(
 # Registered before legacy in-main endpoints so web workers never own trade state.
 app.include_router(professional_auto_trade_router)
 app.include_router(vwap3_coach_router)
+app.include_router(symbol_intelligence_router)
 app.include_router(backtest_router)
 app.include_router(history_router)
 

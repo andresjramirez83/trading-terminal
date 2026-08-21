@@ -1644,3 +1644,143 @@ export async function fetchVwap3CoachStudy(
   );
   return parseJson<Vwap3StudyResponse>(res);
 }
+
+export type SymbolIntelligenceImpact = "critical" | "high" | "medium" | "info" | string;
+
+export type SymbolIntelligenceNewsItem = {
+  id?: string;
+  headline: string;
+  summary?: string;
+  author?: string | null;
+  source?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  url?: string | null;
+  symbols?: string[];
+  category?: string;
+  impact?: SymbolIntelligenceImpact;
+};
+
+export type SymbolIntelligenceHalt = {
+  symbol: string;
+  company?: string | null;
+  market?: string | null;
+  halt_date?: string | null;
+  halt_time?: string | null;
+  reason_code?: string | null;
+  reason?: string | null;
+  pause_threshold_price?: string | null;
+  resumption_date?: string | null;
+  resumption_quote_time?: string | null;
+  resumption_trade_time?: string | null;
+};
+
+export type SymbolIntelligenceFiling = {
+  form: string;
+  filing_date?: string | null;
+  report_date?: string | null;
+  accession_number?: string | null;
+  description?: string | null;
+  url?: string | null;
+  category?: string;
+  impact?: SymbolIntelligenceImpact;
+};
+
+export type SymbolIntelligenceAlert = {
+  type: string;
+  severity: SymbolIntelligenceImpact;
+  title: string;
+  detail?: string | null;
+};
+
+export type SymbolIntelligenceResponse = {
+  symbol: string;
+  as_of: string;
+  active_halt?: SymbolIntelligenceHalt | null;
+  halts: SymbolIntelligenceHalt[];
+  alerts: SymbolIntelligenceAlert[];
+  news: SymbolIntelligenceNewsItem[];
+  filings: SymbolIntelligenceFiling[];
+  earnings?: {
+    today?: {
+      symbol: string;
+      name?: string | null;
+      date?: string | null;
+      time?: string | null;
+      eps_forecast?: string | null;
+      fiscal_quarter_ending?: string | null;
+      estimate_count?: string | null;
+      market_cap?: string | null;
+      last_year_report_date?: string | null;
+      last_year_eps?: string | null;
+    } | null;
+    calendar_date?: string | null;
+    latest_news?: SymbolIntelligenceNewsItem | null;
+    latest_periodic_filing?: SymbolIntelligenceFiling | null;
+  };
+  sources: {
+    alpaca_news?: { ok: boolean; error?: string | null };
+    nasdaq_halts?: { ok: boolean; error?: string | null };
+    nasdaq_earnings?: { ok: boolean; error?: string | null };
+    sec_filings?: { ok: boolean; error?: string | null };
+  };
+  cache_policy?: {
+    news_seconds?: number;
+    halts_seconds?: number;
+    earnings_seconds?: number;
+    filings_seconds?: number;
+  };
+};
+
+type SymbolIntelligenceCacheEntry = {
+  expiresAt: number;
+  data: SymbolIntelligenceResponse;
+};
+
+const SYMBOL_INTELLIGENCE_CACHE_TTL_MS = 10_000;
+const symbolIntelligenceCache = new Map<string, SymbolIntelligenceCacheEntry>();
+const symbolIntelligenceInflight = new Map<string, Promise<SymbolIntelligenceResponse>>();
+
+export async function fetchSymbolIntelligence(
+  symbol: string,
+  options?: { forceRefresh?: boolean; signal?: AbortSignal },
+): Promise<SymbolIntelligenceResponse> {
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  if (!normalizedSymbol) throw new Error("symbol is required");
+
+  const now = Date.now();
+  if (!options?.forceRefresh) {
+    const cached = symbolIntelligenceCache.get(normalizedSymbol);
+    if (cached && cached.expiresAt > now) return cached.data;
+
+    if (!options?.signal) {
+      const inflight = symbolIntelligenceInflight.get(normalizedSymbol);
+      if (inflight) return inflight;
+    }
+  }
+
+  const qs = new URLSearchParams({ news_limit: "20", filings_limit: "12" });
+  if (options?.forceRefresh) qs.set("_ts", String(Date.now()));
+
+  const request = fetch(
+    `${API_BASE}/symbol-intelligence/${encodeURIComponent(normalizedSymbol)}?${qs.toString()}`,
+    {
+      signal: options?.signal,
+      cache: "no-store",
+    },
+  )
+    .then((res) => parseJson<SymbolIntelligenceResponse>(res))
+    .then((data) => {
+      symbolIntelligenceCache.set(normalizedSymbol, {
+        expiresAt: Date.now() + SYMBOL_INTELLIGENCE_CACHE_TTL_MS,
+        data,
+      });
+      return data;
+    })
+    .finally(() => {
+      symbolIntelligenceInflight.delete(normalizedSymbol);
+    });
+
+  if (!options?.signal) symbolIntelligenceInflight.set(normalizedSymbol, request);
+  return request;
+}
