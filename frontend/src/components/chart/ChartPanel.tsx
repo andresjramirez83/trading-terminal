@@ -317,6 +317,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     phase: string;
   } | null>(null);
   const refreshProtectedOrderStateRef = useRef<(() => Promise<void>) | null>(null);
+  const bracketLevelTransitionUntilRef = useRef(0);
   const fxAnalysisToolRef = useRef<FxAnalysisToolId>("none");
   const drawingToolRef = useRef<DrawingTool>("cursor");
   const drawingStyleRef = useRef<DrawingStyle>(loadDrawingStyle());
@@ -959,6 +960,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           return false;
         }
 
+        if (change.level === "stop" || change.level === "target") {
+          // Alpaca PATCH is a replacement operation. During the short broker
+          // handoff a bracket child can briefly appear as a standalone top-level
+          // order. Keep the existing bracket overlay pinned so that child can
+          // never be mistaken for the working entry line.
+          bracketLevelTransitionUntilRef.current = Date.now() + 8_000;
+        }
+
         const updatedOrder = await executionService.modifyOrder(
           resolvedOrderId,
           change.level === "stop"
@@ -1417,18 +1426,17 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         return;
       }
 
-      const workingOrder = snapshot.openOrders.find(
-        (order) =>
-          order.symbol.trim().toUpperCase() === safeSymbol &&
-          Number(order.limitPrice) > 0,
-      );
-
-      const rawWorkingOrder = (() => {
+      const findRawOrderById = (
+        orderId: string | null | undefined,
+      ): Record<string, unknown> | null => {
+        if (!orderId) return null;
         const visit = (orders: unknown[]): Record<string, unknown> | null => {
           for (const value of orders) {
             if (!value || typeof value !== "object") continue;
             const order = value as Record<string, unknown>;
-            if (String(order.id ?? "") === workingOrder?.id) return order;
+            if (String(order.id ?? order.order_id ?? "") === orderId) {
+              return order;
+            }
             const legs = Array.isArray(order.legs) ? order.legs : [];
             const nested = visit(legs);
             if (nested) return nested;
@@ -1436,7 +1444,63 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           return null;
         };
         return visit(snapshot.rawOpenOrders);
+      };
+
+      const selectedForSymbol = (() => {
+        const selected = tradeEngine.getSelectedTrade();
+        if (
+          selected &&
+          selected.symbol.trim().toUpperCase() === safeSymbol &&
+          !["closed", "cancelled", "rejected"].includes(selected.status)
+        ) {
+          return selected;
+        }
+        return (
+          tradeEngine
+            .getTrades()
+            .filter(
+              (trade) =>
+                trade.symbol.trim().toUpperCase() === safeSymbol &&
+                !["closed", "cancelled", "rejected"].includes(trade.status),
+            )
+            .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null
+        );
       })();
+      const expectedEntrySide =
+        selectedForSymbol?.direction === "short"
+          ? "sell"
+          : selectedForSymbol?.direction === "long"
+            ? "buy"
+            : null;
+
+      const workingOrderCandidates = snapshot.openOrders.filter((order) => {
+        if (order.symbol.trim().toUpperCase() !== safeSymbol) return false;
+        if (Number(order.limitPrice) <= 0) return false;
+
+        const raw = findRawOrderById(order.id);
+        // A bracket take-profit/stop replacement can temporarily surface as a
+        // top-level order. parent_order_id is the reliable signal that it is a
+        // child and must NEVER become the yellow draggable entry line.
+        if (String(raw?.parent_order_id ?? "").trim()) return false;
+        if (expectedEntrySide && order.side !== expectedEntrySide) return false;
+        return true;
+      });
+
+      const workingOrder =
+        workingOrderCandidates.find((order) => order.type === "bracket") ??
+        workingOrderCandidates[0] ??
+        null;
+
+      const rawWorkingOrder = findRawOrderById(workingOrder?.id);
+
+      if (
+        !workingOrder &&
+        Date.now() < bracketLevelTransitionUntilRef.current
+      ) {
+        // Preserve the previous complete bracket overlay while Alpaca swaps the
+        // old leg ID for the replacement and republishes the nested parent.
+        return;
+      }
 
       const workingLegs = Array.isArray(rawWorkingOrder?.legs)
         ? (rawWorkingOrder.legs as Array<Record<string, unknown>>)

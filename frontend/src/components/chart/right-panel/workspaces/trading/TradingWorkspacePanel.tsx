@@ -345,10 +345,18 @@ export default function TradingWorkspacePanel({
         workingOrderStatus={store.workingOrderStatus}
         executionLoading={store.executionLoading}
         trailEnabled={store.serverTrailEnabled}
+        extendedProtectionLoading={store.extendedProtectionLoading}
+        canConvertToExtendedProtection={
+          store.executionMode !== "practice" &&
+          store.positionStage === "live" &&
+          store.positionProtectionOwner === "alpaca" &&
+          store.currentPosition.side === "long"
+        }
         onChange={store.updateCurrentPosition}
         onEditStop={store.editLiveStop}
         onMoveStopToBreakEven={store.moveStopToBreakEven}
         onToggleTrailingStop={store.toggleTrailingStop}
+        onConvertToExtendedProtection={store.convertToExtendedProtection}
         onClosePosition={store.closePosition}
         onClosePositionPercent={store.closePositionPercent}
         onFlattenAllPositions={store.flattenAllPositions}

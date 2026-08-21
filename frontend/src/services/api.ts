@@ -1209,6 +1209,31 @@ export async function queueOvernightProtectedOrder(
   return rememberAutoTradeStatus(status);
 }
 
+export type ConvertPositionToExtendedProtectionRequest = {
+  stop_price: number;
+  target_price: number;
+  mode?: AlpacaMode;
+};
+
+export async function convertPositionToExtendedProtection(
+  symbol: string,
+  payload: ConvertPositionToExtendedProtectionRequest,
+): Promise<AutoTradeStatus> {
+  const safeSymbol = String(symbol ?? "").trim().toUpperCase();
+  const res = await fetch(
+    `${API_BASE}/auto-trade/overnight-protected-order/${encodeURIComponent(safeSymbol)}/convert-position`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  clearAutoTradeStatusCache();
+  const status = await parseJson<AutoTradeStatus>(res);
+  return rememberAutoTradeStatus(status);
+}
+
 export type ProtectedOrderChartLevel = "entry" | "stop" | "target";
 
 export async function updateOvernightProtectedOrderPrice(

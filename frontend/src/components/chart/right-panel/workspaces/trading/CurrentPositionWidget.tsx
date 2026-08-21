@@ -16,10 +16,13 @@ type CurrentPositionWidgetProps = {
   workingOrderStatus?: string | null;
   executionLoading?: boolean;
   trailEnabled?: boolean;
+  extendedProtectionLoading?: boolean;
+  canConvertToExtendedProtection?: boolean;
   onChange: (patch: Partial<CurrentPositionState>) => void;
   onEditStop?: (price: number) => void | Promise<void>;
   onMoveStopToBreakEven: () => void | Promise<void>;
   onToggleTrailingStop?: () => void | Promise<void>;
+  onConvertToExtendedProtection?: () => void | Promise<void>;
   onClosePosition?: () => void | Promise<void>;
   onClosePositionPercent?: (percent: number) => void | Promise<void>;
   onFlattenAllPositions?: () => void | Promise<void>;
@@ -108,10 +111,13 @@ export default function CurrentPositionWidget({
   workingOrderStatus = null,
   executionLoading = false,
   trailEnabled = false,
+  extendedProtectionLoading = false,
+  canConvertToExtendedProtection = false,
   onChange,
   onEditStop,
   onMoveStopToBreakEven,
   onToggleTrailingStop,
+  onConvertToExtendedProtection,
   onClosePosition,
   onClosePositionPercent,
   onFlattenAllPositions,
@@ -364,6 +370,60 @@ export default function CurrentPositionWidget({
         <div style={styles.empty}>
           No live Alpaca position for this symbol. Target and stop can still be
           prepared here before a fill appears.
+        </div>
+      )}
+
+      {hasLivePosition && protectionOwner === "alpaca" && (
+        <div style={styles.extCard}>
+          <div style={styles.extCardCopy}>
+            <strong>Hold Through Extended Hours</strong>
+            <span>
+              Transfer this position from the native Alpaca bracket to the
+              server-managed EXT stop/target so it can remain protected after
+              4:00 PM and in pre-market.
+            </span>
+          </div>
+          <button
+            type="button"
+            style={{
+              ...styles.extButton,
+              ...disabledStyle(
+                !canConvertToExtendedProtection ||
+                  extendedProtectionLoading ||
+                  !fullyProtected,
+              ),
+            }}
+            disabled={
+              !canConvertToExtendedProtection ||
+              extendedProtectionLoading ||
+              !fullyProtected
+            }
+            onClick={() => {
+              const confirmed = window.confirm(
+                `Convert ${position.symbol} to EXT protection?\n\n` +
+                  `Shares: ${position.shares}\n` +
+                  `Stop: ${price(position.stop)}\n` +
+                  `Target: ${price(position.target)}\n\n` +
+                  "This will cancel the existing Alpaca closing/bracket orders for this symbol and transfer the same stop and target to the server-managed extended-hours protection worker.",
+              );
+              if (!confirmed) return;
+              void onConvertToExtendedProtection?.();
+            }}
+            title={
+              fullyProtected
+                ? "Cancel the regular-hours Alpaca bracket exits and transfer these levels to server-managed extended-hours protection."
+                : "A live stop and target are required before converting to EXT protection."
+            }
+          >
+            {extendedProtectionLoading ? "Converting…" : "Convert to EXT"}
+          </button>
+        </div>
+      )}
+
+      {hasLivePosition && protectionOwner === "server" && (
+        <div style={styles.extProtectedBanner}>
+          <strong>EXT PROTECTED</strong>
+          <span>After-hours · Overnight · Pre-market</span>
         </div>
       )}
 
@@ -912,6 +972,45 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     lineHeight: 1.35,
     marginBottom: 10,
+  },
+  extCard: {
+    display: "grid",
+    gap: 10,
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid rgba(34,211,238,.32)",
+    background: "rgba(8,145,178,.09)",
+  },
+  extCardCopy: {
+    display: "grid",
+    gap: 4,
+    color: "#e2e8f0",
+    fontSize: 11,
+    lineHeight: 1.35,
+  },
+  extButton: {
+    width: "100%",
+    borderRadius: 10,
+    border: "1px solid rgba(34,211,238,.55)",
+    background: "rgba(8,145,178,.22)",
+    color: "#cffafe",
+    padding: "10px 12px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  extProtectedBanner: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 12,
+    padding: "9px 11px",
+    borderRadius: 10,
+    border: "1px solid rgba(34,211,238,.42)",
+    background: "rgba(8,145,178,.14)",
+    color: "#a5f3fc",
+    fontSize: 10,
   },
   tabs: {
     display: "grid",

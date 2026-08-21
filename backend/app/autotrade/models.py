@@ -144,3 +144,11 @@ class ProtectedPositionAction(BaseModel):
 
     action: Literal["scale_out", "close_all", "trail_start", "trail_stop"]
     percent: Optional[float] = None
+
+
+class ConvertPositionToExtendedProtection(BaseModel):
+    """Transfer an existing long Alpaca position to server-managed EXT protection."""
+
+    stop_price: float
+    target_price: float
+    mode: AutoTradeMode = "paper"

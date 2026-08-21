@@ -300,6 +300,20 @@ class AlpacaService:
         original = self.get_order(order_id, nested=True)
         status = str(original.get("status") or "").strip().lower()
         filled_qty = self._positive_number(original.get("filled_qty")) or 0.0
+        parent_order_id = str(original.get("parent_order_id") or "").strip()
+
+        # Never cancel + recreate an accepted bracket child as a standalone
+        # order. Canceling one attached leg can break/cancel the entire bracket,
+        # and recreating only that child temporarily turns the take-profit into
+        # what looks like a separate working order on the chart. If the entry
+        # parent is still unfilled, recreate the WHOLE bracket with the requested
+        # child level changed and return the corresponding replacement leg.
+        if parent_order_id:
+            return self._recreate_accepted_bracket_for_leg(
+                parent_order_id=parent_order_id,
+                old_leg=original,
+                updates=updates,
+            )
 
         if status != "accepted":
             # The broker state changed between PATCH and GET. Retry once using
@@ -393,6 +407,146 @@ class AlpacaService:
             # cancel + submit. Supply it so all clients can reconcile identity.
             recreated.setdefault("replaces", order_id)
         return recreated
+
+    def _recreate_accepted_bracket_for_leg(
+        self,
+        *,
+        parent_order_id: str,
+        old_leg: Dict[str, Any],
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        parent = self.get_order(parent_order_id, nested=True)
+        parent_status = str(parent.get("status") or "").strip().lower()
+        parent_filled_qty = self._positive_number(parent.get("filled_qty")) or 0.0
+
+        # Once an entry has any fill, reopening the parent would risk buying the
+        # position again. In that state only normal Alpaca leg replacement is
+        # safe, so fail rather than detach protection.
+        if parent_status == "filled" or parent_filled_qty > 0:
+            raise RuntimeError(
+                "Cannot safely recreate an accepted bracket leg after the entry has filled"
+            )
+
+        parent_symbol = str(parent.get("symbol") or "").strip().upper()
+        parent_side = str(parent.get("side") or "").strip().lower()
+        parent_type = str(parent.get("type") or "").strip().lower()
+        if not parent_symbol or parent_side not in {"buy", "sell"} or not parent_type:
+            raise RuntimeError("Bracket parent is missing fields required for safe recreation")
+
+        qty = self._positive_number(parent.get("qty"))
+        notional = None if qty is not None else self._positive_number(parent.get("notional"))
+        if qty is None and notional is None:
+            raise RuntimeError("Bracket parent has no quantity or notional to recreate")
+
+        take_profit: Optional[Dict[str, Any]] = None
+        stop_loss: Optional[Dict[str, Any]] = None
+        old_leg_id = str(old_leg.get("id") or "").strip()
+        old_leg_type = str(old_leg.get("type") or "").strip().lower()
+        old_leg_stop = self._positive_number(old_leg.get("stop_price"))
+        replacing_stop = old_leg_stop is not None or old_leg_type in {"stop", "stop_limit"}
+
+        for leg in parent.get("legs") or []:
+            if not isinstance(leg, dict):
+                continue
+            leg_id = str(leg.get("id") or "").strip()
+            leg_type = str(leg.get("type") or "").strip().lower()
+            leg_limit = self._positive_number(leg.get("limit_price"))
+            leg_stop = self._positive_number(leg.get("stop_price"))
+            is_stop = leg_stop is not None or leg_type in {"stop", "stop_limit"}
+
+            if is_stop:
+                next_stop = leg_stop
+                next_limit = leg_limit
+                if leg_id == old_leg_id or (not old_leg_id and replacing_stop):
+                    next_stop = self._positive_number(updates.get("stop_price")) or next_stop
+                    if "limit_price" in updates and leg_type == "stop_limit":
+                        next_limit = self._positive_number(updates.get("limit_price")) or next_limit
+                if next_stop is not None:
+                    stop_loss = {"stop_price": next_stop}
+                    if leg_type == "stop_limit" and next_limit is not None:
+                        stop_loss["limit_price"] = next_limit
+            elif leg_type == "limit" and leg_limit is not None:
+                next_target = leg_limit
+                if leg_id == old_leg_id or (not old_leg_id and not replacing_stop):
+                    next_target = self._positive_number(updates.get("limit_price")) or next_target
+                take_profit = {"limit_price": next_target}
+
+        if take_profit is None and stop_loss is None:
+            raise RuntimeError("Bracket parent has no attached protection to recreate")
+
+        order_class = str(parent.get("order_class") or "bracket").strip().lower() or "bracket"
+        if order_class not in {"bracket", "oto"}:
+            order_class = "bracket" if take_profit and stop_loss else "oto"
+
+        self.cancel_order(parent_order_id)
+        canceled = False
+        for _ in range(15):
+            current = self.get_order(parent_order_id, nested=False)
+            current_status = str(current.get("status") or "").strip().lower()
+            if current_status in {"canceled", "cancelled", "expired", "rejected"}:
+                canceled = True
+                break
+            if current_status in {"filled", "partially_filled"} or (
+                self._positive_number(current.get("filled_qty")) or 0.0
+            ) > 0:
+                raise RuntimeError(
+                    "Bracket entry filled while its accepted protection update was being applied"
+                )
+            time.sleep(0.15)
+        if not canceled:
+            raise RuntimeError("Timed out waiting for accepted bracket cancellation")
+
+        recreated_parent = self.place_order(
+            symbol=parent_symbol,
+            side=parent_side,
+            order_type=parent_type,
+            time_in_force=str(parent.get("time_in_force") or "day").strip().lower(),
+            qty=qty,
+            notional=notional,
+            limit_price=self._positive_number(parent.get("limit_price")),
+            stop_price=self._positive_number(parent.get("stop_price")),
+            extended_hours=False,
+            position_intent=str(parent.get("position_intent") or "").strip() or None,
+            order_class=order_class,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+        )
+        new_parent_id = str((recreated_parent or {}).get("id") or "").strip()
+        if not new_parent_id:
+            raise RuntimeError("Alpaca recreated the bracket without returning a parent order ID")
+
+        # Bracket submit responses may omit legs briefly. Fetch the nested parent
+        # so the frontend gets the corresponding new leg and can preserve the
+        # optimistic bracket overlay while broker snapshots catch up.
+        try:
+            nested_parent = self.get_order(new_parent_id, nested=True)
+        except Exception:
+            nested_parent = recreated_parent
+
+        replacement_leg: Optional[Dict[str, Any]] = None
+        for leg in (nested_parent or {}).get("legs") or []:
+            if not isinstance(leg, dict):
+                continue
+            leg_type = str(leg.get("type") or "").strip().lower()
+            leg_stop = self._positive_number(leg.get("stop_price"))
+            is_stop = leg_stop is not None or leg_type in {"stop", "stop_limit"}
+            if replacing_stop == is_stop:
+                replacement_leg = dict(leg)
+                break
+
+        if replacement_leg is None:
+            # Preserve group identity instead of returning a standalone-looking
+            # child. The next nested refresh will supply the exact new leg ID.
+            replacement_leg = dict(old_leg)
+            replacement_leg.pop("id", None)
+
+        replacement_leg["replaces"] = old_leg_id
+        replacement_leg["replacement_parent_id"] = new_parent_id
+        replacement_leg["replaced_parent_id"] = parent_order_id
+        replacement_leg["parent_order_id"] = new_parent_id
+        replacement_leg["bracket_parent_recreated"] = True
+        return replacement_leg
+
 
     def cancel_order(self, order_id: str) -> None:
         self._request("DELETE", f"/v2/orders/{order_id}")

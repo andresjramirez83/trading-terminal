@@ -9,6 +9,7 @@ import type { TradeExecutionSnapshot } from "../services/execution/TradeExecutio
 import { calculateQuickOrderEstimate } from "../../components/chart/right-panel/workspaces/trading/OrderCalculator";
 import { getSharedPositionProtectionEngine } from "../position/PositionProtectionEngine";
 import {
+  convertPositionToExtendedProtection,
   fetchAutoTradeStatus,
   requestOvernightProtectedPositionAction,
   updateOvernightProtectedOrderPrice,
@@ -437,6 +438,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
 
   const [autoTradeStatus, setAutoTradeStatus] =
     useState<AutoTradeStatus | null>(null);
+  const [extendedProtectionLoading, setExtendedProtectionLoading] =
+    useState(false);
 
   const [journalTrades] = useState<JournalTradeState[]>([]);
 
@@ -1024,6 +1027,64 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     serverTrailEnabled,
   ]);
 
+  const convertToExtendedProtection = useCallback(async () => {
+    if (executionMode === "practice") {
+      window.alert("Convert to EXT is only available for Alpaca paper/live positions.");
+      return;
+    }
+    if (positionStage !== "live" || currentPosition.shares <= 0) {
+      window.alert(`No live ${safeSymbol} position is available to convert.`);
+      return;
+    }
+    if (positionProtectionOwner === "server") return;
+    if (currentPosition.side !== "long") {
+      window.alert("Convert to EXT currently supports long positions only.");
+      return;
+    }
+    if (currentPosition.stop <= 0 || currentPosition.target <= 0) {
+      window.alert("A valid stop and target are required before converting to EXT protection.");
+      return;
+    }
+
+    setExtendedProtectionLoading(true);
+    try {
+      const nextStatus = await convertPositionToExtendedProtection(
+        safeSymbol,
+        {
+          stop_price: currentPosition.stop,
+          target_price: currentPosition.target,
+          mode: executionMode === "live" ? "live" : "paper",
+        },
+      );
+      setAutoTradeStatus(nextStatus);
+      setPositionDraft((current) => ({
+        ...current,
+        symbol: safeSymbol,
+        shares: currentPosition.shares,
+        entry: currentPosition.entry,
+        stop: currentPosition.stop,
+        target: currentPosition.target,
+        side: currentPosition.side,
+      }));
+      executionService.queueRefresh(true);
+    } catch (error) {
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : `Could not convert ${safeSymbol} to EXT protection.`,
+      );
+    } finally {
+      setExtendedProtectionLoading(false);
+    }
+  }, [
+    currentPosition,
+    executionMode,
+    executionService,
+    positionProtectionOwner,
+    positionStage,
+    safeSymbol,
+  ]);
+
   const submitQuickOrder = useCallback(
     async (estimatedShares: number) => {
       if (estimatedShares <= 0) return;
@@ -1489,6 +1550,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       editLiveStop,
       moveStopToBreakEven,
       toggleTrailingStop,
+      convertToExtendedProtection,
+      extendedProtectionLoading,
       closePosition,
       closePositionPercent,
       closePositionShares,
@@ -1551,6 +1614,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       tradePlan,
       tradePlanStats,
       toggleTrailingStop,
+      convertToExtendedProtection,
+      extendedProtectionLoading,
       updateCurrentPosition,
       updateQuickOrder,
       updateTradePlan,
