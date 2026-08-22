@@ -1447,7 +1447,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       };
 
       const selectedForSymbol = (() => {
-        const selected = tradeEngine.getSelectedTrade();
+        const currentTradeEngine = tradeEngineRef.current;
+        if (!currentTradeEngine) return null;
+
+        const selected = currentTradeEngine.getSelectedTrade();
         if (
           selected &&
           selected.symbol.trim().toUpperCase() === safeSymbol &&
@@ -1456,7 +1459,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           return selected;
         }
         return (
-          tradeEngine
+          currentTradeEngine
             .getTrades()
             .filter(
               (trade) =>
