@@ -20,6 +20,9 @@ const ScannerWorkspacePanel = lazy(
 const NewsWorkspacePanel = lazy(
   () => import("./right-panel/workspaces/NewsWorkspacePanel"),
 );
+const Level2WorkspacePanel = lazy(
+  () => import("./right-panel/workspaces/Level2WorkspacePanel"),
+);
 const DecisionCenterProvider = lazy(() =>
   import("./right-panel/DecisionCenterContext").then((module) => ({
     default: module.DecisionCenterProvider,
@@ -39,6 +42,7 @@ const WORKSPACES: { id: RightPanelWorkspace; label: string }[] = [
   { id: "chart", label: "Chart" },
   { id: "scanner", label: "Scanner" },
   { id: "news", label: "News" },
+  { id: "level2", label: "Level 2" },
 ];
 
 function WorkspaceLoading() {
@@ -133,7 +137,7 @@ export default function RightInfoPanel({
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 14,
+            gap: 9,
             height: 34,
           }}
         >
@@ -214,6 +218,8 @@ export default function RightInfoPanel({
           {workspace === "scanner" && <ScannerWorkspacePanel />}
 
           {workspace === "news" && <NewsWorkspacePanel symbol={symbol} />}
+
+          {workspace === "level2" && <Level2WorkspacePanel symbol={symbol} />}
         </Suspense>
       </div>
     </aside>

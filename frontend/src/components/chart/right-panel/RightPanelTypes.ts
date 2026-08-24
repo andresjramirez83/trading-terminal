@@ -3,7 +3,8 @@ export type RightPanelWorkspace =
   | "trade"
   | "watchlists"
   | "scanner"
-  | "news";
+  | "news"
+  | "level2";
 
 export type ReadinessStatus = "bullish" | "neutral" | "bearish";
 

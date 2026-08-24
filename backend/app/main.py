@@ -48,6 +48,7 @@ from app.scanners.registry import ScannerRegistry
 from app.services.alpaca_service import AlpacaService
 from app.services.alpaca_market_service import AlpacaMarketService
 from app.services.market_data_provider import get_market_data_provider
+from app.services.moomoo_level2_service import moomoo_level2_service
 from app.services.alpaca_ws import alpaca_ws_manager
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 from app.services.daily_watchlist_store import DailyWatchlistStore
@@ -60,6 +61,7 @@ from app.services.signal_engine import (
 from app.routes.auto_trade import router as professional_auto_trade_router
 from app.routes.vwap3_coach import router as vwap3_coach_router
 from app.routes.symbol_intelligence import router as symbol_intelligence_router
+from app.routes.level2 import router as level2_router
 from app.backtests.routes import router as backtest_router
 
 DEBUG_BARS = os.getenv("DEBUG_BARS", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -99,6 +101,7 @@ app.add_middleware(
 app.include_router(professional_auto_trade_router)
 app.include_router(vwap3_coach_router)
 app.include_router(symbol_intelligence_router)
+app.include_router(level2_router)
 app.include_router(backtest_router)
 app.include_router(history_router)
 
@@ -2936,6 +2939,11 @@ async def on_shutdown() -> None:
         await AlpacaMarketService.close_shared_client()
     except Exception as exc:
         print(f"[alpaca_market] shutdown error: {exc}", flush=True)
+
+    try:
+        await asyncio.to_thread(moomoo_level2_service.close)
+    except Exception as exc:
+        print(f"[moomoo_level2] shutdown error: {exc}", flush=True)
 
 
 
