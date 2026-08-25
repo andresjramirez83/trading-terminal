@@ -52,6 +52,11 @@ from app.services.moomoo_level2_service import moomoo_level2_service
 from app.services.alpaca_ws import alpaca_ws_manager
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 from app.services.daily_watchlist_store import DailyWatchlistStore
+from app.services.demand_zone_alert_service import (
+    build_active_demand_zones,
+    classify_zone_location,
+    nearest_relevant_zone,
+)
 from app.services.signal_engine import (
     SignalEngineConfig,
     evaluate_symbol_signal,
@@ -549,6 +554,29 @@ backend_alert_last_error: Optional[str] = None
 backend_alert_last_results: List[Dict[str, Any]] = []
 backend_alert_signal_state: Dict[str, Dict[str, Any]] = {}
 backend_alert_last_alert: Optional[Dict[str, Any]] = None
+
+# === DEMAND-ZONE WATCHLIST PUSH ALERTS ===
+# This path is intentionally independent from the manually armed generic alert
+# symbols. The user explicitly wants every Manual Watchlist + Scanner Watchlist
+# symbol watched for automatic 5-minute demand-zone proximity.
+DEMAND_ZONE_ALERT_ENABLED = os.getenv("DEMAND_ZONE_ALERT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+DEMAND_ZONE_ALERT_NEAR_PCT = max(0.05, float(os.getenv("DEMAND_ZONE_ALERT_NEAR_PCT", "1.0") or "1.0"))
+DEMAND_ZONE_ALERT_POLL_SECONDS = max(10, int(os.getenv("DEMAND_ZONE_ALERT_POLL_SECONDS", "15") or "15"))
+DEMAND_ZONE_ALERT_ZONE_REFRESH_SECONDS = max(60, int(os.getenv("DEMAND_ZONE_ALERT_ZONE_REFRESH_SECONDS", "300") or "300"))
+DEMAND_ZONE_ALERT_MAX_BARS = max(120, min(1200, int(os.getenv("DEMAND_ZONE_ALERT_MAX_BARS", "650") or "650")))
+DEMAND_ZONE_ALERT_INSIDE_COOLDOWN_SECONDS = max(300, int(os.getenv("DEMAND_ZONE_ALERT_INSIDE_COOLDOWN_SECONDS", "600") or "600"))
+DEMAND_ZONE_ALERT_STATE_FILE = APP_STATE_DIR / "demand_zone_alert_state.json"
+
+demand_zone_alert_task: Optional[asyncio.Task] = None
+demand_zone_alert_zone_cache: Dict[str, List[Dict[str, Any]]] = {}
+demand_zone_alert_runtime_state: Dict[str, Dict[str, Any]] = {}
+demand_zone_alert_last_check: Optional[datetime] = None
+demand_zone_alert_last_zone_refresh: Optional[datetime] = None
+demand_zone_alert_last_error: Optional[str] = None
+demand_zone_alert_last_alert: Optional[Dict[str, Any]] = None
+demand_zone_alert_last_symbols: List[str] = []
+demand_zone_alert_last_sources: Dict[str, List[str]] = {}
+demand_zone_alert_last_refresh_signature: str = ""
 
 # === BACKGROUND SCANNER CACHE STATE ===
 # Runs scanner in the backend so pages can read cached results without hammering Alpaca.
@@ -2437,6 +2465,377 @@ def mark_backend_alert_sent(signal: dict) -> None:
 
 
 
+def _load_demand_zone_alert_state() -> Dict[str, Dict[str, Any]]:
+    try:
+        if not DEMAND_ZONE_ALERT_STATE_FILE.exists():
+            return {}
+        payload = json.loads(DEMAND_ZONE_ALERT_STATE_FILE.read_text(encoding="utf-8"))
+        states = payload.get("states") if isinstance(payload, dict) else None
+        return states if isinstance(states, dict) else {}
+    except Exception as exc:
+        print(f"[demand-zone-alert] state load failed: {exc}", flush=True)
+        return {}
+
+
+def _save_demand_zone_alert_state() -> None:
+    try:
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "states": demand_zone_alert_runtime_state,
+        }
+        tmp_file = DEMAND_ZONE_ALERT_STATE_FILE.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_file.replace(DEMAND_ZONE_ALERT_STATE_FILE)
+    except Exception as exc:
+        print(f"[demand-zone-alert] state save failed: {exc}", flush=True)
+
+
+def _scanner_watchlist_symbols() -> List[str]:
+    symbols: List[str] = []
+    for payload in scanner_caches.values():
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("rows") or []
+        for row in rows:
+            if isinstance(row, dict):
+                symbols.append(str(row.get("symbol") or ""))
+    return _normalize_symbol_list(symbols)
+
+
+def get_demand_zone_watch_symbols() -> tuple[List[str], Dict[str, List[str]]]:
+    """Union the cloud manual watchlist and current scanner watchlist."""
+    try:
+        with _locked_alpaca_state():
+            state = _read_alpaca_state_unlocked()
+        manual = _normalize_symbol_list(state.get("manualWatchlist") or [])
+    except Exception:
+        manual = []
+
+    scanner = _scanner_watchlist_symbols()
+    sources: Dict[str, List[str]] = {}
+    for symbol in manual:
+        sources.setdefault(symbol, []).append("Manual")
+    for symbol in scanner:
+        if "Scanner" not in sources.setdefault(symbol, []):
+            sources[symbol].append("Scanner")
+    return _normalize_symbol_list([*manual, *scanner]), sources
+
+
+def _merge_bulk_bar_maps(*maps: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+    merged: Dict[str, Dict[int, Dict[str, Any]]] = {}
+    for mapping in maps:
+        for raw_symbol, rows in (mapping or {}).items():
+            symbol = str(raw_symbol or "").upper().strip()
+            if not symbol:
+                continue
+            bucket = merged.setdefault(symbol, {})
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    ts = int(float(row.get("time", row.get("t", 0)) or 0))
+                except Exception:
+                    continue
+                if ts <= 0:
+                    continue
+                if ts < 10_000_000_000:
+                    ts *= 1000
+                bucket[ts] = dict(row)
+    return {
+        symbol: [rows[key] for key in sorted(rows)]
+        for symbol, rows in merged.items()
+    }
+
+
+async def _refresh_demand_zone_cache(symbols: List[str]) -> None:
+    global demand_zone_alert_zone_cache, demand_zone_alert_last_zone_refresh
+
+    if not symbols:
+        demand_zone_alert_zone_cache = {}
+        demand_zone_alert_last_zone_refresh = datetime.now(timezone.utc)
+        return
+
+    market = get_alpaca_market_service()
+    now = datetime.now(timezone.utc)
+    # Seven calendar days comfortably covers the same ~650 5-minute bars the
+    # chart normally displays, including a weekend boundary.
+    start = now - timedelta(days=7)
+
+    sip_rows = await market.get_bulk_bars(
+        symbols,
+        timeframe="5Min",
+        start=start,
+        end=now,
+        feed=market.feed,
+        chunk_size=200,
+        concurrency=3,
+    )
+
+    overnight_rows: Dict[str, List[Dict[str, Any]]] = {}
+    if market.include_overnight and market.overnight_feed and market.overnight_feed != market.feed:
+        try:
+            overnight_rows = await market.get_bulk_bars(
+                symbols,
+                timeframe="5Min",
+                start=start,
+                end=now,
+                feed=market.overnight_feed,
+                chunk_size=200,
+                concurrency=3,
+            )
+        except Exception as exc:
+            print(f"[demand-zone-alert] BOATS zone history unavailable: {exc}", flush=True)
+
+    merged = _merge_bulk_bar_maps(overnight_rows, sip_rows)
+    next_cache: Dict[str, List[Dict[str, Any]]] = {}
+    for symbol in symbols:
+        rows = merged.get(symbol, [])
+        if len(rows) > DEMAND_ZONE_ALERT_MAX_BARS:
+            rows = rows[-DEMAND_ZONE_ALERT_MAX_BARS:]
+        next_cache[symbol] = build_active_demand_zones(rows, max_bars=DEMAND_ZONE_ALERT_MAX_BARS)
+
+    demand_zone_alert_zone_cache = next_cache
+    demand_zone_alert_last_zone_refresh = datetime.now(timezone.utc)
+    print(
+        f"[demand-zone-alert] zones refreshed symbols={len(symbols)} "
+        f"active_zones={sum(len(rows) for rows in next_cache.values())}",
+        flush=True,
+    )
+
+
+def _demand_zone_state_key(symbol: str, zone: Dict[str, Any]) -> str:
+    return f"{symbol.upper()}::{zone.get('id') or ''}"
+
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _format_demand_zone_price(value: float) -> str:
+    number = float(value)
+    return f"{number:.4f}" if number < 1 else f"{number:.2f}"
+
+
+async def _send_demand_zone_push(
+    symbol: str,
+    zone: Dict[str, Any],
+    price: float,
+    event: str,
+    distance_pct: float,
+    sources: List[str],
+) -> None:
+    source_label = " + ".join(sources) if sources else "Watchlist"
+    bottom = float(zone.get("bottom") or 0.0)
+    top = float(zone.get("top") or 0.0)
+    if event == "inside":
+        title = f"Demand Zone ENTERED · {symbol}"
+        message = (
+            f"{symbol} entered 5m demand {_format_demand_zone_price(bottom)}-"
+            f"{_format_demand_zone_price(top)} | price {_format_demand_zone_price(price)} "
+            f"| {source_label} Watchlist"
+        )
+        priority = 1
+    else:
+        title = f"Demand Zone NEAR · {symbol}"
+        message = (
+            f"{symbol} is {distance_pct:.2f}% above 5m demand "
+            f"{_format_demand_zone_price(bottom)}-{_format_demand_zone_price(top)} "
+            f"| price {_format_demand_zone_price(price)} | {source_label} Watchlist"
+        )
+        priority = 0
+
+    await asyncio.to_thread(send_pushover_alert, title, message, priority)
+
+
+async def run_demand_zone_alert_loop() -> None:
+    global demand_zone_alert_runtime_state
+    global demand_zone_alert_last_check, demand_zone_alert_last_error
+    global demand_zone_alert_last_alert, demand_zone_alert_last_symbols
+    global demand_zone_alert_last_sources, demand_zone_alert_last_refresh_signature
+
+    print("[demand-zone-alert] started", flush=True)
+    demand_zone_alert_runtime_state = _load_demand_zone_alert_state()
+
+    while True:
+        try:
+            if not DEMAND_ZONE_ALERT_ENABLED:
+                await asyncio.sleep(DEMAND_ZONE_ALERT_POLL_SECONDS)
+                continue
+
+            symbols, source_map = get_demand_zone_watch_symbols()
+            demand_zone_alert_last_symbols = list(symbols)
+            demand_zone_alert_last_sources = dict(source_map)
+            signature = "|".join(symbols)
+            now = datetime.now(timezone.utc)
+
+            refresh_due = (
+                signature != demand_zone_alert_last_refresh_signature
+                or demand_zone_alert_last_zone_refresh is None
+                or (now - demand_zone_alert_last_zone_refresh).total_seconds() >= DEMAND_ZONE_ALERT_ZONE_REFRESH_SECONDS
+            )
+            if refresh_due:
+                await _refresh_demand_zone_cache(symbols)
+                demand_zone_alert_last_refresh_signature = signature
+
+            if not symbols:
+                demand_zone_alert_last_check = datetime.now(timezone.utc)
+                demand_zone_alert_last_error = None
+                await asyncio.sleep(DEMAND_ZONE_ALERT_POLL_SECONDS)
+                continue
+
+            latest_trades = await get_alpaca_market_service().get_bulk_latest_trades(symbols)
+            state_changed = False
+            now_ms = int(now.timestamp() * 1000)
+
+            for symbol in symbols:
+                trade = latest_trades.get(symbol) or {}
+                price = float(trade.get("price") or 0.0) if isinstance(trade, dict) else 0.0
+                trade_ms = int(trade.get("time") or 0) if isinstance(trade, dict) else 0
+                # Never push a zone alert from a stale Friday/closed-market
+                # trade. Illiquid names get a generous 30-minute freshness
+                # window, but a new trade is required before an alert can fire.
+                if price <= 0 or trade_ms <= 0 or now_ms - trade_ms > 30 * 60_000:
+                    continue
+                zone = nearest_relevant_zone(demand_zone_alert_zone_cache.get(symbol, []), price)
+                if not zone:
+                    continue
+
+                location = classify_zone_location(price, zone, DEMAND_ZONE_ALERT_NEAR_PCT)
+                current_state = str(location.get("state") or "unknown")
+                if current_state not in {"near", "inside", "far", "below"}:
+                    continue
+
+                key = _demand_zone_state_key(symbol, zone)
+                entry = demand_zone_alert_runtime_state.get(key)
+                if not isinstance(entry, dict):
+                    entry = {}
+                previous_state = str(entry.get("state") or "unknown")
+                event: Optional[str] = None
+
+                if current_state == "near":
+                    # Near is a one-time heads-up per zone. Do not fire another
+                    # near alert merely because price bounced out of the zone.
+                    if not bool(entry.get("near_sent")) and previous_state != "inside":
+                        event = "near"
+                elif current_state == "inside" and previous_state != "inside":
+                    last_inside = _parse_iso_utc(entry.get("inside_sent_at"))
+                    if last_inside is None or (now - last_inside).total_seconds() >= DEMAND_ZONE_ALERT_INSIDE_COOLDOWN_SECONDS:
+                        event = "inside"
+
+                if event:
+                    distance_pct = float(location.get("distance_pct") or 0.0)
+                    await _send_demand_zone_push(
+                        symbol,
+                        zone,
+                        price,
+                        event,
+                        distance_pct,
+                        source_map.get(symbol, []),
+                    )
+                    sent_at = datetime.now(timezone.utc).isoformat()
+                    if event == "near":
+                        entry["near_sent"] = True
+                        entry["near_sent_at"] = sent_at
+                    else:
+                        entry["inside_sent_at"] = sent_at
+                    demand_zone_alert_last_alert = {
+                        "symbol": symbol,
+                        "event": event,
+                        "price": price,
+                        "zone_bottom": zone.get("bottom"),
+                        "zone_top": zone.get("top"),
+                        "distance_pct": distance_pct,
+                        "sources": source_map.get(symbol, []),
+                        "sent_at": sent_at,
+                    }
+                    print(
+                        f"[demand-zone-alert] sent symbol={symbol} event={event} "
+                        f"price={price:.4f} zone={float(zone.get('bottom') or 0):.4f}-"
+                        f"{float(zone.get('top') or 0):.4f}",
+                        flush=True,
+                    )
+
+                if entry.get("state") != current_state:
+                    entry["state"] = current_state
+                    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    state_changed = True
+                entry["symbol"] = symbol
+                entry["zone_id"] = zone.get("id")
+                entry["zone_bottom"] = zone.get("bottom")
+                entry["zone_top"] = zone.get("top")
+                demand_zone_alert_runtime_state[key] = entry
+                if event:
+                    state_changed = True
+
+            # Bound persisted state to currently cached zones plus recently used
+            # records, preventing this file from growing indefinitely.
+            if len(demand_zone_alert_runtime_state) > 1000:
+                ordered = sorted(
+                    demand_zone_alert_runtime_state.items(),
+                    key=lambda item: str((item[1] or {}).get("updated_at") or ""),
+                    reverse=True,
+                )[:600]
+                demand_zone_alert_runtime_state = dict(ordered)
+                state_changed = True
+
+            if state_changed:
+                _save_demand_zone_alert_state()
+
+            demand_zone_alert_last_check = datetime.now(timezone.utc)
+            demand_zone_alert_last_error = None
+        except asyncio.CancelledError:
+            print("[demand-zone-alert] cancelled", flush=True)
+            raise
+        except Exception as exc:
+            demand_zone_alert_last_error = str(exc)
+            print(f"[demand-zone-alert] error: {exc}", flush=True)
+            traceback.print_exc()
+
+        await asyncio.sleep(DEMAND_ZONE_ALERT_POLL_SECONDS)
+
+
+def start_demand_zone_alert_task_if_needed() -> None:
+    global demand_zone_alert_task
+    if demand_zone_alert_task and not demand_zone_alert_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        demand_zone_alert_task = loop.create_task(run_demand_zone_alert_loop())
+        return
+    except RuntimeError:
+        pass
+
+    loop = BACKGROUND_EVENT_LOOP
+    if loop is not None and loop.is_running():
+        def _start_on_loop() -> None:
+            global demand_zone_alert_task
+            if demand_zone_alert_task and not demand_zone_alert_task.done():
+                return
+            demand_zone_alert_task = loop.create_task(run_demand_zone_alert_loop())
+        loop.call_soon_threadsafe(_start_on_loop)
+
+
+async def stop_demand_zone_alert_task() -> None:
+    global demand_zone_alert_task
+    task = demand_zone_alert_task
+    demand_zone_alert_task = None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 def _current_et_session_label() -> str:
     now_et = datetime.now(ET)
     hhmm = now_et.hour * 100 + now_et.minute
@@ -2917,6 +3316,7 @@ async def on_startup() -> None:
             print(f"[startup] daily manual watchlist archive failed: {archive_exc}", flush=True)
         start_backend_alert_task_if_needed()
         start_scanner_task_if_needed()
+        start_demand_zone_alert_task_if_needed()
         start_alpaca_snapshot_task_if_needed()
         # Auto-trade execution moved to dedicated trading-autotrade.service.
         # Do not start an in-Gunicorn auto-trade loop here.
@@ -2927,6 +3327,7 @@ async def on_shutdown() -> None:
     if BACKGROUND_LOCK_HELD:
         await stop_backend_alert_task()
         await stop_scanner_task()
+        await stop_demand_zone_alert_task()
         await stop_alpaca_snapshot_task()
         # Dedicated auto-trade worker is stopped by systemd, not the web backend.
         release_background_worker_lock()
@@ -3147,6 +3548,23 @@ def health():
             "last_check": backend_alert_last_check.isoformat() if backend_alert_last_check else None,
             "last_error": backend_alert_last_error,
             "last_alert": backend_alert_last_alert,
+        },
+        "demand_zone_watch": {
+            "background_worker_lock_held": BACKGROUND_LOCK_HELD,
+            "enabled": DEMAND_ZONE_ALERT_ENABLED,
+            "running": bool(demand_zone_alert_task and not demand_zone_alert_task.done()),
+            "timeframe": "5m",
+            "near_pct": DEMAND_ZONE_ALERT_NEAR_PCT,
+            "poll_seconds": DEMAND_ZONE_ALERT_POLL_SECONDS,
+            "zone_refresh_seconds": DEMAND_ZONE_ALERT_ZONE_REFRESH_SECONDS,
+            "watch_sources": ["manual", "scanner"],
+            "watched_count": len(demand_zone_alert_last_symbols),
+            "watched_symbols": demand_zone_alert_last_symbols,
+            "active_zone_count": sum(len(rows) for rows in demand_zone_alert_zone_cache.values()),
+            "last_check": demand_zone_alert_last_check.isoformat() if demand_zone_alert_last_check else None,
+            "last_zone_refresh": demand_zone_alert_last_zone_refresh.isoformat() if demand_zone_alert_last_zone_refresh else None,
+            "last_error": demand_zone_alert_last_error,
+            "last_alert": demand_zone_alert_last_alert,
         },
         "background_scanner": {
             "background_worker_lock_held": BACKGROUND_LOCK_HELD,

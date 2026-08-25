@@ -970,6 +970,67 @@ class AlpacaMarketService:
         price = trade.get("p")
         return _safe_float(price) if price is not None else None
 
+    async def get_bulk_latest_trades(
+        self,
+        symbols: List[str],
+        *,
+        chunk_size: int = 250,
+        concurrency: int = 4,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return latest trades for many watchlist symbols efficiently.
+
+        Demand-zone alerts poll price much more often than zones are rebuilt.
+        Using Alpaca's multi-symbol latest-trades endpoint keeps that polling to
+        a few batched requests instead of one request per symbol.
+        """
+        clean_symbols: List[str] = []
+        seen = set()
+        for raw in symbols or []:
+            symbol = str(raw or "").upper().strip()
+            if symbol and symbol not in seen:
+                seen.add(symbol)
+                clean_symbols.append(symbol)
+
+        if not clean_symbols:
+            return {}
+
+        safe_chunk = max(25, min(int(chunk_size or 250), 500))
+        safe_concurrency = max(1, min(int(concurrency or 4), 8))
+        semaphore = asyncio.Semaphore(safe_concurrency)
+        output: Dict[str, Dict[str, Any]] = {}
+        feed = self._latest_stock_feed()
+
+        async def load_chunk(chunk: List[str]) -> None:
+            async with semaphore:
+                data = await self._get(
+                    "/v2/stocks/trades/latest",
+                    params={
+                        "symbols": ",".join(chunk),
+                        "feed": feed,
+                    },
+                )
+                trades = data.get("trades") or {}
+                if not isinstance(trades, dict):
+                    return
+                for raw_symbol, raw_trade in trades.items():
+                    if not isinstance(raw_trade, dict):
+                        continue
+                    price = _safe_float(raw_trade.get("p"))
+                    symbol = str(raw_symbol or "").upper().strip()
+                    if symbol and price > 0:
+                        output[symbol] = {
+                            "price": price,
+                            "time": _timestamp_ms(raw_trade.get("t")),
+                            "feed": feed,
+                        }
+
+        chunks = [
+            clean_symbols[index:index + safe_chunk]
+            for index in range(0, len(clean_symbols), safe_chunk)
+        ]
+        await asyncio.gather(*(load_chunk(chunk) for chunk in chunks))
+        return output
+
     async def get_latest_quote(self, symbol: str) -> Dict[str, Any]:
         symbol = symbol.upper().strip()
         if not symbol:
