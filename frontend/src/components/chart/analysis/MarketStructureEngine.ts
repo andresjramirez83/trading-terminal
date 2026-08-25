@@ -214,6 +214,15 @@ type StructureConfirmationProfile = {
   timeframeSeconds: number;
   minimumBarsAfterExtreme: number;
   atrRetracementMultiplier: number;
+
+  /**
+   * A continuation can confirm the prior pending swing without waiting for a
+   * deep reversal when price first forms a real pullback and then CLOSES
+   * through that pending swing's wick. This preserves separate HH/HL and
+   * LL/LH legs on 5m/15m+ charts instead of merging several pushes together.
+   */
+  minimumContinuationPullbackBars: number;
+  continuationPullbackAtrMultiplier: number;
 };
 
 function timeToEpochSeconds(time: CleanBar["time"]): number | undefined {
@@ -289,6 +298,8 @@ function getStructureConfirmationProfile(
       timeframeSeconds,
       minimumBarsAfterExtreme: 3,
       atrRetracementMultiplier: 0.65,
+      minimumContinuationPullbackBars: 2,
+      continuationPullbackAtrMultiplier: 0.50,
     };
   }
 
@@ -297,6 +308,8 @@ function getStructureConfirmationProfile(
       timeframeSeconds,
       minimumBarsAfterExtreme: 2,
       atrRetracementMultiplier: 0.55,
+      minimumContinuationPullbackBars: 1,
+      continuationPullbackAtrMultiplier: 0.35,
     };
   }
 
@@ -305,6 +318,8 @@ function getStructureConfirmationProfile(
       timeframeSeconds,
       minimumBarsAfterExtreme: 2,
       atrRetracementMultiplier: 0.45,
+      minimumContinuationPullbackBars: 1,
+      continuationPullbackAtrMultiplier: 0.20,
     };
   }
 
@@ -312,6 +327,8 @@ function getStructureConfirmationProfile(
     timeframeSeconds,
     minimumBarsAfterExtreme: 1,
     atrRetracementMultiplier: 0.40,
+    minimumContinuationPullbackBars: 1,
+    continuationPullbackAtrMultiplier: 0.18,
   };
 }
 
@@ -328,6 +345,63 @@ function meaningfulReversalDistance(
    * floor prevents extremely quiet symbols from confirming one-tick noise.
    */
   return Math.max(atr * atrMultiplier, price * 0.001);
+}
+
+/**
+ * Returns true when a pending swing has produced a genuine continuation leg:
+ *
+ * Bullish: pending HH -> pullback -> candle CLOSES above that pending HH wick.
+ * Bearish: pending LL -> rally    -> candle CLOSES below that pending LL wick.
+ *
+ * This is deliberately stricter than merely making a new wick. A close through
+ * the prior pending extreme is the confirmation that the intervening pullback
+ * was a real HL/LH. The ATR pullback floor prevents every candle in a straight
+ * expansion from becoming its own structure leg.
+ */
+function hasConfirmedContinuationReset(
+  bars: CleanBar[],
+  extreme: StructureLevel,
+  currentIndex: number,
+  direction: "bullish" | "bearish",
+  profile: StructureConfirmationProfile,
+): boolean {
+  const pullbackStart = extreme.index + 1;
+  const pullbackEnd = currentIndex - 1;
+
+  if (pullbackEnd < pullbackStart) return false;
+
+  const pullbackBars = pullbackEnd - pullbackStart + 1;
+  if (pullbackBars < profile.minimumContinuationPullbackBars) return false;
+
+  const current = bars[currentIndex];
+  if (!isFiniteBar(current)) return false;
+
+  const atr = averageTrueRange(bars, extreme.index, 14);
+  if (!(atr > 0)) return false;
+
+  const priceFloor = Math.max(
+    Math.abs(bars[extreme.index]?.close ?? extreme.price) * 0.001,
+    0.000001,
+  );
+  const requiredPullback = Math.max(
+    atr * profile.continuationPullbackAtrMultiplier,
+    priceFloor,
+  );
+
+  if (direction === "bullish") {
+    // The next HH is valid only after price actually closes through the prior
+    // pending HH wick. The HL is then the lowest wick in between.
+    if (current.close <= extreme.price) return false;
+
+    const pullbackLow = findLowestLow(bars, pullbackStart, pullbackEnd);
+    return extreme.price - pullbackLow.price >= requiredPullback;
+  }
+
+  // Mirror rule for bearish continuation.
+  if (current.close >= extreme.price) return false;
+
+  const pullbackHigh = findHighestHigh(bars, pullbackStart, pullbackEnd);
+  return pullbackHigh.price - extreme.price >= requiredPullback;
 }
 
 function isConsolidatingAfterExtreme(
@@ -719,6 +793,51 @@ function tryFinalizeBullishBreak(
   const pending = state.pendingBullishBreak;
   if (!pending) return;
 
+  const profile = getStructureConfirmationProfile(bars);
+
+  /**
+   * Continuation-leg confirmation.
+   *
+   * The old engine waited for a deep ATR/body reversal before finalizing a
+   * pending HH. On 15-minute charts a valid HL can be only one candle deep,
+   * and price can then close through the pending HH before that deeper reversal
+   * ever occurs. In that case several obvious HH/HL legs were merged into one.
+   *
+   * Look only through the PREVIOUS candle for the pending extreme. If price has
+   * formed a meaningful pullback and the current candle closes above that wick,
+   * finalize the prior HH now. The main processing loop will immediately arm
+   * the current candle as the next bullish break and record the intervening HL.
+   */
+  if (currentIndex > pending.confirmationIndex) {
+    const priorHighestWick = findHighestHigh(
+      bars,
+      pending.confirmationIndex,
+      currentIndex - 1,
+    );
+
+    if (
+      hasConfirmedContinuationReset(
+        bars,
+        priorHighestWick,
+        currentIndex,
+        "bullish",
+        profile,
+      )
+    ) {
+      addPoint(state, {
+        type: "HH",
+        index: priorHighestWick.index,
+        price: priorHighestWick.price,
+        confirmationIndex: pending.confirmationIndex,
+        breakType: pending.breakType,
+      });
+
+      state.confirmedHigh = priorHighestWick;
+      state.pendingBullishBreak = null;
+      return;
+    }
+  }
+
   const highestWick = findHighestHigh(
     bars,
     pending.confirmationIndex,
@@ -734,7 +853,6 @@ function tryFinalizeBullishBreak(
    * - 15-minute and higher data react faster because candles already compress
    *   much of the lower-timeframe noise.
    */
-  const profile = getStructureConfirmationProfile(bars);
   const barsAfterExtreme = currentIndex - highestWick.index;
 
   if (barsAfterExtreme < profile.minimumBarsAfterExtreme) return;
@@ -802,6 +920,41 @@ function tryFinalizeBearishBreak(
   const pending = state.pendingBearishBreak;
   if (!pending) return;
 
+  const profile = getStructureConfirmationProfile(bars);
+
+  /** Mirror the bullish continuation-reset rule. A rally followed by a close
+   * below the pending LL confirms the prior LL and preserves the LH in between.
+   */
+  if (currentIndex > pending.confirmationIndex) {
+    const priorLowestWick = findLowestLow(
+      bars,
+      pending.confirmationIndex,
+      currentIndex - 1,
+    );
+
+    if (
+      hasConfirmedContinuationReset(
+        bars,
+        priorLowestWick,
+        currentIndex,
+        "bearish",
+        profile,
+      )
+    ) {
+      addPoint(state, {
+        type: "LL",
+        index: priorLowestWick.index,
+        price: priorLowestWick.price,
+        confirmationIndex: pending.confirmationIndex,
+        breakType: pending.breakType,
+      });
+
+      state.confirmedLow = priorLowestWick;
+      state.pendingBearishBreak = null;
+      return;
+    }
+  }
+
   const lowestWick = findLowestLow(
     bars,
     pending.confirmationIndex,
@@ -812,7 +965,6 @@ function tryFinalizeBearishBreak(
    * Bearish leg confirmation uses the same timeframe-aware profile as the
    * bullish side.
    */
-  const profile = getStructureConfirmationProfile(bars);
   const barsAfterExtreme = currentIndex - lowestWick.index;
 
   if (barsAfterExtreme < profile.minimumBarsAfterExtreme) return;
@@ -1127,8 +1279,9 @@ function calculateStrength(state: StructureState): number {
  * - The wick still anchors the final HH price.
  * - The new HH is not automatically the confirming candle.
  * - The engine keeps following the leg and uses the highest subsequent wick.
- * - The HH is finalized only after price meaningfully reverses from the
- *   highest wick using an ATR-adjusted leg-confirmation threshold.
+ * - The HH is finalized after a meaningful reversal/consolidation, OR when a
+ *   real pullback forms and price subsequently CLOSES above that pending HH
+ *   wick. The second path preserves intermediate continuation legs.
  * - A bullish continuation close above the previous HH confirms one HL.
  * - That HL is the lowest wick between the previous HH and the new breakout.
  * - No intermediate pullback is labeled before the previous HH is taken out.
@@ -1140,8 +1293,8 @@ function calculateStrength(state: StructureState): number {
  * - A break is armed when a candle CLOSES below the body low of the previous
  *   LL candle. The wick still anchors the final LL price.
  * - The engine keeps following the leg and uses the lowest subsequent wick.
- * - The LL is finalized only after price meaningfully reverses from the
- *   lowest wick using the same ATR-adjusted leg-confirmation threshold.
+ * - The LL is finalized after a meaningful reversal/consolidation, OR when a
+ *   real rally forms and price subsequently CLOSES below that pending LL wick.
  * - A bearish continuation close below the previous LL confirms one LH.
  * - That LH is the highest wick between the previous LL and the new breakdown.
  * - No intermediate rally is labeled before the previous LL is taken out.
