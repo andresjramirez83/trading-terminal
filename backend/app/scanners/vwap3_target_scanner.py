@@ -17,6 +17,7 @@ import requests
 from app.scanners.base import ScannerBase
 from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
+from app.services.moomoo_level2_service import moomoo_level2_service
 
 ET = ZoneInfo("America/New_York")
 PT = ZoneInfo("America/Los_Angeles")
@@ -1483,6 +1484,37 @@ class VWAP3TargetScanner(ScannerBase):
                 str(row.get("freeze_time") or ""),
             )
         )
+
+        # Research-only Level 2 collector. Keep a small ranked subset of active
+        # 3-VWAP setups subscribed in OpenD so the AI Coach has order-book
+        # history around future entries. This does NOT change scanner scores or
+        # AutoTrade decisions. Reference counting inside the L2 service allows a
+        # symbol to be viewed in the browser at the same time.
+        level2_research_meta: Dict[str, Any] = {
+            "enabled": bool(moomoo_level2_service.research_enabled),
+            "active": [],
+            "errors": {},
+        }
+        if moomoo_level2_service.research_enabled:
+            research_symbols = [
+                str(row.get("symbol") or "").upper().strip()
+                for row in active_rows
+                if _safe_float(row.get("current_score", row.get("score", 0))) > 0
+                and str(row.get("symbol") or "").strip()
+            ][: moomoo_level2_service.research_max_symbols]
+            try:
+                level2_research_meta = await asyncio.to_thread(
+                    moomoo_level2_service.sync_research_symbols,
+                    research_symbols,
+                )
+                level2_research_meta["enabled"] = True
+            except Exception as exc:
+                level2_research_meta = {
+                    "enabled": True,
+                    "active": [],
+                    "errors": {"collector": str(exc)},
+                }
+
         rows = active_rows[:max_rows]
         elapsed_ms = round((time_module.perf_counter() - started) * 1000.0, 1)
 
@@ -1524,6 +1556,7 @@ class VWAP3TargetScanner(ScannerBase):
                     and os.getenv("PUSHOVER_APP_TOKEN", "").strip()
                 ),
                 "scan_errors": scan_errors[:10],
+                "level2_research": level2_research_meta,
                 "elapsed_ms": elapsed_ms,
                 "display_timezone": "America/Los_Angeles",
                 "strategy": {

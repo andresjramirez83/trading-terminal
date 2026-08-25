@@ -57,8 +57,9 @@ export default function TradeJournalWidget({
         Closed trades are automatically checked against the 3-VWAP scanner. The
         coach compares your entry and exit with the frozen target and scanner
         invalidation, then reconstructs EMA/VWAP trend, 1m/5m structure,
-        liquidity, demand/FVG context, and the price path after entry. Coach
-        timestamps display in Pacific Time.
+        liquidity, demand/FVG context, recorded Level 2 breakout behavior, and
+        the price path after entry. Level 2 is research-only and does not change
+        AutoTrade decisions. Coach timestamps display in Pacific Time.
       </div>
 
       {personalSummary && personalSummary.scannerMatchedTrades > 0 ? (
@@ -245,6 +246,17 @@ function yesNo(value: boolean | null | undefined): string {
   return value ? "Yes" : "No";
 }
 
+function score100(value: number | null | undefined): string {
+  return Number.isFinite(value) ? `${Number(value).toFixed(0)}/100` : "—";
+}
+
+function secondsFromEntry(value: number | null | undefined): string {
+  if (!Number.isFinite(value)) return "—";
+  const seconds = Number(value);
+  if (Math.abs(seconds) < 0.5) return "At entry";
+  return `${seconds > 0 ? "+" : ""}${seconds.toFixed(0)}s`;
+}
+
 function CoachSection({
   title,
   children,
@@ -266,6 +278,7 @@ function CoachReview({ review }: { review: Vwap3TradeCoachReview }) {
   const structure1m = review.structure_context?.["1m"];
   const structure5m = review.structure_context?.["5m"];
   const liquidity = review.liquidity_context;
+  const level2 = review.level2_context;
   const demand = review.demand_context?.zone;
   const sweep = liquidity?.latest_sweep;
   const path5 = review.entry_path?.["5m"];
@@ -424,6 +437,50 @@ function CoachReview({ review }: { review: Vwap3TradeCoachReview }) {
                 <Meta label="Sweep Time" value={coachTime(sweep.time)} />
               ) : null}
             </div>
+          </CoachSection>
+
+          <CoachSection title="Level 2 Breakout Behavior · Research">
+            {level2?.available ? (
+              <>
+                <div style={styles.coachMetrics}>
+                  <Meta label="At Entry" value={`${score100(level2.score_at_entry)} · ${level2.state_at_entry || "—"}`} />
+                  <Meta label="Best Pre-Entry" value={score100(level2.pre_entry_max_score)} />
+                  <Meta label="Best Post-Entry" value={score100(level2.post_entry_max_score)} />
+                  <Meta label="Peak" value={`${score100(level2.peak_score)} · ${secondsFromEntry(level2.peak_seconds_from_entry)}`} />
+                  <Meta label="First Strong" value={secondsFromEntry(level2.first_strong_seconds_from_entry)} />
+                  <Meta label="Breakout Pressure" value={secondsFromEntry(level2.first_breakout_seconds_from_entry)} />
+                  <Meta label="Book Pressure" value={level2.book_pressure_at_entry != null ? `${level2.book_pressure_at_entry > 0 ? "+" : ""}${level2.book_pressure_at_entry.toFixed(1)}` : "—"} />
+                  <Meta label="Top-5 Imbalance" value={level2.top5_imbalance_at_entry != null ? `${level2.top5_imbalance_at_entry.toFixed(2)}x` : "—"} />
+                  <Meta label="Bid Stacking" value={pct(level2.bid_stacking_pct_at_entry)} />
+                  <Meta label="Ask Pulling" value={pct(level2.ask_pulling_pct_at_entry)} />
+                  <Meta label="Ask Absorption" value={score100(level2.ask_absorption_score_at_entry)} />
+                  <Meta label="Aggressive Tape" value={pct(level2.trade_pressure_5s_at_entry)} />
+                  <Meta label="Thin Upside Path" value={yesNo(level2.upside_path_thin_at_entry)} />
+                  <Meta label="Samples" value={String(level2.sample_count || 0)} />
+                </div>
+                {level2.summary ? (
+                  <div style={styles.coachSectionEmpty}>{level2.summary}</div>
+                ) : null}
+                {level2.signals?.length ? (
+                  <ul style={styles.coachBullets}>
+                    {level2.signals.map((item) => (
+                      <li key={`l2-positive-${item}`}>L2: {item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {level2.cautions?.length ? (
+                  <ul style={styles.coachBullets}>
+                    {level2.cautions.map((item) => (
+                      <li key={`l2-caution-${item}`}>L2 caution: {item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            ) : (
+              <div style={styles.coachSectionEmpty}>
+                No Level 2 research history was recorded around this entry. New 3-VWAP candidates are collected automatically when the Moomoo research collector is active.
+              </div>
+            )}
           </CoachSection>
 
           <CoachSection title="Demand / FVG Context">

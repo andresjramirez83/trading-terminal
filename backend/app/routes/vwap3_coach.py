@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.market_data_provider import get_market_data_provider
+from app.services.moomoo_level2_service import moomoo_level2_service
 
 ET = ZoneInfo("America/New_York")
 PT = ZoneInfo("America/Los_Angeles")
@@ -264,7 +265,7 @@ def _median(values: Iterable[float]) -> Optional[float]:
     return round(float(statistics.median(clean)), 3) if clean else None
 
 
-REVIEW_VERSION = 2
+REVIEW_VERSION = 3
 DISPLAY_TIMEZONE = "America/Los_Angeles"
 
 
@@ -693,6 +694,7 @@ def _coach_guidance(
     liquidity: Dict[str, Any],
     demand: Dict[str, Any],
     planned_stop: float,
+    level2_context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[str], List[str]]:
     guidance: List[str] = []
     positives: List[str] = []
@@ -714,11 +716,51 @@ def _coach_guidance(
         guidance.append("The nearest demand zone was failed or already lost. Wait for price to reclaim the zone or for a new demand zone to form.")
     elif zone.get("entry_location") in {"inside", "above"}:
         positives.append("Entry had an identifiable 5-minute demand/FVG reference nearby.")
+
+    # Level 2 is research-only for now. The coach can describe whether order-flow
+    # confirmation existed at entry without changing the scanner or AutoTrade
+    # score. Historical L2 is available only when the research collector was
+    # subscribed to the symbol at the time of the trade.
+    if level2_context and level2_context.get("available"):
+        l2_entry = level2_context.get("score_at_entry")
+        l2_post = level2_context.get("post_entry_max_score")
+        l2_pre = level2_context.get("pre_entry_max_score")
+        if isinstance(l2_entry, (int, float)) and l2_entry >= 70:
+            positives.append(
+                f"Level 2 showed strong breakout pressure at entry ({l2_entry:.0f}/100)."
+            )
+        elif (
+            isinstance(l2_entry, (int, float))
+            and l2_entry < 50
+            and isinstance(l2_post, (int, float))
+            and l2_post >= 70
+        ):
+            delay = level2_context.get("first_strong_seconds_from_entry")
+            delay_text = (
+                f" about {float(delay):.0f}s later"
+                if isinstance(delay, (int, float)) and delay > 0
+                else " later"
+            )
+            guidance.append(
+                f"Level 2 breakout pressure was not confirmed at entry and strengthened{delay_text}; consider waiting for bid stacking/ask depletion to confirm the break."
+            )
+        elif (
+            isinstance(l2_pre, (int, float))
+            and l2_pre >= 70
+            and isinstance(l2_entry, (int, float))
+            and l2_entry < 50
+        ):
+            guidance.append(
+                "Level 2 pressure was strong before entry but faded by the actual entry; avoid chasing after the order-flow edge has already weakened."
+            )
+        if level2_context.get("upside_path_thin_at_entry") is True:
+            positives.append("Level 2 showed relatively thin overhead liquidity at entry.")
+
     if planned_stop > 0:
         positives.append("You defined risk with a planned stop; keep that discipline even when the setup quality is weak.")
     if not guidance:
         guidance.append("The entry had multiple confirmations. Keep using the same checklist and focus on executing the planned stop/target rather than reacting to noise.")
-    return guidance[:6], positives[:4]
+    return guidance[:7], positives[:5]
 
 
 class Vwap3TradeReviewRequest(BaseModel):
@@ -1072,6 +1114,17 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
     path_windows = _window_path_stats(bars_1m, entry_dt, payload.entry_price, payload.side)
     first_confirmation = _first_confirmation_after_entry(bars_1m, entry_dt)
 
+    # Pull the compact Level 2 research history captured by the scanner-facing
+    # Moomoo collector. This is post-trade context only and does not modify live
+    # scanner/AutoTrade decisions.
+    level2_context = await asyncio.to_thread(
+        moomoo_level2_service.summarize_recorded_breakout,
+        payload.symbol,
+        entry_dt.astimezone(timezone.utc).timestamp(),
+        30.0,
+        60.0,
+    )
+
     entry_quality = _entry_quality(payload.entry_price, matched, detected_dt, entry_dt)
     entry_score = int(entry_quality.get("score") or 0)
     score_reasons: List[str] = []
@@ -1110,6 +1163,7 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
         liquidity=liquidity,
         demand=demand,
         planned_stop=planned_stop,
+        level2_context=level2_context,
     )
 
     historical_rows = _study_rows(60)
@@ -1236,6 +1290,7 @@ async def review_vwap3_trade(payload: Vwap3TradeReviewRequest):
             "5m": structure_5m,
         },
         "liquidity_context": liquidity,
+        "level2_context": level2_context,
         "demand_context": demand,
         "entry_path": path_windows,
         "first_confirmation_after_entry": first_confirmation,

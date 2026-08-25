@@ -1508,6 +1508,32 @@ export type Vwap3CoachEntryPathWindow = {
   low?: number;
 };
 
+export type Vwap3CoachLevel2Context = {
+  available: boolean;
+  research_only?: boolean;
+  sample_count?: number;
+  window_before_seconds?: number;
+  window_after_seconds?: number;
+  score_at_entry?: number | null;
+  state_at_entry?: string;
+  pre_entry_max_score?: number | null;
+  post_entry_max_score?: number | null;
+  peak_score?: number | null;
+  peak_seconds_from_entry?: number | null;
+  first_strong_seconds_from_entry?: number | null;
+  first_breakout_seconds_from_entry?: number | null;
+  book_pressure_at_entry?: number | null;
+  top5_imbalance_at_entry?: number | null;
+  bid_stacking_pct_at_entry?: number | null;
+  ask_pulling_pct_at_entry?: number | null;
+  ask_absorption_score_at_entry?: number | null;
+  trade_pressure_5s_at_entry?: number | null;
+  upside_path_thin_at_entry?: boolean | null;
+  signals?: string[];
+  cautions?: string[];
+  summary?: string;
+};
+
 export type Vwap3TradeCoachReview = {
   review_version?: number;
   display_timezone?: string;
@@ -1552,6 +1578,7 @@ export type Vwap3TradeCoachReview = {
     "5m"?: Vwap3CoachStructureContext;
   };
   liquidity_context?: Vwap3CoachLiquidityContext;
+  level2_context?: Vwap3CoachLevel2Context;
   demand_context?: Vwap3CoachDemandContext;
   entry_path?: Record<string, Vwap3CoachEntryPathWindow>;
   first_confirmation_after_entry?: {

@@ -14,6 +14,43 @@ type Wall = {
   level: number;
 } | null;
 
+type BreakoutMetrics = {
+  bid_stacking_pct?: number;
+  bid_pulling_pct?: number;
+  ask_pulling_pct?: number;
+  ask_stacking_pct?: number;
+  top5_imbalance_momentum?: number;
+  top10_imbalance_momentum?: number;
+  book_pressure_change?: number;
+  aggressive_buy_volume_5s?: number;
+  aggressive_sell_volume_5s?: number;
+  trade_pressure_5s?: number;
+  ticker_prints_5s?: number;
+  ask_absorption_score?: number;
+  upside_liquidity_ratio?: number | null;
+  upside_path_thin?: boolean;
+  bid_wall_moved_up?: boolean;
+  ask_wall_moved_down?: boolean;
+  spread_pct?: number;
+};
+
+type BreakoutContext = {
+  score: number;
+  label: string;
+  ready: boolean;
+  confidence: number;
+  lookback_seconds: number;
+  history_span_seconds: number;
+  signals: string[];
+  cautions: string[];
+  metrics: BreakoutMetrics;
+  coach?: {
+    headline?: string;
+    summary?: string;
+    research_only?: boolean;
+  };
+};
+
 type Level2Snapshot = {
   type: "level2";
   provider: string;
@@ -46,7 +83,8 @@ type Level2Snapshot = {
     book_pressure: number;
     bid_wall: Wall;
     ask_wall: Wall;
-  };
+  } & BreakoutMetrics;
+  breakout?: BreakoutContext;
 };
 
 type ConnectionState = "connecting" | "connected" | "error" | "closed";
@@ -86,6 +124,11 @@ function formatRatio(value: number | null | undefined): string {
   return `${value.toFixed(2)}x`;
 }
 
+function formatSigned(value: number | null | undefined, suffix = ""): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}${suffix}`;
+}
+
 function pressureLabel(value: number): string {
   if (value >= 20) return "BULLISH";
   if (value <= -20) return "BEARISH";
@@ -98,11 +141,35 @@ function pressureColor(value: number): string {
   return "#cbd5e1";
 }
 
+function breakoutColor(score: number, ready: boolean): string {
+  if (!ready) return "#f59e0b";
+  if (score >= 70) return "#22c55e";
+  if (score >= 50) return "#84cc16";
+  if (score >= 30) return "#f59e0b";
+  return "#ef4444";
+}
+
 function Metric({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11 }}>
       <span style={{ color: "#94a3b8" }}>{label}</span>
       <span style={{ color: valueColor || "#e5e7eb", fontWeight: 800, textAlign: "right" }}>{value}</span>
+    </div>
+  );
+}
+
+function SignalList({ items, tone }: { items: string[]; tone: "positive" | "caution" }) {
+  if (!items.length) return null;
+  const color = tone === "positive" ? "#86efac" : "#fca5a5";
+  const marker = tone === "positive" ? "↑" : "!";
+  return (
+    <div style={{ display: "grid", gap: 4 }}>
+      {items.map((item) => (
+        <div key={item} style={{ display: "flex", gap: 6, color, fontSize: 10, lineHeight: 1.35 }}>
+          <span style={{ fontWeight: 900 }}>{marker}</span>
+          <span>{item}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -235,6 +302,11 @@ export default function Level2WorkspacePanel({ symbol }: { symbol: string }) {
 
   const connectionColor = connection === "connected" ? "#22c55e" : connection === "error" ? "#ef4444" : "#f59e0b";
   const pressure = snapshot?.analytics.book_pressure ?? 0;
+  const breakout = snapshot?.breakout;
+  const breakoutScore = breakout?.score ?? 0;
+  const breakoutReady = breakout?.ready ?? false;
+  const breakoutTone = breakoutColor(breakoutScore, breakoutReady);
+  const metrics = breakout?.metrics || {};
 
   return (
     <div style={{ display: "grid", gap: 10 }}>
@@ -266,6 +338,59 @@ export default function Level2WorkspacePanel({ symbol }: { symbol: string }) {
 
       {snapshot && (
         <>
+          {breakout && (
+            <div
+              style={{
+                border: `1px solid ${breakoutTone}55`,
+                borderRadius: 10,
+                background: `${breakoutTone}0d`,
+                padding: 10,
+                display: "grid",
+                gap: 8,
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                <div>
+                  <div style={{ color: "#f8fafc", fontSize: 11, fontWeight: 900 }}>BREAKOUT PRESSURE</div>
+                  <div style={{ color: "#64748b", fontSize: 9, marginTop: 2 }}>
+                    Dynamic Level 2 · ~{breakout.lookback_seconds.toFixed(0)}s lookback · research only
+                  </div>
+                </div>
+                <div style={{ color: breakoutTone, fontSize: 11, fontWeight: 900, textAlign: "right" }}>
+                  {breakout.label}<br />
+                  <span style={{ fontSize: 16 }}>{breakoutScore.toFixed(0)}/100</span>
+                </div>
+              </div>
+
+              <div style={{ height: 7, borderRadius: 999, background: "rgba(148,163,184,.14)", overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.max(2, breakoutScore)}%`, background: breakoutTone, transition: "width 140ms linear" }} />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5px 10px" }}>
+                <Metric label="Bid Stack" value={formatSigned(metrics.bid_stacking_pct, "%")} valueColor="#4ade80" />
+                <Metric label="Ask Pull" value={formatSigned(metrics.ask_pulling_pct, "%")} valueColor="#4ade80" />
+                <Metric label="Pressure Δ" value={formatSigned(metrics.book_pressure_change)} />
+                <Metric label="Top-5 Momentum" value={formatSigned(metrics.top5_imbalance_momentum, "x")} />
+                <Metric label="Agg Buy 5s" value={formatSize(metrics.aggressive_buy_volume_5s)} valueColor="#4ade80" />
+                <Metric label="Agg Sell 5s" value={formatSize(metrics.aggressive_sell_volume_5s)} valueColor="#f87171" />
+                <Metric label="Tape Pressure" value={formatSigned(metrics.trade_pressure_5s, "%")} />
+                <Metric label="Ask Absorption" value={metrics.ask_absorption_score == null ? "—" : `${metrics.ask_absorption_score.toFixed(0)}/100`} />
+                <Metric label="Bid Wall Rising" value={metrics.bid_wall_moved_up ? "YES" : "No"} valueColor={metrics.bid_wall_moved_up ? "#4ade80" : undefined} />
+                <Metric label="Upside Path" value={metrics.upside_path_thin ? "THIN" : "Normal"} valueColor={metrics.upside_path_thin ? "#4ade80" : undefined} />
+              </div>
+
+              <SignalList items={breakout.signals || []} tone="positive" />
+              <SignalList items={breakout.cautions || []} tone="caution" />
+
+              <div style={{ borderTop: "1px solid rgba(148,163,184,.12)", paddingTop: 7 }}>
+                <div style={{ color: "#93c5fd", fontSize: 9, fontWeight: 900, letterSpacing: 0.6 }}>AI COACH · L2 BREAKOUT</div>
+                <div style={{ color: "#cbd5e1", fontSize: 10, lineHeight: 1.45, marginTop: 4 }}>
+                  {breakout.coach?.summary || "Waiting for breakout behavior analysis."}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div
             style={{
               border: "1px solid rgba(148,163,184,.14)",

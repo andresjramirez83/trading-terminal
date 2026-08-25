@@ -9,7 +9,7 @@ import type { TradeHistoryEntry } from "../../components/chart/right-panel/works
 
 const STORAGE_KEY = "trading.vwap3Coach.reviews.v1";
 const UPDATE_EVENT = "vwap3-trade-coach-updated";
-const COACH_REVIEW_VERSION = 2;
+const COACH_REVIEW_VERSION = 3;
 
 export type Vwap3PersonalCoachSummary = {
   reviewedTrades: number;
