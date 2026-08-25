@@ -25,7 +25,7 @@ PT = ZoneInfo("America/Los_Angeles")
 STD_LENGTH = 20
 MULTIPLIER = 3.0
 MIN_BODY_PCT = 3.0
-MIN_RANGE_PCT = 4.0
+MIN_RANGE_PCT = 7.0
 MIN_VOLUME = 50_000.0
 MIN_CLOSE_LOCATION = 0.65
 A_PLUS_MAX_DISTANCE_PCT = 10.0
@@ -67,6 +67,21 @@ VWAP3_LOSERS_LIMIT = 50
 VWAP3_MAX_WATCH_SYMBOLS = 300
 VWAP3_SCAN_CONCURRENCY = 10
 VWAP3_PUSHOVER_MAX_DELAY_MINUTES = 10.0
+
+# Whole-market discovery sweep. The normal Alpaca gainers/actives lists are
+# useful for ranking, but a stock can produce its qualifying 5m displacement
+# before it becomes a Top-50 mover / Top-100 active. Once per completed 5m
+# bucket we inspect only the latest short-window bars across active tradable US
+# equities, then fetch the expensive 30-day VWAP/STD history only for symbols
+# whose fresh bar already passes the displacement filter.
+VWAP3_BROAD_DISCOVERY_ENABLED = os.getenv(
+    "VWAP3_BROAD_DISCOVERY_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+VWAP3_BROAD_UNIVERSE_LIMIT = max(500, int(os.getenv("VWAP3_BROAD_UNIVERSE_LIMIT", "12000") or "12000"))
+VWAP3_BROAD_BAR_CHUNK_SIZE = max(50, min(500, int(os.getenv("VWAP3_BROAD_BAR_CHUNK_SIZE", "250") or "250")))
+VWAP3_BROAD_BAR_CONCURRENCY = max(1, min(12, int(os.getenv("VWAP3_BROAD_BAR_CONCURRENCY", "6") or "6")))
+VWAP3_BROAD_LOOKBACK_MINUTES = max(10, int(os.getenv("VWAP3_BROAD_LOOKBACK_MINUTES", "15") or "15"))
+VWAP3_BROAD_MAX_CANDIDATES = max(10, int(os.getenv("VWAP3_BROAD_MAX_CANDIDATES", "150") or "150"))
 
 
 def _grade_base_score(grade: str) -> int:
@@ -191,8 +206,16 @@ async def _send_pushover_setup_alert(record: Dict[str, Any]) -> Optional[str]:
         print("[vwap3-pushover] skipped reason=not_configured", flush=True)
         return None
 
-    delay = _safe_float(record.get("detection_delay_minutes"))
-    if delay > VWAP3_PUSHOVER_MAX_DELAY_MINUTES:
+    raw_delay = record.get("detection_delay_minutes")
+    if raw_delay in (None, ""):
+        print(
+            f"[vwap3-pushover] {record.get('symbol')} skipped=unknown_detection_delay",
+            flush=True,
+        )
+        return None
+
+    delay = _safe_float(raw_delay)
+    if delay < 0 or delay > VWAP3_PUSHOVER_MAX_DELAY_MINUTES:
         print(
             f"[vwap3-pushover] {record.get('symbol')} skipped=stale delay_min={delay:.2f}",
             flush=True,
@@ -604,7 +627,8 @@ class VWAP3TargetScanner(ScannerBase):
         "Persistent hot-universe displacement scanner using continuous VWAP + 20-bar STD. "
         "The +3 STD target is frozen on the completed displacement candle and alerted immediately. "
         "The matching -3 STD level from that same candle is frozen as a downside reference/range, not an execution stop. "
-        "Watches saved AH runners plus live gainers/actives/losers and pins symbols after displacement. "
+        "Uses a fresh whole-market 5m displacement sweep plus saved AH runners and live gainers/actives/losers, then pins symbols after displacement. "
+        "Normal A+/A setups require at least a 7% 5m candle range (body >=3%, volume >=50k, close in the upper 35%). "
         "A+ is 1-10% with target-distance score penalties below 5%; sub-1% targets are rejected. A is 10-15%; validated premarket Runner classes are tracked separately."
     )
 
@@ -612,6 +636,8 @@ class VWAP3TargetScanner(ScannerBase):
         self._tracked: Dict[str, Dict[str, Any]] = {}
         self._watch_pool: Dict[str, Dict[str, Any]] = {}
         self._bars_cache: Dict[str, Tuple[int, List[Dict[str, Any]]]] = {}
+        self._broad_discovery_bucket: Optional[int] = None
+        self._broad_discovery_rows: List[Dict[str, Any]] = []
         self._load_state()
 
     def _load_state(self) -> None:
@@ -809,11 +835,149 @@ class VWAP3TargetScanner(ScannerBase):
                 return str(rows[idx].get("dt_et") or "")
         return None
 
+    async def _discover_recent_displacements(
+        self,
+        market: MarketDataProvider,
+        now_et: datetime,
+        *,
+        min_price: float,
+        max_price: float,
+    ) -> List[Dict[str, Any]]:
+        """Discover fresh displacement bars before a symbol reaches mover lists.
+
+        This sweep runs once per newly completed 5-minute bucket. It uses a
+        short multi-symbol bar request across the active tradable equity
+        universe and returns only symbols whose recent completed bar already
+        passes the VWAP3 displacement gate. Full 30-day history is loaded later
+        only for those few candidates.
+        """
+        if not VWAP3_BROAD_DISCOVERY_ENABLED:
+            return []
+
+        session = _session_for_now(now_et)
+        if session is None:
+            return []
+        _, session_start, session_end = session
+
+        # Bucket by the most recently completed 5m candle, not the currently
+        # forming one. 01:00-01:05 PT therefore becomes discoverable just after
+        # 01:05 PT and is not re-swept every 45-second scanner cycle.
+        completed_bucket = int((now_et.timestamp() - 1) // 300) - 1
+        if self._broad_discovery_bucket == completed_bucket:
+            return [dict(row) for row in self._broad_discovery_rows]
+
+        asset_loader = getattr(market, "get_ticker_universe", None)
+        bulk_loader = getattr(market, "get_bulk_bars", None)
+        if not callable(asset_loader) or not callable(bulk_loader):
+            self._broad_discovery_bucket = completed_bucket
+            self._broad_discovery_rows = []
+            return []
+
+        try:
+            assets = await asset_loader(limit=VWAP3_BROAD_UNIVERSE_LIMIT)
+            symbols: List[str] = []
+            seen = set()
+            for asset in assets or []:
+                if not isinstance(asset, dict):
+                    continue
+                symbol = str(asset.get("symbol") or asset.get("ticker") or "").upper().strip()
+                if not symbol or symbol in seen:
+                    continue
+                seen.add(symbol)
+                symbols.append(symbol)
+
+            if not symbols:
+                self._broad_discovery_bucket = completed_bucket
+                self._broad_discovery_rows = []
+                return []
+
+            now_utc = now_et.astimezone(timezone.utc)
+            bars_by_symbol = await bulk_loader(
+                symbols,
+                timeframe="5Min",
+                start=now_utc - timedelta(minutes=VWAP3_BROAD_LOOKBACK_MINUTES),
+                end=now_utc,
+                feed=getattr(market, "feed", None),
+                adjustment="all",
+                chunk_size=VWAP3_BROAD_BAR_CHUNK_SIZE,
+                concurrency=VWAP3_BROAD_BAR_CONCURRENCY,
+            )
+
+            trade_date = now_et.date().isoformat()
+            candidates: List[Dict[str, Any]] = []
+            for symbol, raw_rows in (bars_by_symbol or {}).items():
+                rows = _completed_rows(raw_rows or [], now_et)
+                for row in reversed(rows):
+                    if str(row.get("trade_date") or "") != trade_date:
+                        continue
+                    hhmm = int(row.get("hhmm") or -1)
+                    if not (session_start <= hhmm < session_end):
+                        continue
+
+                    try:
+                        bar_dt = datetime.fromisoformat(str(row.get("dt_et") or "")).astimezone(ET)
+                        completed_at = bar_dt + timedelta(minutes=5)
+                        delay_min = max(0.0, (now_et - completed_at).total_seconds() / 60.0)
+                    except Exception:
+                        continue
+
+                    # Keep enough lookback to survive one missed background cycle,
+                    # but never backfill a phone alert hours after the actual setup.
+                    if delay_min > VWAP3_PUSHOVER_MAX_DELAY_MINUTES:
+                        break
+
+                    close = _safe_float(row.get("close"))
+                    if close < min_price or (max_price > 0 and close > max_price):
+                        continue
+                    if not _qualifies_displacement(row):
+                        continue
+
+                    candidates.append(
+                        {
+                            "symbol": str(symbol).upper(),
+                            "ticker": str(symbol).upper(),
+                            "price": close,
+                            "lastTrade": {"p": close},
+                            "volume": int(_safe_float(row.get("volume"))),
+                            "broad_displacement_time": row.get("dt_et"),
+                            "broad_detection_delay_minutes": round(delay_min, 2),
+                        }
+                    )
+                    break
+
+            candidates.sort(
+                key=lambda row: (
+                    _safe_float(row.get("volume")),
+                    _safe_float(row.get("price")),
+                ),
+                reverse=True,
+            )
+            candidates = candidates[:VWAP3_BROAD_MAX_CANDIDATES]
+            self._broad_discovery_bucket = completed_bucket
+            self._broad_discovery_rows = [dict(row) for row in candidates]
+            if candidates:
+                print(
+                    f"[vwap3-broad-discovery] candidates={len(candidates)} "
+                    f"universe={len(symbols)} pt={now_et.astimezone(PT).strftime('%H:%M:%S')}",
+                    flush=True,
+                )
+            return [dict(row) for row in candidates]
+        except Exception as exc:
+            # Do not suppress the legacy mover-list path if the broad sweep has
+            # a transient Alpaca error. Retry on the next scanner cycle.
+            print(f"[vwap3-broad-discovery] failed: {exc}", flush=True)
+            self._broad_discovery_bucket = None
+            self._broad_discovery_rows = []
+            return []
+
     async def _build_watch_universe(
         self,
         market: MarketDataProvider,
         snapshot_store: ScannerSnapshotStore,
         now_et: datetime,
+        *,
+        min_price: float,
+        max_price: float,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[str, List[str]]]:
         async def safe_call(name: str, limit: int) -> List[Dict[str, Any]]:
             fn = getattr(market, name, None)
@@ -826,7 +990,13 @@ class VWAP3TargetScanner(ScannerBase):
                 print(f"[vwap3-universe] {name} failed: {exc}", flush=True)
                 return []
 
-        gainers, actives, losers = await asyncio.gather(
+        broad_displacements, gainers, actives, losers = await asyncio.gather(
+            self._discover_recent_displacements(
+                market,
+                now_et,
+                min_price=min_price,
+                max_price=max_price,
+            ),
             safe_call("get_snapshot_gainers", VWAP3_GAINERS_LIMIT),
             safe_call("get_snapshot_actives", VWAP3_ACTIVES_LIMIT),
             safe_call("get_snapshot_losers", VWAP3_LOSERS_LIMIT),
@@ -857,7 +1027,12 @@ class VWAP3TargetScanner(ScannerBase):
                     if value not in (None, ""):
                         merged[symbol][key] = value
 
-        # The prior evening AH snapshot is the critical early-discovery source.
+        # Fresh broad-discovery candidates go first so a new displacement cannot
+        # be pushed out by the 300-symbol cap before it is pinned/tracked.
+        for row in broad_displacements:
+            add(self._row_symbol(row), "broad_5m_displacement", row)
+
+        # The prior evening AH snapshot remains an important early-discovery source.
         try:
             ah_snapshot = snapshot_store.load_latest_snapshot("overnight_runner", "ah")
             for row in (ah_snapshot or {}).get("rows") or []:
@@ -1247,10 +1422,16 @@ class VWAP3TargetScanner(ScannerBase):
         started = time_module.perf_counter()
         now_et = datetime.now(ET)
         now_pt = now_et.astimezone(PT)
+        min_price = float(kwargs.get("min_price", 0.5) or 0.5)
+        max_price = float(kwargs.get("max_price", 20.0) or 20.0)
         self._cleanup_state(now_et)
 
         watch_items, rank_map, source_map = await self._build_watch_universe(
-            market, snapshot_store, now_et
+            market,
+            snapshot_store,
+            now_et,
+            min_price=min_price,
+            max_price=max_price,
         )
 
         session = _session_for_now(now_et)
@@ -1564,6 +1745,10 @@ class VWAP3TargetScanner(ScannerBase):
                     "std_length": STD_LENGTH,
                     "multiplier": MULTIPLIER,
                     "vwap_mode": "continuous",
+                    "min_displacement_body_pct": MIN_BODY_PCT,
+                    "min_displacement_range_pct": MIN_RANGE_PCT,
+                    "min_displacement_volume": int(MIN_VOLUME),
+                    "min_close_location": MIN_CLOSE_LOCATION,
                     "warmup_calendar_days": WARMUP_CALENDAR_DAYS,
                     "target_freeze_mode": "displacement_candle",
                     "target_freeze_rule": "continuous VWAP + 3 x 20-bar STD on completed displacement candle",
@@ -1602,9 +1787,15 @@ class VWAP3TargetScanner(ScannerBase):
                     "invalidation": "later 5m low touches/breaks displacement low; actionable score becomes 0",
                 },
                 "discovery": (
-                    "saved AH + live gainers + live actives + live losers + "
-                    "pinned displacement symbols + tracked setups"
+                    "whole-market fresh 5m displacement sweep + saved AH + live gainers + "
+                    "live actives + live losers + pinned displacement symbols + tracked setups"
                 ),
+                "broad_discovery": {
+                    "enabled": VWAP3_BROAD_DISCOVERY_ENABLED,
+                    "universe_limit": VWAP3_BROAD_UNIVERSE_LIMIT,
+                    "latest_candidate_count": len(self._broad_discovery_rows),
+                    "max_alert_delay_minutes": VWAP3_PUSHOVER_MAX_DELAY_MINUTES,
+                },
                 "ranking_source": "Alpaca gainers Top-50 for context only; rank is not a discovery gate",
             },
         }

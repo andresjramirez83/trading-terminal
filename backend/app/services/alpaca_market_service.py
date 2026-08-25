@@ -114,6 +114,7 @@ class AlpacaMarketService:
 
     _shared_client: Optional[httpx.AsyncClient] = None
     _bars_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+    _asset_universe_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
     _cache_max_items = 384
 
     def __init__(self) -> None:
@@ -1159,6 +1160,137 @@ class AlpacaMarketService:
             )
 
         return out
+
+    async def get_ticker_universe(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        """Return a cached list of active tradable US equities.
+
+        The VWAP +3 scanner uses this only for a lightweight whole-market
+        displacement discovery sweep. The expensive 30-day history fetch is
+        still performed only for symbols whose latest completed 5-minute bar
+        actually meets the displacement filter.
+        """
+        now = time.time()
+        expires_at, cached_rows = self._asset_universe_cache
+        safe_limit = max(1, min(int(limit or 10000), 20000))
+        if expires_at > now and cached_rows:
+            return [dict(row) for row in cached_rows[:safe_limit]]
+
+        trading_base_url = os.getenv(
+            "ALPACA_LIVE_BASE_URL",
+            "https://api.alpaca.markets",
+        ).rstrip("/")
+
+        response = await self._client(self.timeout).get(
+            f"{trading_base_url}/v2/assets",
+            params={"status": "active", "asset_class": "us_equity"},
+            headers=self.headers,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Alpaca assets HTTP {response.status_code}: {response.text[:500]}"
+            )
+
+        payload = response.json()
+        rows: List[Dict[str, Any]] = []
+        if isinstance(payload, list):
+            for raw in payload:
+                if not isinstance(raw, dict):
+                    continue
+                symbol = str(raw.get("symbol") or "").upper().strip()
+                if not symbol:
+                    continue
+                if str(raw.get("status") or "active").lower() != "active":
+                    continue
+                if raw.get("tradable") is False:
+                    continue
+                rows.append(dict(raw))
+
+        ttl_seconds = max(900.0, float(os.getenv("ALPACA_ASSET_UNIVERSE_TTL_SECONDS", "21600") or "21600"))
+        self.__class__._asset_universe_cache = (now + ttl_seconds, [dict(row) for row in rows])
+        return [dict(row) for row in rows[:safe_limit]]
+
+    async def get_bulk_bars(
+        self,
+        symbols: List[str],
+        *,
+        timeframe: str = "5Min",
+        start: datetime,
+        end: datetime,
+        feed: Optional[str] = None,
+        adjustment: str = "all",
+        chunk_size: int = 250,
+        concurrency: int = 6,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch a short historical window for many symbols efficiently.
+
+        Alpaca's multi-symbol bars endpoint is used in bounded chunks. Returned
+        bars use the same normalized shape as the rest of the market service.
+        """
+        clean_symbols: List[str] = []
+        seen = set()
+        for raw in symbols or []:
+            symbol = str(raw or "").upper().strip()
+            if symbol and symbol not in seen:
+                seen.add(symbol)
+                clean_symbols.append(symbol)
+
+        if not clean_symbols:
+            return {}
+
+        safe_chunk = max(25, min(int(chunk_size or 250), 500))
+        safe_concurrency = max(1, min(int(concurrency or 6), 12))
+        semaphore = asyncio.Semaphore(safe_concurrency)
+        output: Dict[str, List[Dict[str, Any]]] = {}
+
+        async def load_chunk(chunk: List[str]) -> None:
+            async with semaphore:
+                page_token: Optional[str] = None
+                page_count = 0
+                while True:
+                    params: Dict[str, Any] = {
+                        "symbols": ",".join(chunk),
+                        "timeframe": timeframe,
+                        "start": _iso_utc(start),
+                        "end": _iso_utc(end),
+                        "limit": 10000,
+                        "adjustment": adjustment,
+                        "feed": feed or self.feed,
+                        "sort": "asc",
+                    }
+                    if page_token:
+                        params["page_token"] = page_token
+
+                    data = await self._get("/v2/stocks/bars", params=params)
+                    bars_by_symbol = data.get("bars") or {}
+                    if isinstance(bars_by_symbol, dict):
+                        for symbol, raw_bars in bars_by_symbol.items():
+                            normalized_rows = output.setdefault(str(symbol).upper(), [])
+                            for raw_bar in raw_bars or []:
+                                if not isinstance(raw_bar, dict):
+                                    continue
+                                row = self._normalize_bar(raw_bar)
+                                if row is not None:
+                                    normalized_rows.append(row)
+
+                    next_token = data.get("next_page_token")
+                    if not next_token:
+                        break
+                    page_token = str(next_token)
+                    page_count += 1
+                    if page_count >= 20:
+                        break
+
+        chunks = [
+            clean_symbols[index:index + safe_chunk]
+            for index in range(0, len(clean_symbols), safe_chunk)
+        ]
+        await asyncio.gather(*(load_chunk(chunk) for chunk in chunks))
+
+        for symbol, rows in list(output.items()):
+            deduped = {int(row.get("time") or 0): row for row in rows if int(row.get("time") or 0) > 0}
+            output[symbol] = [deduped[key] for key in sorted(deduped)]
+
+        return output
 
     async def get_ticker_details(self, symbol: str) -> Dict[str, Any]:
         """Return tradable asset metadata using Alpaca's Trading API asset route.

@@ -1431,6 +1431,8 @@ export default function ScannerPanel({
         <div style={panelStyle}>
           <div style={{ fontWeight: 800, marginBottom: 8 }}>VWAP +3 Target Rules</div>
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 13 }}>
+            <span><strong>Displacement</strong> = 5m range ≥7%, body ≥3%, volume ≥50K, close in upper 35%</span>
+            <span><strong>Alert</strong> = first scan after the completed 5m candle; stale detections over 10 min are not pushed</span>
             <span><strong>A+</strong> = frozen target 1-10% from freeze close</span>
             <span><strong>A+ Prime</strong> = 5-10% (full score)</span>
             <span><strong>3-5%</strong> = -6 score</span>
