@@ -26,10 +26,8 @@ type FairValueGapDirection = "bullish" | "bearish";
 type FairValueGap = {
   direction: FairValueGapDirection;
   startTime: Time;
-  endTime: Time | null;
   top: number;
   bottom: number;
-  filled: boolean;
 };
 
 function buildFairValueGaps(
@@ -56,28 +54,31 @@ function buildFairValueGaps(
       continue;
     }
 
-    let endTime: Time | null = null;
+    // An FVG is valid only while price has never returned to its price range.
+    // Any wick/body overlap with the zone after the confirming third candle is
+    // a retest, so the gap is removed completely from the chart. Boundary
+    // touches count as retests as well.
+    let retested = false;
     for (let futureIndex = index + 1; futureIndex < bars.length; futureIndex += 1) {
       const future = bars[futureIndex];
-      const fullyFilled =
+      const touchesGap =
         direction === "bullish"
-          ? future.low <= bottom
-          : future.high >= top;
-      if (fullyFilled) {
-        endTime = future.time;
+          ? future.low <= top
+          : future.high >= bottom;
+      if (touchesGap) {
+        retested = true;
         break;
       }
     }
+    if (retested) continue;
 
     gaps.push({
       direction,
       // Start at the imbalance/displacement candle so the box visually begins
       // where the FVG was created, while the third candle confirms it.
       startTime: displacement.time,
-      endTime,
       top,
       bottom,
-      filled: endTime != null,
     });
   }
 
@@ -97,14 +98,10 @@ function createFvgElement(
   const height = Math.max(2, bottomY - topY);
   const border = bullish ? "#22c55e" : "#ef4444";
   const fill = bullish
-    ? gap.filled
-      ? "rgba(34, 197, 94, 0.055)"
-      : "rgba(34, 197, 94, 0.11)"
-    : gap.filled
-      ? "rgba(239, 68, 68, 0.05)"
-      : "rgba(239, 68, 68, 0.10)";
+    ? "rgba(34, 197, 94, 0.11)"
+    : "rgba(239, 68, 68, 0.10)";
 
-  element.title = `${bullish ? "Bullish" : "Bearish"} FVG ${gap.bottom.toFixed(4)} - ${gap.top.toFixed(4)}${gap.filled ? " | filled" : " | open"}`;
+  element.title = `${bullish ? "Bullish" : "Bearish"} FVG ${gap.bottom.toFixed(4)} - ${gap.top.toFixed(4)} | untested`;
   element.style.position = "absolute";
   element.style.left = `${left}px`;
   element.style.top = `${topY}px`;
@@ -112,8 +109,8 @@ function createFvgElement(
   element.style.height = `${height}px`;
   element.style.boxSizing = "border-box";
   element.style.background = fill;
-  element.style.borderTop = `1px ${gap.filled ? "dashed" : "solid"} ${border}`;
-  element.style.borderBottom = `1px ${gap.filled ? "dashed" : "solid"} ${border}`;
+  element.style.borderTop = `1px solid ${border}`;
+  element.style.borderBottom = `1px solid ${border}`;
   element.style.pointerEvents = "none";
 
   const badge = document.createElement("span");
@@ -612,10 +609,9 @@ export class StudyRenderer {
     if (zoneEndX != null && Number.isFinite(zoneEndX)) {
       for (const gap of [...this.bullishFvgs, ...this.bearishFvgs]) {
         const startX = timeScale.timeToCoordinate(gap.startTime as Time);
-        const endX =
-          gap.endTime != null
-            ? timeScale.timeToCoordinate(gap.endTime as Time)
-            : zoneEndX;
+        // Retested gaps are filtered out during detection, so every rendered
+        // gap is still valid and extends through the current chart edge.
+        const endX = zoneEndX;
         const topY = this.series.priceToCoordinate(gap.top);
         const bottomY = this.series.priceToCoordinate(gap.bottom);
 
