@@ -693,7 +693,10 @@ export class PositionOverlayManager {
     const firstY = this.priceSeries.priceToCoordinate(first);
     const secondY = this.priceSeries.priceToCoordinate(second);
     if (firstY == null || secondY == null) {
-      shade.style.display = "none";
+      // Lightweight Charts can briefly return null while its price scale is
+      // recalculating during a live order drag/replacement. Hiding the shade
+      // here makes the entire risk/reward setup flash off and then back on.
+      // Keep the last valid geometry until coordinates are available again.
       return;
     }
 
@@ -775,7 +778,8 @@ export class PositionOverlayManager {
 
     const y = this.priceSeries.priceToCoordinate(price);
     if (y == null) {
-      control.style.display = "none";
+      // Preserve the last valid control position across a transient chart-scale
+      // recalculation instead of making the stop/target control blink away.
       return;
     }
 
@@ -851,7 +855,8 @@ export class PositionOverlayManager {
 
     const y = this.priceSeries.priceToCoordinate(this.snapshot.entry);
     if (y == null) {
-      controls.style.display = "none";
+      // Keep the working-order controls at their last valid coordinate while
+      // Lightweight Charts refreshes the scale during a drag/replace cycle.
       return;
     }
 
