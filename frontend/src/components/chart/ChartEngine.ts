@@ -8,6 +8,7 @@ import {
   HistogramSeries,
   LineSeries,
   LineStyle,
+  TickMarkType,
   type CandlestickData,
   type HistogramData,
   type IChartApi,
@@ -81,9 +82,20 @@ function volumeColor(bar: CleanBar): string {
 
 const PACIFIC_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/Los_Angeles",
-  hour: "2-digit",
+  hour: "numeric",
   minute: "2-digit",
-  hour12: false,
+  hour12: true,
+});
+
+const PACIFIC_AXIS_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
+  month: "short",
+  day: "numeric",
+});
+
+const PACIFIC_AXIS_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
+  year: "numeric",
 });
 
 function chartTimeToTimestampMs(time: Time): number | null {
@@ -106,6 +118,26 @@ function formatPacificChartTime(time: Time): string {
   if (timestamp == null) return "";
 
   return PACIFIC_TIME_FORMATTER.format(new Date(timestamp));
+}
+
+function formatPacificTimeScaleTick(time: Time, tickMarkType: TickMarkType): string {
+  const timestamp = chartTimeToTimestampMs(time);
+  if (timestamp == null) return "";
+
+  const date = new Date(timestamp);
+
+  if (tickMarkType === TickMarkType.Year) {
+    return PACIFIC_AXIS_YEAR_FORMATTER.format(date);
+  }
+
+  if (
+    tickMarkType === TickMarkType.Month ||
+    tickMarkType === TickMarkType.DayOfMonth
+  ) {
+    return PACIFIC_AXIS_DATE_FORMATTER.format(date);
+  }
+
+  return PACIFIC_TIME_FORMATTER.format(date);
 }
 
 const NEW_YORK_TIME_PARTS_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -403,7 +435,8 @@ export class ChartEngine {
         secondsVisible: false,
         rightOffset: 12,
         barSpacing: 8,
-        tickMarkFormatter: (time: Time) => formatPacificChartTime(time),
+        tickMarkFormatter: (time: Time, tickMarkType: TickMarkType) =>
+          formatPacificTimeScaleTick(time, tickMarkType),
       },
     });
 
