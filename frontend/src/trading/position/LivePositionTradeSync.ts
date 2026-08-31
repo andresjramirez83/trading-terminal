@@ -16,6 +16,7 @@ import {
   getSharedPositionProtectionEngine,
   type PositionProtectionState,
 } from "./PositionProtectionEngine";
+import { resolvePositionLevelIntent } from "./PositionLevelIntentStore";
 
 function cleanSymbol(value: unknown): string {
   return String(value ?? "")
@@ -373,10 +374,19 @@ export class LivePositionTradeSync {
   ): void {
     const nextEntry = positiveNumber(livePosition.entry) ?? trade.entry;
     const nextShares = Math.max(0, safeNumber(livePosition.shares));
-    const nextStop =
-      positiveNumber(protection.stopPrice) ?? trade.stop;
+    const resolvedStop = resolvePositionLevelIntent(
+      livePosition.symbol,
+      "stop",
+      protection.stopPrice,
+    );
+    const resolvedTarget = resolvePositionLevelIntent(
+      livePosition.symbol,
+      "target",
+      protection.targetPrice,
+    );
+    const nextStop = positiveNumber(resolvedStop) ?? trade.stop;
     const nextTarget =
-      positiveNumber(protection.targetPrice) ??
+      positiveNumber(resolvedTarget) ??
       positiveNumber(getPrimaryTarget(trade));
 
     const protectionOrderIds = uniqueIds([

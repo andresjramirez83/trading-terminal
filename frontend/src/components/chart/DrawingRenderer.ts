@@ -181,18 +181,21 @@ export class DrawingRenderer {
 
     this.removeLine(drawing.id);
     this.removeHandles(drawing.id);
-    // SVG-backed drawings must replace their previous DOM elements on every
-    // render. Without this, each redraw leaves an older rectangle underneath
-    // the new one; deleting the drawing then removes only the newest copy and
-    // leaves a visible ghost on the chart.
-    this.removeBox(drawing.id);
 
     if (drawing.type === "rectangle" || drawing.type === "priceRange") {
+      // Rectangle/price-range drawing behavior is unchanged: replace the old
+      // SVG immediately on a normal redraw.
+      this.removeBox(drawing.id);
       this.renderBox(drawing, selectedDrawingId);
       return;
     }
 
     if (drawing.type === "longPosition") {
+      // Long Position drawings are linked to live trade updates. Do NOT remove
+      // the currently visible setup until renderLongPosition() has resolved all
+      // replacement coordinates. Broker/order refreshes can briefly make a
+      // chart coordinate unavailable; clearing first causes the setup to blink
+      // off and only reappear on a later redraw.
       this.renderLongPosition(drawing, selectedDrawingId);
     }
   }
@@ -642,8 +645,14 @@ export class DrawingRenderer {
       stopY == null ||
       targetY == null
     ) {
+      // A live stop/target replacement can cause Lightweight Charts to report
+      // a transient null coordinate while its scales are updating. Keep the
+      // currently displayed setup rather than clearing it and waiting for the
+      // next broker/chart refresh to make it reappear.
       return;
     }
+
+    this.removeBox(drawing.id);
 
     const left = Math.min(entryX, stopX, targetX);
     const right = Math.max(entryX, stopX, targetX);

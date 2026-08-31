@@ -9,6 +9,11 @@ import type { TradeExecutionSnapshot } from "../services/execution/TradeExecutio
 import { calculateQuickOrderEstimate } from "../../components/chart/right-panel/workspaces/trading/OrderCalculator";
 import { getSharedPositionProtectionEngine } from "../position/PositionProtectionEngine";
 import {
+  getPositionLevelIntent,
+  setPositionLevelIntent,
+  subscribePositionLevelIntents,
+} from "../position/PositionLevelIntentStore";
+import {
   convertPositionToExtendedProtection,
   fetchAutoTradeStatus,
   requestOvernightProtectedPositionAction,
@@ -435,6 +440,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   const [positionDraft, setPositionDraft] = useState<CurrentPositionState>(() =>
     emptyPosition(safeSymbol),
   );
+  const [positionLevelIntentRevision, setPositionLevelIntentRevision] =
+    useState(0);
 
   const [autoTradeStatus, setAutoTradeStatus] =
     useState<AutoTradeStatus | null>(null);
@@ -518,6 +525,12 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       unsubscribe();
     };
   }, [executionService]);
+
+  useEffect(() =>
+    subscribePositionLevelIntents(() => {
+      setPositionLevelIntentRevision((revision) => revision + 1);
+    }),
+  []);
 
   useEffect(() => {
     let active = true;
@@ -673,31 +686,48 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
   ]);
 
   const currentPosition = useMemo<CurrentPositionState>(() => {
+    // Chart drags are broker replacement operations. Alpaca can briefly publish
+    // the old child-leg price while the replacement is propagating, so the
+    // most recently accepted chart level wins during that short window.
+    // Reading the revision makes this memo react immediately to a chart move.
+    void positionLevelIntentRevision;
+    const intendedStop = getPositionLevelIntent(safeSymbol, "stop");
+    const intendedTarget = getPositionLevelIntent(safeSymbol, "target");
+
+    const applyLevelIntent = (
+      position: CurrentPositionState,
+    ): CurrentPositionState => ({
+      ...position,
+      stop: intendedStop ?? position.stop,
+      target: intendedTarget ?? position.target,
+    });
+
     if (livePosition.shares > 0 && positionProtection) {
-      return positionProtection.position;
+      return applyLevelIntent(positionProtection.position);
     }
 
     if (livePosition.shares > 0) {
-      return {
+      return applyLevelIntent({
         ...livePosition,
         stop: autoManagedOrder?.position.stop ?? positionDraft.stop,
         target: autoManagedOrder?.position.target ?? positionDraft.target,
-      };
+      });
     }
 
     if (workingManagedOrder) {
-      return workingManagedOrder.position;
+      return applyLevelIntent(workingManagedOrder.position);
     }
 
-    return {
+    return applyLevelIntent({
       ...positionDraft,
       symbol: safeSymbol,
-    };
+    });
   }, [
     autoManagedOrder?.position.stop,
     autoManagedOrder?.position.target,
     livePosition,
     positionDraft,
+    positionLevelIntentRevision,
     positionProtection,
     safeSymbol,
     workingManagedOrder,
@@ -830,6 +860,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
           return;
         }
 
+        setPositionLevelIntent(safeSymbol, level, price);
+
         const selected = tradeEngine.getSelectedTrade();
         const activeTrade =
           selected &&
@@ -949,6 +981,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         );
         setAutoTradeStatus(nextStatus);
         setPositionDraft((current) => ({ ...current, stop: nextStop }));
+        setPositionLevelIntent(safeSymbol, "stop", nextStop);
         executionService.queueRefresh();
         return;
       }
@@ -974,6 +1007,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       }
 
       setPositionDraft((current) => ({ ...current, stop: nextStop }));
+      setPositionLevelIntent(safeSymbol, "stop", nextStop);
       const selected = tradeEngine.getSelectedTrade();
       if (
         selected &&

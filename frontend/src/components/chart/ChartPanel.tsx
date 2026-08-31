@@ -47,6 +47,7 @@ import { getSharedTradeEngine } from "../../trading/engine/TradeEngineRuntime";
 import { TradeController } from "../../trading/controller/TradeController";
 import { getSharedExecutionGateway } from "../../trading/execution/ExecutionGateway";
 import { getSharedPositionProtectionEngine } from "../../trading/position/PositionProtectionEngine";
+import { setPositionLevelIntent } from "../../trading/position/PositionLevelIntentStore";
 import {
   PositionOverlayManager,
   type PositionOverlayCommit,
@@ -773,6 +774,13 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
             // One event-driven reconciliation keeps worker/broker state caught
             // up after a drag without increasing normal background polling.
+            if (change.level === "stop" || change.level === "target") {
+              setPositionLevelIntent(
+                change.symbol,
+                change.level,
+                change.price,
+              );
+            }
             void refreshProtectedOrderStateRef.current?.();
             return true;
           } catch (error) {
@@ -875,6 +883,11 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             }
           }
 
+          setPositionLevelIntent(
+            change.symbol,
+            change.level as "stop" | "target",
+            change.price,
+          );
           executionService.queueRefresh();
           return true;
         }
@@ -1039,6 +1052,13 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           }
         }
 
+        if (change.level === "stop" || change.level === "target") {
+          setPositionLevelIntent(
+            change.symbol,
+            change.level,
+            change.price,
+          );
+        }
         executionService.queueRefresh();
         return true;
       },

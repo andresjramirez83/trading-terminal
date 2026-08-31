@@ -665,13 +665,8 @@ export default function CurrentPositionWidget({
           type="button"
           style={{ ...styles.flattenButton, ...disabledStyle(controlsDisabled) }}
           disabled={controlsDisabled}
-          onClick={() => {
-            const confirmed = window.confirm(
-              "Flatten ALL live positions in this Alpaca account? This affects every symbol, not only the chart symbol.",
-            );
-            if (!confirmed) return;
-            void onFlattenAllPositions?.();
-          }}
+          onClick={() => void onFlattenAllPositions?.()}
+          title="Immediately flatten all live Alpaca positions."
         >
           Flatten All
         </button>
