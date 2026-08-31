@@ -79,6 +79,7 @@ const LOCAL_STOP_COLOR = "#f59e0b";
 const LIVE_TARGET_COLOR = "#22c55e";
 const LOCAL_TARGET_COLOR = "#eab308";
 const DRAG_COLOR = "#f8fafc";
+const BRACKET_REPLACEMENT_HOLD_MS = 10_000;
 
 function safePrice(value: unknown): number {
   const price = Number(value);
@@ -159,6 +160,11 @@ export class PositionOverlayManager {
   private activeDrag: ActiveDrag | null = null;
   private committing = false;
   private pendingPrices: Partial<Record<DraggablePositionOverlayLevel, PendingPrice>> = {};
+  // Alpaca replaces bracket legs rather than mutating them in place. During
+  // that handoff snapshots can temporarily contain the parent entry with one
+  // or both child prices missing. Keep the last complete overlay authoritative
+  // until the replacement settles instead of tearing the risk/reward setup down.
+  private transientBracketHoldUntil = 0;
 
   private snapshot: PositionOverlaySnapshot = {
     symbol: "",
@@ -229,15 +235,22 @@ export class PositionOverlayManager {
       next[this.activeDrag.level] = this.activeDrag.previewPrice;
     }
 
-    this.snapshot = next;
-
     if (!next.hasPosition) {
+      // If the actual position disappears, honor that immediately. The broker
+      // replacement race only drops child stop/target legs; it should not make
+      // an existing filled position itself disappear.
+      this.snapshot = next;
       this.cancelDrag();
       this.clear();
       this.snapshot = next;
       return;
     }
 
+    // A live position can remain present while Alpaca briefly drops one of the
+    // replacement child legs from openOrders. Preserve the last complete level
+    // set during that broker handoff.
+    this.mergeTransientBracketSnapshot(next);
+    this.snapshot = next;
     this.render();
   }
 
@@ -256,6 +269,14 @@ export class PositionOverlayManager {
     targetCanDrag?: boolean;
   } | null): void {
     if (!order || safePrice(order.entry) <= 0) {
+      // A bracket parent itself can disappear for a snapshot while Alpaca swaps
+      // a child leg. Never clear a complete visible setup during that known
+      // replacement window.
+      if (this.isTransientBracketHoldActive() && this.snapshot.hasPosition) {
+        this.render();
+        return;
+      }
+
       this.update(null);
       return;
     }
@@ -287,6 +308,7 @@ export class PositionOverlayManager {
       next[this.activeDrag.level] = this.activeDrag.previewPrice;
     }
 
+    this.mergeTransientBracketSnapshot(next);
     this.snapshot = next;
     this.render();
   }
@@ -410,6 +432,12 @@ export class PositionOverlayManager {
       price,
       expiresAt: Date.now() + 30_000,
     };
+    if (level === "stop" || level === "target") {
+      this.transientBracketHoldUntil = Math.max(
+        this.transientBracketHoldUntil,
+        Date.now() + BRACKET_REPLACEMENT_HOLD_MS,
+      );
+    }
     this.restorePrice(level, price);
     this.render();
 
@@ -419,6 +447,7 @@ export class PositionOverlayManager {
 
       if (!accepted) {
         delete this.pendingPrices[level];
+        this.releaseTransientBracketHoldIfIdle();
         this.restorePrice(level, drag.originalPrice);
       } else {
         // Keep the optimistic price pinned while Alpaca/AutoTrade finish
@@ -427,12 +456,19 @@ export class PositionOverlayManager {
           price,
           expiresAt: Date.now() + 30_000,
         };
+        if (level === "stop" || level === "target") {
+          this.transientBracketHoldUntil = Math.max(
+            this.transientBracketHoldUntil,
+            Date.now() + BRACKET_REPLACEMENT_HOLD_MS,
+          );
+        }
         this.restorePrice(level, price);
       }
       return accepted;
     } catch (error) {
       console.error("[PositionOverlayManager] drag commit failed", error);
       delete this.pendingPrices[level];
+      this.releaseTransientBracketHoldIfIdle();
       this.restorePrice(level, drag.originalPrice);
       return false;
     } finally {
@@ -455,6 +491,16 @@ export class PositionOverlayManager {
     this.entryLine = this.removeLine(this.entryLine);
     this.stopLine = this.removeLine(this.stopLine);
     this.targetLine = this.removeLine(this.targetLine);
+    this.pendingPrices = {};
+    this.transientBracketHoldUntil = 0;
+    this.snapshot = {
+      ...this.snapshot,
+      hasPosition: false,
+      entryCanDrag: false,
+      entryCanCancel: false,
+      stopCanDrag: false,
+      targetCanDrag: false,
+    };
     this.hideShades();
   }
 
@@ -515,6 +561,70 @@ export class PositionOverlayManager {
         delete this.pendingPrices[level];
       }
     }
+  }
+
+  private hasActivePendingPrice(): boolean {
+    const now = Date.now();
+    let active = false;
+
+    for (const level of ["entry", "stop", "target"] as const) {
+      const pending = this.pendingPrices[level];
+      if (!pending) continue;
+
+      if (now >= pending.expiresAt) {
+        delete this.pendingPrices[level];
+      } else {
+        active = true;
+      }
+    }
+
+    return active;
+  }
+
+  private isTransientBracketHoldActive(): boolean {
+    return Date.now() < this.transientBracketHoldUntil;
+  }
+
+  private releaseTransientBracketHoldIfIdle(): void {
+    if (!this.hasActivePendingPrice()) {
+      this.transientBracketHoldUntil = 0;
+    }
+  }
+
+  private mergeTransientBracketSnapshot(
+    next: PositionOverlaySnapshot,
+  ): void {
+    if (!this.isTransientBracketHoldActive()) return;
+    if (!this.snapshot.hasPosition) return;
+
+    const currentSymbol = cleanSymbol(this.snapshot.symbol);
+    const nextSymbol = cleanSymbol(next.symbol);
+    if (currentSymbol && nextSymbol && currentSymbol !== nextSymbol) return;
+
+    // The entry parent generally survives a child replacement, but preserve it
+    // too if one transient normalized snapshot omits it.
+    if (next.entry <= 0 && this.snapshot.entry > 0) {
+      next.entry = this.snapshot.entry;
+      next.entryIsLive = this.snapshot.entryIsLive;
+      next.entryOrderId = this.snapshot.entryOrderId;
+      next.entryCanDrag = this.snapshot.entryCanDrag;
+      next.entryCanCancel = this.snapshot.entryCanCancel;
+    }
+
+    if (next.stop <= 0 && this.snapshot.stop > 0) {
+      next.stop = this.snapshot.stop;
+      next.stopIsLive = this.snapshot.stopIsLive;
+      next.stopOrderId = this.snapshot.stopOrderId;
+      next.stopCanDrag = this.snapshot.stopCanDrag;
+    }
+
+    if (next.target <= 0 && this.snapshot.target > 0) {
+      next.target = this.snapshot.target;
+      next.targetIsLive = this.snapshot.targetIsLive;
+      next.targetOrderId = this.snapshot.targetOrderId;
+      next.targetCanDrag = this.snapshot.targetCanDrag;
+    }
+
   }
 
   private render(): void {

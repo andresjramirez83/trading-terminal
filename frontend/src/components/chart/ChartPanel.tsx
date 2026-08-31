@@ -978,7 +978,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           // handoff a bracket child can briefly appear as a standalone top-level
           // order. Keep the existing bracket overlay pinned so that child can
           // never be mistaken for the working entry line.
-          bracketLevelTransitionUntilRef.current = Date.now() + 8_000;
+          bracketLevelTransitionUntilRef.current = Date.now() + 10_000;
         }
 
         const updatedOrder = await executionService.modifyOrder(
@@ -1541,6 +1541,19 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       const workingTarget = Number(
         targetLeg?.limit_price ?? workingOrder?.targetPrice ?? 0,
       );
+
+      if (
+        workingOrder &&
+        Date.now() < bracketLevelTransitionUntilRef.current &&
+        (workingStop <= 0 || workingTarget <= 0)
+      ) {
+        // Alpaca can keep the bracket parent visible while temporarily omitting
+        // one or both child legs during PATCH replacement. Feeding that partial
+        // parent to the overlay turns the missing levels into zero and tears down
+        // the green/red risk-reward setup. Keep the optimistic complete overlay
+        // until both replacement legs are published again.
+        return;
+      }
 
       positionOverlayRef.current?.updateWorkingOrder(
         workingOrder
