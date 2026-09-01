@@ -4,6 +4,7 @@ export type RightPanelWorkspace =
   | "watchlists"
   | "scanner"
   | "news"
+  | "coach"
   | "level2";
 
 export type ReadinessStatus = "bullish" | "neutral" | "bearish";

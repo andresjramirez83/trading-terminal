@@ -20,6 +20,9 @@ const ScannerWorkspacePanel = lazy(
 const NewsWorkspacePanel = lazy(
   () => import("./right-panel/workspaces/NewsWorkspacePanel"),
 );
+const CoachWorkspacePanel = lazy(
+  () => import("./right-panel/workspaces/CoachWorkspacePanel"),
+);
 const Level2WorkspacePanel = lazy(
   () => import("./right-panel/workspaces/Level2WorkspacePanel"),
 );
@@ -42,6 +45,7 @@ const WORKSPACES: { id: RightPanelWorkspace; label: string }[] = [
   { id: "chart", label: "Chart" },
   { id: "scanner", label: "Scanner" },
   { id: "news", label: "News" },
+  { id: "coach", label: "Coach" },
   { id: "level2", label: "Level 2" },
 ];
 
@@ -139,6 +143,7 @@ export default function RightInfoPanel({
             alignItems: "center",
             gap: 9,
             height: 34,
+            minWidth: 0,
           }}
         >
           <button
@@ -161,33 +166,48 @@ export default function RightInfoPanel({
             ›
           </button>
 
-          {WORKSPACES.map((item) => {
-            const active = workspace === item.id;
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              height: 34,
+              flex: 1,
+              minWidth: 0,
+              overflowX: "auto",
+              overflowY: "hidden",
+              scrollbarWidth: "none",
+            }}
+          >
+            {WORKSPACES.map((item) => {
+              const active = workspace === item.id;
 
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setWorkspace(item.id)}
-                style={{
-                  height: 34,
-                  padding: "0 0 7px",
-                  border: "none",
-                  borderBottom: active
-                    ? "2px solid #2563eb"
-                    : "2px solid transparent",
-                  background: "transparent",
-                  color: active ? "#ffffff" : "#cbd5e1",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 800,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {item.label}
-              </button>
-            );
-          })}
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setWorkspace(item.id)}
+                  style={{
+                    height: 34,
+                    padding: "0 0 7px",
+                    border: "none",
+                    borderBottom: active
+                      ? "2px solid #2563eb"
+                      : "2px solid transparent",
+                    background: "transparent",
+                    color: active ? "#ffffff" : "#cbd5e1",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    fontWeight: 800,
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
+                  }}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -218,6 +238,8 @@ export default function RightInfoPanel({
           {workspace === "scanner" && <ScannerWorkspacePanel />}
 
           {workspace === "news" && <NewsWorkspacePanel symbol={symbol} />}
+
+          {workspace === "coach" && <CoachWorkspacePanel symbol={symbol} />}
 
           {workspace === "level2" && <Level2WorkspacePanel symbol={symbol} />}
         </Suspense>

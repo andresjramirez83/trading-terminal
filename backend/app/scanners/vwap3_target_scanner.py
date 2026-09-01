@@ -15,6 +15,10 @@ from zoneinfo import ZoneInfo
 import requests
 
 from app.scanners.base import ScannerBase
+from app.scanners.vwap3_contextual_invalidation import (
+    evaluate_contextual_invalidation,
+    flatten_context_fields,
+)
 from app.services.market_data_provider import MarketDataProvider
 from app.services.scanner_snapshot_store import ScannerSnapshotStore
 from app.services.moomoo_level2_service import moomoo_level2_service
@@ -459,6 +463,7 @@ def _freeze_target_on_displacement(
         "std": float(deviation),
     }
 
+
 def _first_index_at_or_after(rows: List[Dict[str, Any]], iso_time: str) -> Optional[int]:
     try:
         target_ms = int(datetime.fromisoformat(iso_time).timestamp() * 1000)
@@ -592,6 +597,31 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
         except Exception:
             outcome = "active"
 
+    # Shadow/research-only context. The official VWAP3 invalidation, live score,
+    # AutoTrade eligibility, and broker behavior remain unchanged.
+    contextual_invalidation = evaluate_contextual_invalidation(
+        rows,
+        record,
+        freeze_idx,
+        invalidation_time,
+        target_hit_time=target_hit_time,
+    )
+    contextual_fields = flatten_context_fields(contextual_invalidation)
+
+    contextual_notes = [
+        str(note)
+        for note in (record.get("notes") or [])
+        if not str(note).startswith("Context shadow:")
+    ]
+    if invalidation_time:
+        verdict = str(contextual_invalidation.get("verdict") or "MECHANICAL_INVALIDATION").replace("_", " ")
+        support_score = int(contextual_invalidation.get("support_score") or 0)
+        reason = str(contextual_invalidation.get("reason") or "").strip()
+        context_note = f"Context shadow: {verdict} {support_score}/100"
+        if reason:
+            context_note += f" — {reason}"
+        contextual_notes.append(context_note)
+
     record.update(
         {
             "confirmation_status": status,
@@ -601,6 +631,9 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
             "target_hit_time": target_hit_time,
             "invalidation_time": invalidation_time,
             "outcome": outcome,
+            "contextual_invalidation": contextual_invalidation,
+            **contextual_fields,
+            "notes": contextual_notes,
             "confirmed": bool(confirmation_time),
             "strong_confirmed": bool(strong_confirmation_time),
             "target_hit": bool(target_hit_time),
@@ -1785,6 +1818,10 @@ class VWAP3TargetScanner(ScannerBase):
                     "confirmation": "5m close above displacement close/body",
                     "strong_confirmation": "5m close above displacement high/wick",
                     "invalidation": "later 5m low touches/breaks displacement low; actionable score becomes 0",
+                    "contextual_invalidation": (
+                        "shadow only: pre-existing bullish FVG/imbalance + demand + "
+                        "liquidity sweep/reclaim + 5m support acceptance; does not override live invalidation"
+                    ),
                 },
                 "discovery": (
                     "whole-market fresh 5m displacement sweep + saved AH + live gainers + "

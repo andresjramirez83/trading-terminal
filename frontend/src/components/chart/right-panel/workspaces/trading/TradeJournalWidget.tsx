@@ -10,6 +10,7 @@ type TradeJournalWidgetProps = {
   coachReviews?: Record<string, Vwap3TradeCoachReview>;
   coachStudy?: Vwap3StudyResponse | null;
   personalSummary?: Vwap3PersonalCoachSummary;
+  showCoach?: boolean;
 };
 
 function money(value: number): string {
@@ -39,6 +40,7 @@ export default function TradeJournalWidget({
   coachReviews = {},
   coachStudy = null,
   personalSummary,
+  showCoach = false,
 }: TradeJournalWidgetProps) {
   const bestPullback = coachStudy?.best_observed_pullback;
 
@@ -46,23 +48,29 @@ export default function TradeJournalWidget({
     <section style={styles.card}>
       <div style={styles.top}>
         <div>
-          <div style={styles.kicker}>Journal + AI Coach</div>
-          <div style={styles.title}>Filled Trades</div>
+          <div style={styles.kicker}>
+            {showCoach ? "VWAP +3 AI Coach" : "Journal"}
+          </div>
+          <div style={styles.title}>
+            {showCoach ? "Trade Reviews" : "Filled Trades"}
+          </div>
         </div>
 
         <div style={styles.countBadge}>{trades.length}</div>
       </div>
 
-      <div style={styles.notice}>
-        Closed trades are automatically checked against the 3-VWAP scanner. The
-        coach compares your entry and exit with the frozen target and scanner
-        invalidation, then reconstructs EMA/VWAP trend, 1m/5m structure,
-        liquidity, demand/FVG context, recorded Level 2 breakout behavior, and
-        the price path after entry. Level 2 is research-only and does not change
-        AutoTrade decisions. Coach timestamps display in Pacific Time.
-      </div>
+      {showCoach ? (
+        <div style={styles.notice}>
+          Closed trades are automatically checked against the 3-VWAP scanner. The
+          coach compares your entry and exit with the frozen target and scanner
+          invalidation, then reconstructs EMA/VWAP trend, 1m/5m structure,
+          liquidity, demand/FVG context, recorded Level 2 breakout behavior, and
+          the price path after entry. Level 2 is research-only and does not change
+          AutoTrade decisions. Coach timestamps display in Pacific Time.
+        </div>
+      ) : null}
 
-      {personalSummary && personalSummary.scannerMatchedTrades > 0 ? (
+      {showCoach && personalSummary && personalSummary.scannerMatchedTrades > 0 ? (
         <div style={styles.personalCard}>
           <div style={styles.studyHeader}>
             <strong>Your 3-VWAP Coaching Pattern</strong>
@@ -103,7 +111,7 @@ export default function TradeJournalWidget({
         </div>
       ) : null}
 
-      {coachStudy && coachStudy.overall.setups > 0 ? (
+      {showCoach && coachStudy && coachStudy.overall.setups > 0 ? (
         <div style={styles.studyCard}>
           <div style={styles.studyHeader}>
             <strong>3-VWAP Study · Last {coachStudy.days} Days</strong>
@@ -200,13 +208,15 @@ export default function TradeJournalWidget({
 
                 {trade.notes ? <div style={styles.notes}>{trade.notes}</div> : null}
 
-                {review ? (
-                  <CoachReview review={review} />
-                ) : (
-                  <div style={styles.coachPending}>
-                    AI Coach: checking this trade against 3-VWAP scanner history…
-                  </div>
-                )}
+                {showCoach ? (
+                  review ? (
+                    <CoachReview review={review} />
+                  ) : (
+                    <div style={styles.coachPending}>
+                      AI Coach: checking this trade against 3-VWAP scanner history…
+                    </div>
+                  )
+                ) : null}
 
                 <button type="button" style={styles.replayButton}>
                   Replay Trade
