@@ -1,6 +1,7 @@
 // src/components/chart/ChartToolbarV2.tsx
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -31,6 +32,7 @@ import {
   getTimeframeShortLabel,
   normalizeTimeframeId,
 } from "./TimeframeRegistry";
+import { useWatchlists } from "../watchlists/WatchlistContext";
 
 const REPLAY_SPEEDS: ReplaySpeed[] = [
   0.25,
@@ -98,6 +100,18 @@ function formatReplayTime(value: number | null): string {
   }).format(new Date(value * 1000));
 }
 
+function normalizeNavigatorSymbol(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function navigatorWatchlistLabel(name: string): string {
+  const trimmed = String(name || "Watchlist").trim();
+  if (/^manual watchlist$/i.test(trimmed)) return "Manual";
+  if (/^scanner watchlist$/i.test(trimmed)) return "Scanner";
+  if (/^vwap \+3 target$/i.test(trimmed)) return "VWAP +3";
+  return trimmed.replace(/\s+watchlist$/i, "");
+}
+
 export default function ChartToolbarV2({
   symbol,
   timeframe,
@@ -129,6 +143,66 @@ export default function ChartToolbarV2({
   const replayReady =
     replaySnapshot.bars.length > 0 &&
     replaySnapshot.state !== "loading";
+
+  // WATCHLIST NAVIGATOR: keep symbol browsing available while the user stays
+  // inside Chart, Level 2, Trading, Coach, News, or any other right workspace.
+  const {
+    watchlists,
+    activeWatchlist,
+    activeWatchlistId,
+    setActiveWatchlist,
+  } = useWatchlists();
+
+  const navigatorWatchlist = activeWatchlist ?? watchlists[0];
+  const navigatorSymbols = useMemo(() => {
+    const rows = [...(navigatorWatchlist?.symbols ?? [])];
+
+    // Match the Lists workspace: manual symbols keep their saved order, while
+    // scanner lists browse from highest score to lowest score.
+    if (navigatorWatchlist?.type !== "manual") {
+      rows.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    }
+
+    return Array.from(
+      new Set(
+        rows
+          .map((item) => normalizeNavigatorSymbol(item.symbol))
+          .filter(Boolean),
+      ),
+    );
+  }, [navigatorWatchlist]);
+
+  const normalizedNavigatorSymbol = normalizeNavigatorSymbol(symbol);
+  const navigatorIndex = navigatorSymbols.indexOf(normalizedNavigatorSymbol);
+  const navigatorPosition =
+    navigatorIndex >= 0
+      ? `${navigatorIndex + 1}/${navigatorSymbols.length}`
+      : navigatorSymbols.length > 0
+        ? `—/${navigatorSymbols.length}`
+        : "—/0";
+
+  const navigateWatchlist = useCallback(
+    (direction: -1 | 1) => {
+      if (navigatorSymbols.length === 0) return;
+
+      const currentIndex = navigatorSymbols.indexOf(
+        normalizeNavigatorSymbol(symbol),
+      );
+      const nextIndex =
+        currentIndex < 0
+          ? direction > 0
+            ? 0
+            : navigatorSymbols.length - 1
+          : (currentIndex + direction + navigatorSymbols.length) %
+            navigatorSymbols.length;
+      const nextSymbol = navigatorSymbols[nextIndex];
+
+      if (nextSymbol && nextSymbol !== normalizeNavigatorSymbol(symbol)) {
+        onSymbolChange(nextSymbol);
+      }
+    },
+    [navigatorSymbols, onSymbolChange, symbol],
+  );
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
@@ -207,6 +281,36 @@ export default function ChartToolbarV2({
     };
   }, [favorites, onTimeframeChange]);
 
+  useEffect(() => {
+    function isTypingTarget(target: EventTarget | null): boolean {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName.toLowerCase();
+      return (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        target.isContentEditable
+      );
+    }
+
+    function handleWatchlistShortcut(event: KeyboardEvent) {
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+        return;
+      }
+      if (isTypingTarget(event.target)) return;
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      navigateWatchlist(event.key === "ArrowUp" ? -1 : 1);
+    }
+
+    window.addEventListener("keydown", handleWatchlistShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleWatchlistShortcut);
+    };
+  }, [navigateWatchlist]);
+
   const favoriteOptions = useMemo(
     () =>
       favorites
@@ -242,24 +346,127 @@ export default function ChartToolbarV2({
         overflow: "visible",
       }}
     >
-      <input
-        value={symbol}
-        onChange={(event) =>
-          onSymbolChange(event.target.value.toUpperCase())
-        }
+      <div
         style={{
-          width: 82,
-          height: 28,
-          background: "#070b12",
-          color: "white",
-          border: "1px solid rgba(148,163,184,.28)",
-          borderRadius: 7,
-          padding: "0 9px",
-          fontWeight: 900,
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
           flexShrink: 0,
-          outline: "none",
+          padding: "2px 4px",
+          borderRadius: 9,
+          border: "1px solid rgba(56,189,248,.18)",
+          background: "rgba(2,6,23,.72)",
         }}
-      />
+        title="Watchlist navigator · Alt+↑ previous · Alt+↓ next"
+      >
+        <button
+          type="button"
+          onClick={() => navigateWatchlist(-1)}
+          disabled={navigatorSymbols.length === 0}
+          title={`Previous ${navigatorWatchlist?.name ?? "watchlist"} symbol (Alt+↑)`}
+          aria-label="Previous watchlist symbol"
+          style={{
+            ...compactButton,
+            width: 26,
+            minWidth: 26,
+            height: 24,
+            padding: 0,
+            fontSize: 18,
+            color: navigatorSymbols.length ? "#67e8f9" : "#475569",
+            opacity: navigatorSymbols.length ? 1 : 0.5,
+          }}
+        >
+          ‹
+        </button>
+
+        <input
+          value={symbol}
+          onChange={(event) =>
+            onSymbolChange(event.target.value.toUpperCase())
+          }
+          aria-label="Chart symbol"
+          style={{
+            width: 68,
+            height: 24,
+            background: "#070b12",
+            color: "white",
+            border: "1px solid rgba(148,163,184,.28)",
+            borderRadius: 6,
+            padding: "0 7px",
+            fontSize: 11,
+            fontWeight: 950,
+            flexShrink: 0,
+            outline: "none",
+          }}
+        />
+
+        <button
+          type="button"
+          onClick={() => navigateWatchlist(1)}
+          disabled={navigatorSymbols.length === 0}
+          title={`Next ${navigatorWatchlist?.name ?? "watchlist"} symbol (Alt+↓)`}
+          aria-label="Next watchlist symbol"
+          style={{
+            ...compactButton,
+            width: 26,
+            minWidth: 26,
+            height: 24,
+            padding: 0,
+            fontSize: 18,
+            color: navigatorSymbols.length ? "#67e8f9" : "#475569",
+            opacity: navigatorSymbols.length ? 1 : 0.5,
+          }}
+        >
+          ›
+        </button>
+
+        <span
+          title={
+            navigatorIndex >= 0
+              ? `${symbol} is ${navigatorPosition} in ${navigatorWatchlist?.name ?? "the active watchlist"}`
+              : `${symbol} is not in ${navigatorWatchlist?.name ?? "the active watchlist"}`
+          }
+          style={{
+            minWidth: 34,
+            textAlign: "center",
+            color: navigatorIndex >= 0 ? "#cbd5e1" : "#64748b",
+            fontSize: 9,
+            fontWeight: 900,
+            fontVariantNumeric: "tabular-nums",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {navigatorPosition}
+        </span>
+
+        <select
+          value={navigatorWatchlist?.id ?? activeWatchlistId}
+          onChange={(event) => setActiveWatchlist(event.target.value)}
+          aria-label="Watchlist used for symbol navigation"
+          title="Choose the watchlist used by the previous/next symbol buttons"
+          style={{
+            height: 24,
+            width: 88,
+            minWidth: 76,
+            maxWidth: 104,
+            borderRadius: 6,
+            border: "1px solid rgba(148,163,184,.22)",
+            background: "#080c13",
+            color: "#cbd5e1",
+            padding: "0 5px",
+            fontSize: 9,
+            fontWeight: 850,
+            outline: "none",
+            cursor: "pointer",
+          }}
+        >
+          {watchlists.map((watchlist) => (
+            <option key={watchlist.id} value={watchlist.id}>
+              {navigatorWatchlistLabel(watchlist.name)}
+            </option>
+          ))}
+        </select>
+      </div>
 
       {favoriteOptions.map((option) => {
         if (!option) return null;
