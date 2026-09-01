@@ -25,9 +25,10 @@ export default function CoachWorkspacePanel({
 
         <div style={styles.description}>
           Post-trade coaching and VWAP +3 research live here so the Trading tab
-          stays focused on execution. Reviews include entry quality, frozen
-          target/invalidation, EMA/VWAP trend, market structure, liquidity,
-          demand/FVG context, Level 2 research, and post-entry price behavior.
+          stays focused on execution. The Coach now follows closed trades through
+          the available session, grades entry / stop / exit / thesis separately,
+          checks later target and stop outcomes, and compares them with EMA/VWAP,
+          1m/5m market structure, demand/FVG support, liquidity sweeps, and Level 2 research.
         </div>
       </section>
 

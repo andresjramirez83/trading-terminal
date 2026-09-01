@@ -3,7 +3,10 @@ import type {
   Vwap3TradeCoachReview,
 } from "../../../../../services/api";
 import type { JournalTradeState } from "./TradingTypes";
-import type { Vwap3PersonalCoachSummary } from "../../../../../trading/coach/Vwap3TradeCoachService";
+import type {
+  Vwap3DeepTradeAnalysis,
+  Vwap3PersonalCoachSummary,
+} from "../../../../../trading/coach/Vwap3TradeCoachService";
 
 type TradeJournalWidgetProps = {
   trades: JournalTradeState[];
@@ -61,12 +64,13 @@ export default function TradeJournalWidget({
 
       {showCoach ? (
         <div style={styles.notice}>
-          Closed trades are automatically checked against the 3-VWAP scanner. The
-          coach compares your entry and exit with the frozen target and scanner
-          invalidation, then reconstructs EMA/VWAP trend, 1m/5m structure,
-          liquidity, demand/FVG context, recorded Level 2 breakout behavior, and
-          the price path after entry. Level 2 is research-only and does not change
-          AutoTrade decisions. Coach timestamps display in Pacific Time.
+          Closed trades are automatically reconstructed through the available session.
+          The coach now grades entry, stop placement, exit execution, and the trade
+          thesis separately; checks whether your planned target or stop was hit later;
+          and compares those events with 1m/5m structure, demand/FVG support,
+          liquidity sweeps, EMA/VWAP context, and recorded Level 2 behavior. Current-day
+          reviews keep updating through the end of extended trading. Coach timestamps
+          display in Pacific Time.
         </div>
       ) : null}
 
@@ -100,6 +104,30 @@ export default function TradeJournalWidget({
             <Meta
               label="Entries After Invalidation"
               value={String(personalSummary.entriesAfterInvalidation)}
+            />
+            <Meta
+              label="Early Into Support"
+              value={String(personalSummary.earlyEntriesIntoSupport)}
+            />
+            <Meta
+              label="Stop Placement Flags"
+              value={String(personalSummary.stopPlacementIssues)}
+            />
+            <Meta
+              label="Counter-Trend Entries"
+              value={String(personalSummary.counterTrendEntries)}
+            />
+            <Meta
+              label="Avg Stop Quality"
+              value={score100(personalSummary.averageStopQuality)}
+            />
+            <Meta
+              label="Avg Exit Quality"
+              value={score100(personalSummary.averageExitQuality)}
+            />
+            <Meta
+              label="Avg Thesis Quality"
+              value={score100(personalSummary.averageThesisQuality)}
             />
           </div>
           {personalSummary.estimatedMissedPnlToTarget > 0 ? (
@@ -267,6 +295,200 @@ function secondsFromEntry(value: number | null | undefined): string {
   return `${seconds > 0 ? "+" : ""}${seconds.toFixed(0)}s`;
 }
 
+function gradeColor(score: number | null | undefined): string {
+  if (!Number.isFinite(score)) return "#94a3b8";
+  if (Number(score) >= 85) return "#22c55e";
+  if (Number(score) >= 70) return "#60a5fa";
+  if (Number(score) >= 60) return "#f59e0b";
+  return "#ef4444";
+}
+
+function structureText(
+  value: Vwap3DeepTradeAnalysis["structure_at_entry"],
+): string {
+  if (!value) return "—";
+  const breakText = value.last_break_direction
+    ? ` · ${value.last_break_direction.toUpperCase()} break`
+    : "";
+  return `${value.trend.toUpperCase()}${breakText}`;
+}
+
+function DeepGradeCard({
+  title,
+  grade,
+}: {
+  title: string;
+  grade: Vwap3DeepTradeAnalysis["grades"]["entry"];
+}) {
+  const color = gradeColor(grade.score);
+  return (
+    <div style={{ ...styles.deepGradeCard, borderColor: `${color}55` }}>
+      <div style={styles.deepGradeTitle}>{title}</div>
+      <div style={{ ...styles.deepGradeValue, color }}>
+        {grade.grade} · {grade.score}/100
+      </div>
+      <div style={styles.deepGradeLabel}>{grade.label}</div>
+    </div>
+  );
+}
+
+function DeepSessionReview({ deep }: { deep: Vwap3DeepTradeAnalysis }) {
+  const demand = deep.support_context.demand_zone;
+  const fvg = deep.support_context.bullish_fvg;
+
+  return (
+    <CoachSection title="Deep Session Review">
+      <div style={styles.deepStatusRow}>
+        <span style={styles.deepFocusBadge}>Focus: {deep.primary_focus}</span>
+        <span style={styles.deepSessionBadge}>
+          {deep.session_complete ? "SESSION COMPLETE" : "FOLLOWING SESSION"}
+        </span>
+      </div>
+
+      <div style={styles.deepGradeGrid}>
+        <DeepGradeCard title="Entry" grade={deep.grades.entry} />
+        <DeepGradeCard title="Stop" grade={deep.grades.stop} />
+        <DeepGradeCard title="Exit" grade={deep.grades.exit} />
+        <DeepGradeCard title="Thesis" grade={deep.grades.thesis} />
+      </div>
+
+      <div style={styles.deepSummary}>{deep.summary}</div>
+
+      <div style={styles.coachMetrics}>
+        <Meta
+          label="Target Used"
+          value={`${coachPrice(deep.target_price)} · ${deep.target_source}`}
+        />
+        <Meta
+          label="Stop Used"
+          value={`${coachPrice(deep.stop_price)} · ${deep.stop_source}`}
+        />
+        <Meta
+          label="Target After Exit"
+          value={deep.target_hit_after_exit ? coachTime(deep.target_hit_after_exit_time) : "No"}
+        />
+        <Meta
+          label="Stop Hit"
+          value={
+            deep.stop_hit_before_exit
+              ? coachTime(deep.stop_hit_before_exit_time)
+              : deep.stop_hit_after_exit
+                ? coachTime(deep.stop_hit_after_exit_time)
+                : "No"
+          }
+        />
+        <Meta
+          label="Target After Stop"
+          value={
+            deep.target_after_stop
+              ? `Yes · ${deep.minutes_stop_to_target ?? "—"}m later`
+              : "No"
+          }
+        />
+        <Meta
+          label="Deepest Pullback"
+          value={`${coachPrice(deep.deepest_pullback_price)} · ${pct(deep.adverse_excursion_pct)} MAE`}
+        />
+      </div>
+
+      <div style={styles.coachSectionMiniTitle}>Market Structure Through the Trade</div>
+      <div style={styles.coachMetrics}>
+        <Meta label="At Entry" value={structureText(deep.structure_at_entry)} />
+        <Meta label="At Exit" value={structureText(deep.structure_at_exit)} />
+        <Meta
+          label="At Deep Pullback"
+          value={structureText(deep.structure_at_deepest_pullback)}
+        />
+        <Meta label="At Stop" value={structureText(deep.structure_at_stop)} />
+        <Meta label="At Target" value={structureText(deep.structure_at_target)} />
+        <Meta
+          label="Bullish Shift After Entry"
+          value={coachTime(deep.first_bullish_structure_shift_after_entry)}
+        />
+        <Meta
+          label="Bearish Break After Entry"
+          value={coachTime(deep.first_bearish_structure_break_after_entry)}
+        />
+        <Meta
+          label="Counter-Trend Entry"
+          value={yesNo(deep.counter_trend_entry)}
+        />
+      </div>
+
+      <div style={styles.coachSectionMiniTitle}>Support / Pullback Context</div>
+      <div style={styles.coachMetrics}>
+        <Meta
+          label="Demand"
+          value={
+            demand
+              ? `${coachPrice(demand.bottom)}–${coachPrice(demand.top)} · ${demand.held ? "held" : "failed"}`
+              : "None"
+          }
+        />
+        <Meta
+          label="Bullish FVG"
+          value={
+            fvg
+              ? `${coachPrice(fvg.bottom)}–${coachPrice(fvg.top)} · ${fvg.reclaimed ? "reclaimed" : fvg.held ? "held" : "failed"}`
+              : "None"
+          }
+        />
+        <Meta label="FVG + Demand Overlap" value={yesNo(deep.support_context.overlap)} />
+        <Meta
+          label="Liquidity Sweep"
+          value={
+            deep.support_context.bullish_liquidity_sweep
+              ? `Yes @ ${coachPrice(deep.support_context.sweep_level)}`
+              : "No"
+          }
+        />
+        <Meta
+          label="Entry Early Into Support"
+          value={yesNo(deep.entry_was_early_into_support)}
+        />
+        <Meta
+          label="Structure Failed Before Stop"
+          value={yesNo(deep.structural_failure_before_stop)}
+        />
+      </div>
+
+      {deep.grades.entry.reasons.length ||
+      deep.grades.stop.reasons.length ||
+      deep.grades.exit.reasons.length ||
+      deep.grades.thesis.reasons.length ? (
+        <div style={styles.deepReasonGrid}>
+          {[
+            ["Entry", deep.grades.entry.reasons],
+            ["Stop", deep.grades.stop.reasons],
+            ["Exit", deep.grades.exit.reasons],
+            ["Thesis", deep.grades.thesis.reasons],
+          ].map(([label, reasons]) => (
+            <div key={String(label)} style={styles.deepReasonCard}>
+              <strong>{String(label)}</strong>
+              <ul style={styles.coachBullets}>
+                {(reasons as string[]).map((reason) => (
+                  <li key={`${label}-${reason}`}>{reason}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {deep.lessons.length ? (
+        <>
+          <div style={styles.coachSectionMiniTitle}>Main Lessons</div>
+          <ul style={styles.coachBullets}>
+            {deep.lessons.map((lesson) => (
+              <li key={lesson}>{lesson}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+    </CoachSection>
+  );
+}
+
 function CoachSection({
   title,
   children,
@@ -284,6 +506,9 @@ function CoachSection({
 
 function CoachReview({ review }: { review: Vwap3TradeCoachReview }) {
   const color = reviewColor(review);
+  const deep = (review as Vwap3TradeCoachReview & {
+    deep_analysis?: Vwap3DeepTradeAnalysis;
+  }).deep_analysis;
   const trend = review.trend_context;
   const structure1m = review.structure_context?.["1m"];
   const structure5m = review.structure_context?.["5m"];
@@ -316,6 +541,8 @@ function CoachReview({ review }: { review: Vwap3TradeCoachReview }) {
       </div>
 
       <div style={styles.coachSummary}>{review.summary}</div>
+
+      {deep ? <DeepSessionReview deep={deep} /> : null}
 
       {review.scanner_match ? (
         <>
@@ -810,6 +1037,91 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#c4b5fd",
     fontSize: 9,
     lineHeight: 1.4,
+  },
+  deepStatusRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 8,
+    flexWrap: "wrap",
+    marginBottom: 8,
+  },
+  deepFocusBadge: {
+    border: "1px solid rgba(96,165,250,.35)",
+    background: "rgba(37,99,235,.12)",
+    color: "#bfdbfe",
+    borderRadius: 999,
+    padding: "4px 7px",
+    fontSize: 9,
+    fontWeight: 900,
+  },
+  deepSessionBadge: {
+    border: "1px solid rgba(168,85,247,.32)",
+    background: "rgba(88,28,135,.12)",
+    color: "#ddd6fe",
+    borderRadius: 999,
+    padding: "4px 7px",
+    fontSize: 9,
+    fontWeight: 900,
+  },
+  deepGradeGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 7,
+  },
+  deepGradeCard: {
+    border: "1px solid",
+    background: "rgba(15,23,42,.72)",
+    borderRadius: 11,
+    padding: 8,
+  },
+  deepGradeTitle: {
+    color: "#94a3b8",
+    fontSize: 9,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  deepGradeValue: {
+    marginTop: 3,
+    fontSize: 13,
+    fontWeight: 950,
+  },
+  deepGradeLabel: {
+    marginTop: 2,
+    color: "#cbd5e1",
+    fontSize: 9,
+    lineHeight: 1.3,
+  },
+  deepSummary: {
+    marginTop: 8,
+    border: "1px solid rgba(96,165,250,.18)",
+    background: "rgba(30,58,138,.08)",
+    color: "#dbeafe",
+    borderRadius: 10,
+    padding: 8,
+    fontSize: 10,
+    lineHeight: 1.45,
+  },
+  coachSectionMiniTitle: {
+    marginTop: 10,
+    color: "#94a3b8",
+    fontSize: 9,
+    fontWeight: 900,
+    textTransform: "uppercase",
+    letterSpacing: 0.55,
+  },
+  deepReasonGrid: {
+    display: "grid",
+    gap: 7,
+    marginTop: 9,
+  },
+  deepReasonCard: {
+    border: "1px solid rgba(148,163,184,.12)",
+    background: "rgba(15,23,42,.48)",
+    borderRadius: 10,
+    padding: 8,
+    color: "#cbd5e1",
+    fontSize: 9,
   },
   replayButton: {
     width: "100%",
