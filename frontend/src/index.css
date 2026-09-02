@@ -499,3 +499,147 @@ button, input, select {
   }
 }
 /* MOBILE_CHART_PHASE9_END */
+
+/* MOBILE_WORKSPACE_PHASE11_BEGIN */
+.mobile-workspace-layer {
+  display: none;
+}
+
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-app-nav {
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    gap: 2px !important;
+  }
+
+  .mobile-app-nav button {
+    border: 0;
+    font-family: inherit;
+  }
+
+  .mobile-workspace-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 4000;
+    display: block;
+    pointer-events: none;
+  }
+
+  .mobile-workspace-backdrop {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: rgba(0, 0, 0, 0.42);
+    pointer-events: auto;
+  }
+
+  .mobile-workspace-sheet {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(44px + env(safe-area-inset-bottom));
+    max-height: min(76dvh, 720px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-top: 1px solid rgba(96, 165, 250, 0.24);
+    border-radius: 18px 18px 0 0;
+    background: #070b12;
+    box-shadow: 0 -16px 44px rgba(0, 0, 0, 0.46);
+    pointer-events: auto;
+  }
+
+  .mobile-workspace-sheet--trade {
+    max-height: min(82dvh, 780px);
+  }
+
+  .mobile-workspace-header {
+    flex-shrink: 0;
+    min-height: 52px;
+    padding: 8px 10px 7px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+    background: #0b1019;
+  }
+
+  .mobile-workspace-kicker {
+    color: #64748b;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+  }
+
+  .mobile-workspace-title {
+    margin-top: 1px;
+    color: #f8fafc;
+    font-size: 15px;
+    font-weight: 900;
+  }
+
+  .mobile-workspace-close {
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 10px;
+    background: #111827;
+    color: #e2e8f0;
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  .mobile-workspace-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding: 10px;
+  }
+
+  .mobile-workspace-loading {
+    min-height: 100px;
+    display: grid;
+    place-items: center;
+    color: #94a3b8;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .mobile-studies-shell {
+    min-height: 180px;
+    padding: 4px;
+  }
+
+  .mobile-studies-copy {
+    margin-bottom: 12px;
+    color: #94a3b8;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+
+  .mobile-studies-shell > div:last-child {
+    margin-left: 0 !important;
+  }
+
+  .mobile-studies-shell > div:last-child > button {
+    width: 100%;
+    height: 42px !important;
+    font-size: 13px !important;
+  }
+
+  .mobile-workspace-body button,
+  .mobile-workspace-body input,
+  .mobile-workspace-body select {
+    touch-action: manipulation;
+  }
+}
+/* MOBILE_WORKSPACE_PHASE11_END */

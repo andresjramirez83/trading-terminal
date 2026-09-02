@@ -28,6 +28,7 @@ import ChartToolbarV2 from "./ChartToolbarV2";
 import ChartViewport from "./ChartViewport";
 import LeftDrawingBar from "./LeftDrawingBar";
 import RightInfoPanel from "./RightInfoPanel";
+import MobileChartWorkspace from "../mobile/MobileChartWorkspace";
 import { DrawingEngine } from "./DrawingEngine";
 import { MarketObjectDrawingBridge } from "./analysis/market-objects/MarketObjectDrawingBridge";
 import type { ChartIntelligenceBridge } from "../../trading/intelligence/integration/ChartIntelligenceBridge";
@@ -2249,6 +2250,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           onToggleCollapsed={() =>
             setRightPanelCollapsed((current) => !current)
           }
+        />
+
+        {/* MOBILE_WORKSPACE_PHASE11 */}
+        <MobileChartWorkspace
+          symbol={symbol}
+          currentPrice={chartState?.price ?? 0}
+          studyVisibility={studyVisibility}
+          onStudyVisibilityChange={setStudyVisibility}
         />
       </div>
     </div>
