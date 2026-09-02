@@ -947,7 +947,8 @@ button, input, select {
 
   .mobile-chart-zoom-controls {
     position: fixed;
-    right: 10px;
+    left: 10px;
+    right: auto;
     bottom: calc(50px + env(safe-area-inset-bottom));
     z-index: 3800;
     display: flex;
@@ -979,3 +980,43 @@ button, input, select {
   }
 }
 /* MOBILE_STUDIES_ZOOM_PHASE19_END */
+
+/* MOBILE_STUDIES_PHASE20_FIXED_BEGIN */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-workspace-sheet--studies {
+    max-height: min(72dvh, 640px);
+  }
+
+  .mobile-workspace-sheet--studies .mobile-studies-shell {
+    padding: 2px !important;
+  }
+
+  .mobile-workspace-sheet--studies .chart-study-toggles {
+    position: relative !important;
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    z-index: 1 !important;
+  }
+
+  .mobile-workspace-sheet--studies .chart-study-toggles__button {
+    width: 100% !important;
+    min-height: 44px !important;
+    font-size: 12px !important;
+  }
+
+  .mobile-workspace-sheet--studies .chart-study-toggles__menu {
+    position: relative !important;
+    top: auto !important;
+    right: auto !important;
+    left: auto !important;
+    bottom: auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-height: 52dvh !important;
+    margin-top: 8px !important;
+    overflow-y: auto !important;
+    z-index: 2 !important;
+  }
+}
+/* MOBILE_STUDIES_PHASE20_FIXED_END */

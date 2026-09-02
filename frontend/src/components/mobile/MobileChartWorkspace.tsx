@@ -5,6 +5,8 @@ import {
   useMemo,
   useState,
 } from "react";
+import type { StudyVisibility } from "../chart/ChartTypes";
+import ChartStudyToggles from "../chart/ChartStudyToggles";
 
 const TradingWorkspacePanel = lazy(
   () =>
@@ -34,11 +36,13 @@ const Level2WorkspacePanel = lazy(
 
 export const MOBILE_WORKSPACE_EVENT = "trading-mobile-workspace";
 
-export type MobileWorkspaceId = "trade" | "lists" | "news" | "coach" | "level2";
+export type MobileWorkspaceId = "studies" | "trade" | "lists" | "news" | "coach" | "level2";
 
 type Props = {
   symbol: string;
   currentPrice: number;
+  studyVisibility: StudyVisibility;
+  onStudyVisibilityChange: (visibility: StudyVisibility) => void;
 };
 
 type MobileWorkspaceEventDetail = {
@@ -51,9 +55,12 @@ function LoadingCard() {
 }
 
 // MOBILE_BOTTOM_TABS_PHASE17
+// MOBILE_STUDIES_PHASE20_FIXED
 export default function MobileChartWorkspace({
   symbol,
   currentPrice,
+  studyVisibility,
+  onStudyVisibilityChange,
 }: Props) {
   const [workspace, setWorkspace] =
     useState<MobileWorkspaceId | null>(null);
@@ -87,6 +94,8 @@ export default function MobileChartWorkspace({
 
   const title = useMemo(() => {
     switch (workspace) {
+      case "studies":
+        return "Studies";
       case "trade":
         return `Trading - ${symbol || "-"}`;
       case "lists":
@@ -137,6 +146,19 @@ export default function MobileChartWorkspace({
 
         <div className="mobile-workspace-body">
           <Suspense fallback={<LoadingCard />}>
+
+            {workspace === "studies" && (
+              <div className="mobile-studies-shell">
+                <div className="mobile-studies-copy">
+                  Toggle the same studies used by the chart.
+                </div>
+
+                <ChartStudyToggles
+                  visibility={studyVisibility}
+                  onChange={onStudyVisibilityChange}
+                />
+              </div>
+            )}
 
             {workspace === "lists" && <WatchlistsWorkspacePanel />}
 

@@ -19,6 +19,7 @@ const TOGGLES: { key: keyof StudyVisibility; label: string }[] = [
   { key: "demandZones", label: "Auto Demand Zones" },
 ];
 
+// MOBILE_STUDIES_PHASE20_REPAIR
 export default function ChartStudyToggles({ visibility, onChange }: Props) {
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -26,6 +27,7 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
   useEffect(() => {
     function onDocumentPointerDown(event: PointerEvent) {
       if (!wrapperRef.current) return;
+
       if (!wrapperRef.current.contains(event.target as Node)) {
         setOpen(false);
       }
@@ -40,6 +42,42 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
 
   const activeCount = TOGGLES.filter((item) => visibility[item.key]).length;
 
+  function handleButtonClick(event: React.MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+
+    const insideMobileStudiesSheet = Boolean(
+      event.currentTarget.closest(".mobile-workspace-sheet--studies"),
+    );
+
+    if (insideMobileStudiesSheet) {
+      setOpen((value) => !value);
+      return;
+    }
+
+    const isMobile =
+      window.matchMedia("(max-width: 767px)").matches ||
+      window.matchMedia(
+        "(hover: none) and (pointer: coarse) and (max-width: 1024px)",
+      ).matches;
+
+    if (isMobile) {
+      setOpen(false);
+
+      window.dispatchEvent(
+        new CustomEvent("trading-mobile-workspace", {
+          detail: {
+            workspace: "studies",
+            action: "open",
+          },
+        }),
+      );
+
+      return;
+    }
+
+    setOpen((value) => !value);
+  }
+
   return (
     <div
       ref={wrapperRef}
@@ -53,25 +91,7 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
       <button
         type="button"
         className="chart-study-toggles__button"
-        onPointerDown={(event) => {
-          event.stopPropagation();
-
-          if (event.pointerType === "touch") {
-            event.preventDefault();
-            setOpen((value) => !value);
-          }
-        }}
-        onClick={(event) => {
-          event.stopPropagation();
-
-          // Touch is handled on pointer down because the chart can consume
-          // the later synthetic click on iOS.
-          if ((event.nativeEvent as PointerEvent).pointerType === "touch") {
-            return;
-          }
-
-          setOpen((value) => !value);
-        }}
+        onClick={handleButtonClick}
         style={{
           height: 28,
           padding: "0 10px",
@@ -84,7 +104,7 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
           cursor: "pointer",
         }}
       >
-        Studies {activeCount > 0 ? `(${activeCount})` : ""} ▾
+        Studies {activeCount > 0 ? `(${activeCount})` : ""} v
       </button>
 
       {open && (
@@ -112,7 +132,7 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
               <label
                 key={item.key}
                 style={{
-                  height: 30,
+                  minHeight: 34,
                   display: "flex",
                   alignItems: "center",
                   gap: 8,
