@@ -680,6 +680,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       const detail = (event as CustomEvent<{ action?: string }>).detail;
       if (detail?.action !== "start") return;
 
+      engineRef.current?.setChartTradeCrosshairMode(true);
       setMobileChartTradeActive(true);
       setMobileChartTradeStep("entry");
       setMobileChartTradeCandidate(null);
@@ -715,6 +716,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   }, [mobileChartTradeActive, symbol, timeframe]);
 
   function cancelMobileChartTrade(): void {
+    engineRef.current?.setChartTradeCrosshairMode(false);
     setMobileChartTradeActive(false);
     setMobileChartTradeCandidate(null);
     setMobileChartTradeEntry(null);
@@ -779,6 +781,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       }),
     );
 
+    engineRef.current?.setChartTradeCrosshairMode(false);
     setMobileChartTradeActive(false);
     setMobileChartTradeStep("entry");
     setMobileChartTradeCandidate(null);
@@ -2428,11 +2431,11 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             </div>
 
             <div className="mobile-chart-trade-hud__candidate">
-              Crosshair price
+              Horizontal line price
               <strong>
                 {mobileChartTradeCandidate != null
                   ? `$${mobileChartTradeCandidate.toFixed(2)}`
-                  : " Move/hold finger on chart"}
+                  : " Move horizontal line"}
               </strong>
             </div>
 

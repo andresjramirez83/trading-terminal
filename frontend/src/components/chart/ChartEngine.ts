@@ -832,6 +832,29 @@ export class ChartEngine {
     this.scheduleVwap3OverlayRender();
   }
 
+  public setChartTradeCrosshairMode(enabled: boolean): void {
+    this.chart.applyOptions({
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: {
+          visible: !enabled,
+          labelVisible: !enabled,
+          style: LineStyle.Dashed,
+          color: "rgba(255,255,255,.55)",
+        },
+        horzLine: {
+          visible: true,
+          labelVisible: true,
+          style: LineStyle.Dashed,
+          color: enabled
+            ? "rgba(96,165,250,.95)"
+            : "rgba(255,255,255,.35)",
+          width: enabled ? 2 : 1,
+        },
+      },
+    });
+  }
+
   subscribeCrosshairInfo(
     listener: (info: CrosshairInfo | null) => void,
   ): () => void {

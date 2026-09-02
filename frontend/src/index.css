@@ -769,3 +769,9 @@ button, input, select {
   }
 }
 /* MOBILE_CHART_TRADE_PHASE12_END */
+
+/* MOBILE_CHART_TRADE_PHASE13_BEGIN */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-chart-trade-hud__candidate strong { color: #93c5fd !important; }
+}
+/* MOBILE_CHART_TRADE_PHASE13_END */

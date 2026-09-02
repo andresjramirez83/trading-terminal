@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useEffect, useState, type CSSProperties } from "react";
 import AccountWidget from "./AccountWidget";
 import QuickOrderWidget from "./QuickOrderWidget";
 import CurrentPositionWidget from "./CurrentPositionWidget";
@@ -85,6 +85,67 @@ export default function TradingWorkspacePanel({
   const safePrice = Number.isFinite(currentPrice) ? currentPrice : 0;
   const store = useTradeEngineStore(safeSymbol, safePrice);
   const historyStore = useTradeHistoryStore();
+
+  // MOBILE_CHART_TRADE_PHASE13
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          symbol?: string;
+          side?: "buy" | "sell";
+          entry?: number;
+          stop?: number;
+          target?: number;
+        }>
+      ).detail;
+
+      if (!detail) return;
+
+      const eventSymbol = String(detail.symbol ?? "")
+        .trim()
+        .toUpperCase();
+
+      if (
+        eventSymbol &&
+        safeSymbol !== "—" &&
+        eventSymbol !== safeSymbol.trim().toUpperCase()
+      ) {
+        return;
+      }
+
+      const entry = Number(detail.entry);
+      const stop = Number(detail.stop);
+      const target = Number(detail.target);
+
+      if (
+        !Number.isFinite(entry) ||
+        !Number.isFinite(stop) ||
+        !Number.isFinite(target) ||
+        entry <= 0 ||
+        stop <= 0 ||
+        target <= 0
+      ) {
+        return;
+      }
+
+      store.updateTradePlan({
+        side: detail.side === "sell" ? "short" : "long",
+        entry,
+        stop,
+        target,
+        shares:
+          Number(store.tradePlan.shares) > 0
+            ? Math.floor(Number(store.tradePlan.shares))
+            : 100,
+      });
+
+      setActiveTab("plan");
+    };
+
+    window.addEventListener("trading-terminal:quick-trade-plan", handler);
+    return () =>
+      window.removeEventListener("trading-terminal:quick-trade-plan", handler);
+  }, [safeSymbol, store.updateTradePlan, store.tradePlan.shares]);
 
   const connected = store.connectionStatus === "connected";
   const busy = store.executionLoading;
