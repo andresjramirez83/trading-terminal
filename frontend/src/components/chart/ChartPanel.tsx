@@ -758,35 +758,40 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     const rewardPerShare = Math.abs(target - entry);
     const rr = riskPerShare > 0 ? rewardPerShare / riskPerShare : 0;
 
-    window.dispatchEvent(
-      new CustomEvent("trading-terminal:quick-trade-plan", {
-        detail: {
-          source: "mobileChartTrade",
-          symbol,
-          side: "buy",
-          entry,
-          stop,
-          target,
-          riskPerShare,
-          rewardPerShare,
-          rr,
-          drawingId: null,
-        },
-      }),
-    );
+    // MOBILE_CHART_TRADE_PHASE15_PLAN_DELIVERY
+    // First open the Trade workspace so TradingWorkspacePanel is mounted.
+    // Then deliver the completed plan to its quick-trade-plan listener.
+    const completedPlan = {
+      source: "mobileChartTrade",
+      symbol,
+      side: "buy" as const,
+      entry,
+      stop,
+      target,
+      riskPerShare,
+      rewardPerShare,
+      rr,
+      drawingId: null,
+    };
 
     engineRef.current?.setChartTradeCrosshairMode(false);
     setMobileChartTradeActive(false);
     setMobileChartTradeStep("entry");
     setMobileChartTradeCandidate(null);
 
+    window.dispatchEvent(
+      new CustomEvent("trading-mobile-workspace", {
+        detail: { workspace: "trade", action: "open" },
+      }),
+    );
+
     window.setTimeout(() => {
       window.dispatchEvent(
-        new CustomEvent("trading-mobile-workspace", {
-          detail: { workspace: "trade", action: "open" },
+        new CustomEvent("trading-terminal:quick-trade-plan", {
+          detail: completedPlan,
         }),
       );
-    }, 80);
+    }, 250);
   }
 
   useEffect(() => {
