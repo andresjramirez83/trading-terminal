@@ -94,6 +94,7 @@ export default function ScannerPage() {
 
   return (
     <div
+      className="scanner-page"
       style={{
         minHeight: "100vh",
         background: "#03152f",

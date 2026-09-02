@@ -69,6 +69,17 @@ async function startApplication(): Promise<void> {
 
 void startApplication();
 
+// MOBILE_PWA_SERVICE_WORKER
+// No asset/API caching: this only enables installed-app behavior safely.
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js").catch((error) => {
+      console.warn("[PWA] service worker registration failed", error);
+    });
+  });
+}
+
+
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     void disposeTradingIntelligence();

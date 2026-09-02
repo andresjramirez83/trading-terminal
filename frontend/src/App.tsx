@@ -1,6 +1,8 @@
 import { Suspense, lazy } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 
+import MobileAppNav from "./components/mobile/MobileAppNav";
+
 import { ActiveSymbolProvider } from "./components/chart/ActiveSymbolContext";
 import { WatchlistProvider } from "./components/watchlists/WatchlistContext";
 import { WorkspaceProvider } from "./components/workspace/WorkspaceContext";
@@ -42,6 +44,7 @@ function App() {
               <Route path="*" element={<Navigate to="/chart" replace />} />
             </Routes>
           </Suspense>
+          <MobileAppNav />
         </WorkspaceProvider>
       </WatchlistProvider>
     </ActiveSymbolProvider>

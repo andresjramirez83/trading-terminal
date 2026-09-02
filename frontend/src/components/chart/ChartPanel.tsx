@@ -2218,6 +2218,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       />
 
       <div
+        className="chart-panel-main"
         style={{
           flex: 1,
           minWidth: 0,

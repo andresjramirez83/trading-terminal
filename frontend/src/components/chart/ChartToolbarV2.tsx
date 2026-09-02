@@ -330,6 +330,7 @@ export default function ChartToolbarV2({
 
   return (
     <div
+      className="chart-toolbar-v2"
       style={{
         position: "relative",
         height: 42,
