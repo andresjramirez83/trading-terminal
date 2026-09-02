@@ -1,7 +1,7 @@
 import { NavLink } from "react-router-dom";
 
 const ITEMS = [
-  { to: "/chart", label: "Chart", icon: "▥" },
+  { to: "/chart", label: "Chart", icon: "⌁" },
   { to: "/scanner", label: "Scanner", icon: "⌕" },
 ];
 

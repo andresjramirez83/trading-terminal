@@ -348,6 +348,7 @@ export default function ChartToolbarV2({
       }}
     >
       <div
+        className="mobile-watchlist-navigator"
         style={{
           display: "flex",
           alignItems: "center",
@@ -361,6 +362,7 @@ export default function ChartToolbarV2({
         title="Watchlist navigator · Alt+↑ previous · Alt+↓ next"
       >
         <button
+          className="mobile-watchlist-arrow mobile-watchlist-arrow--prev"
           type="button"
           onClick={() => navigateWatchlist(-1)}
           disabled={navigatorSymbols.length === 0}
@@ -381,6 +383,7 @@ export default function ChartToolbarV2({
         </button>
 
         <input
+          className="mobile-watchlist-symbol"
           value={symbol}
           onChange={(event) =>
             onSymbolChange(event.target.value.toUpperCase())
@@ -402,6 +405,7 @@ export default function ChartToolbarV2({
         />
 
         <button
+          className="mobile-watchlist-arrow mobile-watchlist-arrow--next"
           type="button"
           onClick={() => navigateWatchlist(1)}
           disabled={navigatorSymbols.length === 0}
@@ -422,6 +426,7 @@ export default function ChartToolbarV2({
         </button>
 
         <span
+          className="mobile-watchlist-position"
           title={
             navigatorIndex >= 0
               ? `${symbol} is ${navigatorPosition} in ${navigatorWatchlist?.name ?? "the active watchlist"}`
@@ -441,6 +446,7 @@ export default function ChartToolbarV2({
         </span>
 
         <select
+          className="mobile-watchlist-selector"
           value={navigatorWatchlist?.id ?? activeWatchlistId}
           onChange={(event) => setActiveWatchlist(event.target.value)}
           aria-label="Watchlist used for symbol navigation"
