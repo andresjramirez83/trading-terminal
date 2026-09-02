@@ -856,3 +856,68 @@ button, input, select {
   }
 }
 /* MOBILE_BOTTOM_TABS_PHASE17_END */
+
+/* MOBILE_CHART_TRADE_PHASE18_TYPES_BEGIN */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-chart-trade-type-card {
+    margin-bottom: 10px;
+    padding: 10px;
+    border: 1px solid rgba(96,165,250,.24);
+    border-radius: 13px;
+    background: rgba(15,23,42,.72);
+  }
+
+  .mobile-chart-trade-type-title {
+    color: #f8fafc;
+    font-size: 13px;
+    font-weight: 950;
+  }
+
+  .mobile-chart-trade-type-copy {
+    margin-top: 2px;
+    color: #94a3b8;
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  .mobile-chart-trade-type-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 9px;
+    margin-bottom: 8px;
+  }
+
+  .mobile-chart-trade-type-option {
+    min-height: 38px;
+    padding: 5px 4px;
+    border: 1px solid rgba(148,163,184,.18);
+    border-radius: 9px;
+    background: rgba(2,6,23,.72);
+    color: #94a3b8;
+    font-size: 10px;
+    font-weight: 900;
+  }
+
+  .mobile-chart-trade-type-option--active {
+    border-color: rgba(96,165,250,.62);
+    background: rgba(37,99,235,.24);
+    color: #dbeafe;
+  }
+
+  .mobile-chart-trade-protection-note {
+    margin: 0 0 8px;
+    padding: 7px 8px;
+    border: 1px solid rgba(34,197,94,.22);
+    border-radius: 8px;
+    background: rgba(20,83,45,.14);
+    color: #bbf7d0;
+    font-size: 9px;
+    line-height: 1.35;
+  }
+
+  .mobile-chart-trade-type-card .mobile-chart-trade-launch {
+    margin-bottom: 0;
+  }
+}
+/* MOBILE_CHART_TRADE_PHASE18_TYPES_END */

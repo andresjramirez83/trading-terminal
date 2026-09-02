@@ -58,6 +58,10 @@ export default function MobileChartWorkspace({
   const [workspace, setWorkspace] =
     useState<MobileWorkspaceId | null>(null);
 
+  type ChartTradeDestination = "quick" | "auto" | "plan";
+  const [chartTradeDestination, setChartTradeDestination] =
+    useState<ChartTradeDestination>("quick");
+
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<MobileWorkspaceEventDetail>).detail;
@@ -144,27 +148,67 @@ export default function MobileChartWorkspace({
 
             {workspace === "trade" && (
               <>
-                <button
-                  type="button"
-                  className="mobile-chart-trade-launch"
-                  onClick={() => {
-                    setWorkspace(null);
-                    window.setTimeout(() => {
-                      window.dispatchEvent(
-                        new CustomEvent("trading-mobile-chart-trade", {
-                          detail: { action: "start" },
-                        }),
-                      );
-                    }, 40);
-                  }}
-                >
-                  <span className="mobile-chart-trade-launch__title">
-                    Chart Trade
-                  </span>
-                  <span className="mobile-chart-trade-launch__copy">
-                    Set entry, stop and target with the chart crosshair.
-                  </span>
-                </button>
+                <div className="mobile-chart-trade-type-card">
+                  <div className="mobile-chart-trade-type-title">
+                    Chart Trade Setup
+                  </div>
+                  <div className="mobile-chart-trade-type-copy">
+                    Choose where the chart Entry / Stop / Target should go.
+                  </div>
+
+                  <div className="mobile-chart-trade-type-grid">
+                    {(["quick", "auto", "plan"] as const).map((type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        className={`mobile-chart-trade-type-option${
+                          chartTradeDestination === type
+                            ? " mobile-chart-trade-type-option--active"
+                            : ""
+                        }`}
+                        onClick={() => setChartTradeDestination(type)}
+                      >
+                        {type === "quick"
+                          ? "Quick Trade"
+                          : type === "auto"
+                            ? "Auto Trade"
+                            : "Plan Trade"}
+                      </button>
+                    ))}
+                  </div>
+
+                  {chartTradeDestination === "auto" && (
+                    <div className="mobile-chart-trade-protection-note">
+                      Auto Trade uses Overnight Protected Order with server-managed
+                      stop/target and extended-hours protection.
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    className="mobile-chart-trade-launch"
+                    onClick={() => {
+                      setWorkspace(null);
+                      window.setTimeout(() => {
+                        window.dispatchEvent(
+                          new CustomEvent("trading-mobile-chart-trade", {
+                            detail: {
+                              action: "start",
+                              destination: chartTradeDestination,
+                            },
+                          }),
+                        );
+                      }, 40);
+                    }}
+                  >
+                    <span className="mobile-chart-trade-launch__title">
+                      Set on Chart
+                    </span>
+                    <span className="mobile-chart-trade-launch__copy">
+                      Use the horizontal price line for Entry, Stop and Target.
+                    </span>
+                  </button>
+                </div>
 
                 <TradingWorkspacePanel
                   symbol={symbol}

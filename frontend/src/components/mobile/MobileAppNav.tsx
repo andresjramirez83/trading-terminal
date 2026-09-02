@@ -32,15 +32,7 @@ export default function MobileAppNav() {
       className="mobile-app-nav mobile-app-nav--desktop-tabs"
       aria-label="Trading Terminal mobile navigation"
     >
-      {/* MOBILE_BOTTOM_TABS_PHASE17 */}
-      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("trade")}>
-        <span>Trading</span>
-      </button>
-
-      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("lists")}>
-        <span>Lists</span>
-      </button>
-
+      {/* MOBILE_CHART_TRADE_PHASE18_TYPES */}
       <NavLink
         to="/chart"
         className={({ isActive }) =>
@@ -50,14 +42,13 @@ export default function MobileAppNav() {
         <span>Chart</span>
       </NavLink>
 
-      <NavLink
-        to="/scanner"
-        className={({ isActive }) =>
-          `mobile-app-nav__item${isActive ? " mobile-app-nav__item--active" : ""}`
-        }
-      >
-        <span>Scanner</span>
-      </NavLink>
+      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("trade")}>
+        <span>Trading</span>
+      </button>
+
+      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("lists")}>
+        <span>Lists</span>
+      </button>
 
       <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("news")}>
         <span>News</span>
@@ -70,6 +61,15 @@ export default function MobileAppNav() {
       <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("level2")}>
         <span>Level 2</span>
       </button>
+
+      <NavLink
+        to="/scanner"
+        className={({ isActive }) =>
+          `mobile-app-nav__item${isActive ? " mobile-app-nav__item--active" : ""}`
+        }
+      >
+        <span>Scanner</span>
+      </NavLink>
     </nav>
   );
 }

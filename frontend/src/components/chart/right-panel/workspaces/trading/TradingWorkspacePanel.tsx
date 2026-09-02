@@ -79,6 +79,11 @@ export default function TradingWorkspacePanel({
   currentPrice,
 }: TradingWorkspacePanelProps) {
   const [activeTab, setActiveTab] = useState<TradingTab>("quick");
+  const [autoChartPlan, setAutoChartPlan] = useState<{
+    entry: number;
+    stop: number;
+    target: number;
+  } | null>(null);
   const [practiceCenterOpen, setPracticeCenterOpen] = useState(false);
 
   const safeSymbol = symbol || "—";
@@ -88,10 +93,12 @@ export default function TradingWorkspacePanel({
 
   // MOBILE_CHART_TRADE_PHASE13
   // MOBILE_CHART_TRADE_PHASE16_PRICE_ROUNDING
+  // MOBILE_CHART_TRADE_PHASE18_TYPES
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (
         event as CustomEvent<{
+          destination?: "quick" | "auto" | "plan";
           symbol?: string;
           side?: "buy" | "sell";
           entry?: number;
@@ -102,10 +109,7 @@ export default function TradingWorkspacePanel({
 
       if (!detail) return;
 
-      const eventSymbol = String(detail.symbol ?? "")
-        .trim()
-        .toUpperCase();
-
+      const eventSymbol = String(detail.symbol ?? "").trim().toUpperCase();
       if (
         eventSymbol &&
         safeSymbol !== "—" &&
@@ -124,21 +128,40 @@ export default function TradingWorkspacePanel({
       const rawStop = Number(detail.stop);
       const rawTarget = Number(detail.target);
 
-      const entry = normalizeTradePrice(rawEntry);
-      const stop = normalizeTradePrice(rawStop);
-      const target = normalizeTradePrice(rawTarget);
-
       if (
         !Number.isFinite(rawEntry) ||
         !Number.isFinite(rawStop) ||
-        !Number.isFinite(rawTarget) ||
-        !Number.isFinite(entry) ||
-        !Number.isFinite(stop) ||
-        !Number.isFinite(target) ||
-        entry <= 0 ||
-        stop <= 0 ||
-        target <= 0
+        !Number.isFinite(rawTarget)
       ) {
+        return;
+      }
+
+      const entry = normalizeTradePrice(rawEntry);
+      const stop = normalizeTradePrice(rawStop);
+      const target = normalizeTradePrice(rawTarget);
+      const destination = detail.destination ?? "plan";
+
+      if (destination === "quick") {
+        store.updateQuickOrder({
+          side: detail.side === "sell" ? "sell" : "buy",
+          sizingMode: "shares",
+          shares:
+            Number(store.quickOrder.shares) > 0
+              ? Math.floor(Number(store.quickOrder.shares))
+              : 100,
+          orderType: "limit",
+          limitPrice: entry,
+          bracketEnabled: true,
+          bracketStop: stop,
+          bracketTarget: target,
+        });
+        setActiveTab("quick");
+        return;
+      }
+
+      if (destination === "auto") {
+        setAutoChartPlan({ entry, stop, target });
+        setActiveTab("auto");
         return;
       }
 
@@ -152,14 +175,19 @@ export default function TradingWorkspacePanel({
             ? Math.floor(Number(store.tradePlan.shares))
             : 100,
       });
-
       setActiveTab("plan");
     };
 
     window.addEventListener("trading-terminal:quick-trade-plan", handler);
     return () =>
       window.removeEventListener("trading-terminal:quick-trade-plan", handler);
-  }, [safeSymbol, store.updateTradePlan, store.tradePlan.shares]);
+  }, [
+    safeSymbol,
+    store.quickOrder.shares,
+    store.tradePlan.shares,
+    store.updateQuickOrder,
+    store.updateTradePlan,
+  ]);
 
   const connected = store.connectionStatus === "connected";
   const busy = store.executionLoading;
@@ -387,6 +415,7 @@ export default function TradingWorkspacePanel({
                 symbol={safeSymbol}
                 currentPrice={safePrice}
                 mode={store.executionMode === "live" ? "live" : "paper"}
+                chartPlan={autoChartPlan}
               />
             </Suspense>
           )}

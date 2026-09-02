@@ -349,6 +349,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     useState<number | null>(null);
   const [mobileChartTradeTarget, setMobileChartTradeTarget] =
     useState<number | null>(null);
+
+  type MobileChartTradeDestination = "quick" | "auto" | "plan";
+  const [mobileChartTradeDestination, setMobileChartTradeDestination] =
+    useState<MobileChartTradeDestination>("plan");
   const [studyVisibility, setStudyVisibility] =
     useState<StudyVisibility>(loadStudyVisibility);
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("cursor");
@@ -677,9 +681,15 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ action?: string }>).detail;
+      const detail = (
+        event as CustomEvent<{
+          action?: string;
+          destination?: MobileChartTradeDestination;
+        }>
+      ).detail;
       if (detail?.action !== "start") return;
 
+      setMobileChartTradeDestination(detail.destination ?? "plan");
       engineRef.current?.setChartTradeCrosshairMode(true);
       setMobileChartTradeActive(true);
       setMobileChartTradeStep("entry");
@@ -772,6 +782,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     // Then deliver the completed plan to its quick-trade-plan listener.
     const completedPlan = {
       source: "mobileChartTrade",
+      destination: mobileChartTradeDestination,
       symbol,
       side: "buy" as const,
       entry,
@@ -2400,7 +2411,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             <div className="mobile-chart-trade-hud__top">
               <div>
                 <div className="mobile-chart-trade-hud__kicker">
-                  Chart Trade - LONG
+                  Chart Trade - {mobileChartTradeDestination.toUpperCase()} - LONG
                 </div>
                 <div className="mobile-chart-trade-hud__step">
                   {mobileChartTradeStep === "entry"

@@ -20,6 +20,11 @@ type AutoTradeWidgetProps = {
   symbol: string;
   currentPrice: number;
   mode: AlpacaMode;
+  chartPlan?: {
+    entry: number;
+    stop: number;
+    target: number;
+  } | null;
 };
 
 function normalizeSymbol(value: unknown): string {
@@ -64,6 +69,7 @@ export default function AutoTradeWidget({
   symbol,
   currentPrice,
   mode,
+  chartPlan,
 }: AutoTradeWidgetProps) {
   const normalizedSymbol = normalizeSymbol(symbol);
   const previousSymbolRef = useRef("");
@@ -89,6 +95,17 @@ export default function AutoTradeWidget({
     setMessage("");
     setError("");
   }, [currentPrice, normalizedSymbol]);
+
+  // MOBILE_CHART_TRADE_PHASE18_TYPES
+  useEffect(() => {
+    if (!chartPlan) return;
+
+    setEntryPrice(inputPrice(chartPlan.entry));
+    setStopPrice(inputPrice(chartPlan.stop));
+    setTargetPrice(inputPrice(chartPlan.target));
+    setMessage("Chart Trade prices loaded. Review sizing, then place the protected overnight order.");
+    setError("");
+  }, [chartPlan]);
 
   useEffect(() => {
     let active = true;
