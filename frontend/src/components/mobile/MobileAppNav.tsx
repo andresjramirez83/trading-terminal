@@ -2,7 +2,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
 const MOBILE_WORKSPACE_EVENT = "trading-mobile-workspace";
 
-type WorkspaceId = "studies" | "lists" | "trade";
+type WorkspaceId = "trade" | "lists" | "news" | "coach" | "level2";
 
 function openWorkspace(workspace: WorkspaceId) {
   window.dispatchEvent(
@@ -28,43 +28,27 @@ export default function MobileAppNav() {
   }
 
   return (
-    <nav className="mobile-app-nav" aria-label="Trading Terminal mobile navigation">
+    <nav
+      className="mobile-app-nav mobile-app-nav--desktop-tabs"
+      aria-label="Trading Terminal mobile navigation"
+    >
+      {/* MOBILE_BOTTOM_TABS_PHASE17 */}
+      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("trade")}>
+        <span>Trading</span>
+      </button>
+
+      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("lists")}>
+        <span>Lists</span>
+      </button>
+
       <NavLink
         to="/chart"
         className={({ isActive }) =>
           `mobile-app-nav__item${isActive ? " mobile-app-nav__item--active" : ""}`
         }
       >
-        <span className="mobile-app-nav__icon" aria-hidden="true">C</span>
         <span>Chart</span>
       </NavLink>
-
-      <button
-        type="button"
-        className="mobile-app-nav__item"
-        onClick={() => handleWorkspace("studies")}
-      >
-        <span className="mobile-app-nav__icon" aria-hidden="true">S</span>
-        <span>Studies</span>
-      </button>
-
-      <button
-        type="button"
-        className="mobile-app-nav__item"
-        onClick={() => handleWorkspace("lists")}
-      >
-        <span className="mobile-app-nav__icon" aria-hidden="true">L</span>
-        <span>Lists</span>
-      </button>
-
-      <button
-        type="button"
-        className="mobile-app-nav__item mobile-app-nav__item--trade"
-        onClick={() => handleWorkspace("trade")}
-      >
-        <span className="mobile-app-nav__icon" aria-hidden="true">T</span>
-        <span>Trade</span>
-      </button>
 
       <NavLink
         to="/scanner"
@@ -72,9 +56,20 @@ export default function MobileAppNav() {
           `mobile-app-nav__item${isActive ? " mobile-app-nav__item--active" : ""}`
         }
       >
-        <span className="mobile-app-nav__icon" aria-hidden="true">Q</span>
         <span>Scanner</span>
       </NavLink>
+
+      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("news")}>
+        <span>News</span>
+      </button>
+
+      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("coach")}>
+        <span>Coach</span>
+      </button>
+
+      <button type="button" className="mobile-app-nav__item" onClick={() => handleWorkspace("level2")}>
+        <span>Level 2</span>
+      </button>
     </nav>
   );
 }

@@ -2473,8 +2473,6 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         <MobileChartWorkspace
           symbol={symbol}
           currentPrice={chartState?.price ?? 0}
-          studyVisibility={studyVisibility}
-          onStudyVisibilityChange={setStudyVisibility}
         />
       </div>
     </div>

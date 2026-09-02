@@ -43,6 +43,7 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
   return (
     <div
       ref={wrapperRef}
+      className="chart-study-toggles"
       style={{
         position: "relative",
         marginLeft: 12,
@@ -50,6 +51,8 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
       }}
     >
       <button
+        type="button"
+        className="chart-study-toggles__button"
         onClick={() => setOpen((value) => !value)}
         style={{
           height: 28,
@@ -68,6 +71,7 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
 
       {open && (
         <div
+          className="chart-study-toggles__menu"
           style={{
             position: "absolute",
             top: 34,

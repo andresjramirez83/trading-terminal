@@ -775,3 +775,84 @@ button, input, select {
   .mobile-chart-trade-hud__candidate strong { color: #93c5fd !important; }
 }
 /* MOBILE_CHART_TRADE_PHASE13_END */
+
+/* MOBILE_BOTTOM_TABS_PHASE17_BEGIN */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-app-nav.mobile-app-nav--desktop-tabs {
+    display: flex !important;
+    grid-template-columns: none !important;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 2px !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+
+  .mobile-app-nav.mobile-app-nav--desktop-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-app-nav.mobile-app-nav--desktop-tabs .mobile-app-nav__item {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 72px;
+    padding: 0 12px !important;
+    font-size: 10px !important;
+    font-weight: 850 !important;
+    white-space: nowrap;
+  }
+
+  .mobile-app-nav.mobile-app-nav--desktop-tabs .mobile-app-nav__item span {
+    line-height: 1;
+  }
+
+  .chart-study-toggles {
+    display: block !important;
+    margin-left: 4px !important;
+    flex-shrink: 0 !important;
+    position: relative !important;
+    z-index: 3500 !important;
+  }
+
+  .chart-study-toggles__button {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    height: 34px !important;
+    min-width: 74px;
+    padding: 0 8px !important;
+    font-size: 10px !important;
+    touch-action: manipulation;
+  }
+
+  .chart-study-toggles__menu {
+    position: fixed !important;
+    top: max(calc(env(safe-area-inset-top) + 88px), 136px) !important;
+    right: 8px !important;
+    left: auto !important;
+    min-width: 220px !important;
+    max-height: min(62dvh, 520px);
+    overflow-y: auto;
+    z-index: 5000 !important;
+    padding: 10px !important;
+    border-radius: 12px !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .chart-study-toggles__menu label {
+    min-height: 38px !important;
+    font-size: 12px !important;
+    touch-action: manipulation;
+  }
+
+  .chart-study-toggles__menu input {
+    width: 18px;
+    height: 18px;
+  }
+}
+/* MOBILE_BOTTOM_TABS_PHASE17_END */

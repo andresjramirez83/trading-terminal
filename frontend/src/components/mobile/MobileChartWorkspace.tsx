@@ -5,8 +5,6 @@ import {
   useMemo,
   useState,
 } from "react";
-import type { StudyVisibility } from "../chart/ChartTypes";
-import ChartStudyToggles from "../chart/ChartStudyToggles";
 
 const TradingWorkspacePanel = lazy(
   () =>
@@ -22,15 +20,25 @@ const WatchlistsWorkspacePanel = lazy(
     ),
 );
 
+const NewsWorkspacePanel = lazy(
+  () => import("../chart/right-panel/workspaces/NewsWorkspacePanel"),
+);
+
+const CoachWorkspacePanel = lazy(
+  () => import("../chart/right-panel/workspaces/CoachWorkspacePanel"),
+);
+
+const Level2WorkspacePanel = lazy(
+  () => import("../chart/right-panel/workspaces/Level2WorkspacePanel"),
+);
+
 export const MOBILE_WORKSPACE_EVENT = "trading-mobile-workspace";
 
-export type MobileWorkspaceId = "studies" | "lists" | "trade";
+export type MobileWorkspaceId = "trade" | "lists" | "news" | "coach" | "level2";
 
 type Props = {
   symbol: string;
   currentPrice: number;
-  studyVisibility: StudyVisibility;
-  onStudyVisibilityChange: (visibility: StudyVisibility) => void;
 };
 
 type MobileWorkspaceEventDetail = {
@@ -42,11 +50,10 @@ function LoadingCard() {
   return <div className="mobile-workspace-loading">Loading...</div>;
 }
 
+// MOBILE_BOTTOM_TABS_PHASE17
 export default function MobileChartWorkspace({
   symbol,
   currentPrice,
-  studyVisibility,
-  onStudyVisibilityChange,
 }: Props) {
   const [workspace, setWorkspace] =
     useState<MobileWorkspaceId | null>(null);
@@ -76,12 +83,16 @@ export default function MobileChartWorkspace({
 
   const title = useMemo(() => {
     switch (workspace) {
-      case "studies":
-        return "Studies";
-      case "lists":
-        return "Watchlists";
       case "trade":
-        return `Trade - ${symbol || "-"}`;
+        return `Trading - ${symbol || "-"}`;
+      case "lists":
+        return "Lists";
+      case "news":
+        return `News - ${symbol || "-"}`;
+      case "coach":
+        return `Coach - ${symbol || "-"}`;
+      case "level2":
+        return `Level 2 - ${symbol || "-"}`;
       default:
         return "";
     }
@@ -122,19 +133,14 @@ export default function MobileChartWorkspace({
 
         <div className="mobile-workspace-body">
           <Suspense fallback={<LoadingCard />}>
-            {workspace === "studies" && (
-              <div className="mobile-studies-shell">
-                <div className="mobile-studies-copy">
-                  Same chart studies as desktop. Changes apply immediately.
-                </div>
-                <ChartStudyToggles
-                  visibility={studyVisibility}
-                  onChange={onStudyVisibilityChange}
-                />
-              </div>
-            )}
 
             {workspace === "lists" && <WatchlistsWorkspacePanel />}
+
+            {workspace === "news" && <NewsWorkspacePanel symbol={symbol} />}
+
+            {workspace === "coach" && <CoachWorkspacePanel symbol={symbol} />}
+
+            {workspace === "level2" && <Level2WorkspacePanel symbol={symbol} />}
 
             {workspace === "trade" && (
               <>
