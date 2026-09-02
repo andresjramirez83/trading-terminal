@@ -242,3 +242,71 @@ button, input, select {
   }
 }
 /* MOBILE_PWA_PHASE2_END */
+
+/* MOBILE_PWA_PHASE3_SAFEAREA_BEGIN
+   iPhone Dynamic Island / notch protection. Desktop remains untouched. */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  :root {
+    --mobile-top-safe: env(safe-area-inset-top);
+    --mobile-tabbar-height: 44px;
+  }
+
+  /* Push the entire chart page below the iPhone status/Dynamic Island area. */
+  .chart-v2-page {
+    box-sizing: border-box !important;
+    padding-top: var(--mobile-top-safe) !important;
+    padding-bottom: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom)) !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+  }
+
+  /* Make the top bar visibly more compact now that it sits below the notch. */
+  .chart-toolbar-v2 {
+    height: 34px !important;
+    min-height: 34px !important;
+    max-height: 34px !important;
+  }
+
+  .mobile-watchlist-arrow {
+    width: 28px !important;
+    min-width: 28px !important;
+    height: 28px !important;
+  }
+
+  .mobile-watchlist-symbol {
+    width: 54px !important;
+    height: 28px !important;
+  }
+
+  .mobile-watchlist-selector {
+    width: 72px !important;
+    min-width: 68px !important;
+    max-width: 76px !important;
+    height: 28px !important;
+  }
+
+  /* Smaller tab bar to give the chart more vertical room. */
+  .mobile-app-nav {
+    height: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom)) !important;
+    min-height: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom)) !important;
+    padding-top: 2px !important;
+  }
+
+  .mobile-app-nav__item {
+    min-height: 36px !important;
+    font-size: 9px !important;
+  }
+
+  .mobile-app-nav__icon {
+    font-size: 13px !important;
+    line-height: 13px !important;
+  }
+
+  /* Scanner also needs to respect the phone notch/status area. */
+  .scanner-page {
+    box-sizing: border-box !important;
+    padding-top: var(--mobile-top-safe) !important;
+    padding-bottom: calc(var(--mobile-tabbar-height) + 8px + env(safe-area-inset-bottom)) !important;
+  }
+}
+/* MOBILE_PWA_PHASE3_SAFEAREA_END */
