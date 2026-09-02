@@ -404,3 +404,53 @@ button, input, select {
   }
 }
 /* MOBILE_CHART_STORY_VIEW_PHASE5_END */
+
+/* MOBILE_CHART_STORY_VIEW_PHASE6_BEGIN
+   Wider price-story view + React-owned reset control. Desktop unaffected. */
+.mobile-chart-reset-shell {
+  display: none;
+}
+
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .chart-panel-main {
+    position: relative !important;
+  }
+
+  /* Phase 4 injected this inside the chart DOM. Hide it; the React shell
+     button below is guaranteed to sit above Lightweight Charts canvases. */
+  .mobile-touch-chart > .mobile-chart-reset {
+    display: none !important;
+  }
+
+  .mobile-chart-reset-shell {
+    position: absolute;
+    z-index: 5000;
+    right: 74px;
+    bottom: 18px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    display: grid !important;
+    place-items: center;
+    border: 1px solid rgba(125, 211, 252, 0.42);
+    border-radius: 999px;
+    background: rgba(4, 11, 22, 0.88);
+    color: #dbeafe;
+    box-shadow:
+      0 5px 18px rgba(0, 0, 0, 0.42),
+      inset 0 0 0 1px rgba(59, 130, 246, 0.10);
+    font-size: 24px;
+    font-weight: 800;
+    line-height: 1;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+
+  .mobile-chart-reset-shell:active {
+    transform: scale(0.93);
+    background: rgba(30, 64, 175, 0.92);
+  }
+}
+/* MOBILE_CHART_STORY_VIEW_PHASE6_END */

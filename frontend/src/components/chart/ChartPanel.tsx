@@ -2242,6 +2242,18 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
         <ChartViewport ref={containerRef} liveStatus={liveStatus} />
 
+        {/* MOBILE_CHART_STORY_VIEW_PHASE6
+            React-owned mobile reset control stays above the chart canvas stack. */}
+        <button
+          type="button"
+          className="mobile-chart-reset-shell"
+          aria-label="Reset mobile chart view"
+          title="Reset chart view"
+          onClick={() => engineRef.current?.resetMobileView()}
+        >
+          ↺
+        </button>
+
         <RightInfoPanel
           symbol={symbol}
           chartState={chartState}

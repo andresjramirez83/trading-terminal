@@ -489,9 +489,9 @@ export class ChartEngine {
       });
 
       this.chart.timeScale().applyOptions({
-        rightOffset: 6,
-        barSpacing: 4.6,
-        minBarSpacing: 2.6,
+        rightOffset: 5,
+        barSpacing: 2.9,
+        minBarSpacing: 1.5,
       });
     }
 
@@ -734,7 +734,7 @@ export class ChartEngine {
     }
   }
 
-  private resetMobileView(): void {
+  public resetMobileView(): void {
     if (!this.bars.length) {
       this.chart.timeScale().fitContent();
       return;
@@ -742,11 +742,11 @@ export class ChartEngine {
 
     const lastIndex = this.bars.length - 1;
     const width = Math.max(1, this.container.clientWidth);
-    // MOBILE_CHART_STORY_VIEW_PHASE5
-    // Mobile default favors enough history to read the setup/price story.
-    // Pinch can still zoom closer; double-tap / reset returns here.
-    const visibleCandles = width <= 430 ? 112 : width <= 600 ? 124 : 138;
-    const futureBars = width <= 430 ? 6 : 8;
+    // MOBILE_CHART_STORY_VIEW_PHASE6
+    // Wider phone context: enough history to read the full setup / price story.
+    // Pinch remains available for close inspection.
+    const visibleCandles = width <= 430 ? 180 : width <= 600 ? 200 : 220;
+    const futureBars = width <= 430 ? 5 : 7;
     const from = Math.max(0, lastIndex - visibleCandles + 1);
     const to = lastIndex + futureBars;
 
