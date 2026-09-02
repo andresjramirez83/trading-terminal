@@ -815,6 +815,24 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   }
 
   useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ direction?: "in" | "out" }>
+      ).detail;
+
+      if (detail?.direction !== "in" && detail?.direction !== "out") {
+        return;
+      }
+
+      engineRef.current?.zoomTimeScale(detail.direction);
+    };
+
+    window.addEventListener("trading-mobile-chart-zoom", handler);
+    return () =>
+      window.removeEventListener("trading-mobile-chart-zoom", handler);
+  }, []);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 

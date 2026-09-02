@@ -1688,6 +1688,27 @@ export class ChartEngine {
     this.studyRenderer.scheduleOverlayRender();
   }
 
+  // MOBILE_STUDIES_ZOOM_PHASE19
+  public zoomTimeScale(direction: "in" | "out"): void {
+    const timeScale = this.chart.timeScale();
+    const current = Number(timeScale.options().barSpacing);
+
+    if (!Number.isFinite(current) || current <= 0) return;
+
+    const factor = direction === "in" ? 1.28 : 1 / 1.28;
+    const minSpacing = this.isMobileChartViewport() ? 1.5 : 2;
+    const maxSpacing = this.isMobileChartViewport() ? 18 : 30;
+    const next = Math.max(
+      minSpacing,
+      Math.min(maxSpacing, current * factor),
+    );
+
+    timeScale.applyOptions({ barSpacing: next });
+
+    this.scheduleSessionBandsRender();
+    this.studyRenderer.scheduleOverlayRender();
+  }
+
   private panTimeScale(deltaX: number): void {
     if (!Number.isFinite(deltaX) || deltaX === 0) return;
 

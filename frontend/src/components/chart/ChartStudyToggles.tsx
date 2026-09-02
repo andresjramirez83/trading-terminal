@@ -24,17 +24,17 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    function onDocumentMouseDown(event: MouseEvent) {
+    function onDocumentPointerDown(event: PointerEvent) {
       if (!wrapperRef.current) return;
       if (!wrapperRef.current.contains(event.target as Node)) {
         setOpen(false);
       }
     }
 
-    document.addEventListener("mousedown", onDocumentMouseDown);
+    document.addEventListener("pointerdown", onDocumentPointerDown);
 
     return () => {
-      document.removeEventListener("mousedown", onDocumentMouseDown);
+      document.removeEventListener("pointerdown", onDocumentPointerDown);
     };
   }, []);
 
@@ -53,7 +53,25 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
       <button
         type="button"
         className="chart-study-toggles__button"
-        onClick={() => setOpen((value) => !value)}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+
+          if (event.pointerType === "touch") {
+            event.preventDefault();
+            setOpen((value) => !value);
+          }
+        }}
+        onClick={(event) => {
+          event.stopPropagation();
+
+          // Touch is handled on pointer down because the chart can consume
+          // the later synthetic click on iOS.
+          if ((event.nativeEvent as PointerEvent).pointerType === "touch") {
+            return;
+          }
+
+          setOpen((value) => !value);
+        }}
         style={{
           height: 28,
           padding: "0 10px",
@@ -72,6 +90,8 @@ export default function ChartStudyToggles({ visibility, onChange }: Props) {
       {open && (
         <div
           className="chart-study-toggles__menu"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
           style={{
             position: "absolute",
             top: 34,

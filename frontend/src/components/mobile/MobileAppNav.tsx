@@ -27,12 +27,46 @@ export default function MobileAppNav() {
     openWorkspace(workspace);
   }
 
+  function zoom(direction: "in" | "out") {
+    window.dispatchEvent(
+      new CustomEvent("trading-mobile-chart-zoom", {
+        detail: { direction },
+      }),
+    );
+  }
+
   return (
-    <nav
+    <>
+      {onChart && (
+        <div className="mobile-chart-zoom-controls" aria-label="Chart zoom controls">
+          <button
+            type="button"
+            className="mobile-chart-zoom-button"
+            onClick={() => zoom("in")}
+            aria-label="Zoom chart in"
+            title="Zoom in"
+          >
+            <span aria-hidden="true">⌕+</span>
+          </button>
+
+          <button
+            type="button"
+            className="mobile-chart-zoom-button"
+            onClick={() => zoom("out")}
+            aria-label="Zoom chart out"
+            title="Zoom out"
+          >
+            <span aria-hidden="true">⌕−</span>
+          </button>
+        </div>
+      )}
+
+      <nav
       className="mobile-app-nav mobile-app-nav--desktop-tabs"
       aria-label="Trading Terminal mobile navigation"
     >
       {/* MOBILE_CHART_TRADE_PHASE18_TYPES */}
+      {/* MOBILE_STUDIES_ZOOM_PHASE19 */}
       <NavLink
         to="/chart"
         className={({ isActive }) =>
@@ -70,6 +104,7 @@ export default function MobileAppNav() {
       >
         <span>Scanner</span>
       </NavLink>
-    </nav>
+      </nav>
+    </>
   );
 }
