@@ -489,9 +489,9 @@ export class ChartEngine {
       });
 
       this.chart.timeScale().applyOptions({
-        rightOffset: 7,
-        barSpacing: 6,
-        minBarSpacing: 3.5,
+        rightOffset: 6,
+        barSpacing: 4.6,
+        minBarSpacing: 2.6,
       });
     }
 
@@ -742,8 +742,11 @@ export class ChartEngine {
 
     const lastIndex = this.bars.length - 1;
     const width = Math.max(1, this.container.clientWidth);
-    const visibleCandles = width <= 430 ? 70 : width <= 600 ? 82 : 96;
-    const futureBars = width <= 430 ? 7 : 9;
+    // MOBILE_CHART_STORY_VIEW_PHASE5
+    // Mobile default favors enough history to read the setup/price story.
+    // Pinch can still zoom closer; double-tap / reset returns here.
+    const visibleCandles = width <= 430 ? 112 : width <= 600 ? 124 : 138;
+    const futureBars = width <= 430 ? 6 : 8;
     const from = Math.max(0, lastIndex - visibleCandles + 1);
     const to = lastIndex + futureBars;
 

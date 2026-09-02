@@ -380,3 +380,27 @@ button, input, select {
   }
 }
 /* MOBILE_CHART_GESTURES_PHASE4_END */
+
+/* MOBILE_CHART_STORY_VIEW_PHASE5_BEGIN
+   Broader mobile price-story view + guaranteed reset-control positioning. */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-touch-chart {
+    position: relative !important;
+  }
+
+  .mobile-chart-reset {
+    display: grid !important;
+    visibility: visible !important;
+    opacity: 0.88 !important;
+    right: 76px !important;
+    bottom: 22px !important;
+    z-index: 100 !important;
+    width: 36px !important;
+    height: 36px !important;
+  }
+
+  .mobile-chart-reset:active {
+    opacity: 1 !important;
+  }
+}
+/* MOBILE_CHART_STORY_VIEW_PHASE5_END */
