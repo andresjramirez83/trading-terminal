@@ -367,6 +367,50 @@ export class ChartEngine {
 
   // MOBILE_CHART_TOUCH_PHASE8
   // Mobile interaction now relies on Lightweight Charts native gestures.
+
+  // MOBILE_CHART_PRICEPAN_PHASE9
+  // Touching the right price axis gets a dedicated vertical pan gesture.
+  private mobilePricePanPointerId: number | null = null;
+  private mobilePricePanLastY = 0;
+  private readonly handleMobilePricePanPointerDown = (event: PointerEvent) => {
+    if (!this.isMobileChartViewport() || event.pointerType !== "touch") return;
+
+    const rect = this.container.getBoundingClientRect();
+    const localX = event.clientX - rect.left;
+    const priceScaleTouchWidth = Math.min(92, Math.max(72, rect.width * 0.12));
+
+    if (localX < rect.width - priceScaleTouchWidth) return;
+
+    this.mobilePricePanPointerId = event.pointerId;
+    this.mobilePricePanLastY = event.clientY;
+    this.container.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  };
+
+  private readonly handleMobilePricePanPointerMove = (event: PointerEvent) => {
+    if (this.mobilePricePanPointerId !== event.pointerId) return;
+
+    const deltaY = event.clientY - this.mobilePricePanLastY;
+    this.mobilePricePanLastY = event.clientY;
+
+    if (Math.abs(deltaY) >= 0.5) {
+      this.panPriceScale(deltaY);
+    }
+
+    event.preventDefault();
+  };
+
+  private readonly handleMobilePricePanPointerUp = (event: PointerEvent) => {
+    if (this.mobilePricePanPointerId !== event.pointerId) return;
+
+    this.mobilePricePanPointerId = null;
+    try {
+      this.container.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture may already have been released by Safari.
+    }
+    event.preventDefault();
+  };
   private readonly handleMobilePointerUp = (event: PointerEvent) => {
     if (!this.isMobileChartViewport() || event.pointerType !== "touch") return;
 
@@ -678,6 +722,18 @@ export class ChartEngine {
       this.container.classList.add("mobile-touch-chart");
       this.container.addEventListener("pointerup", this.handleMobilePointerUp, {
         passive: true,
+      });
+      this.container.addEventListener("pointerdown", this.handleMobilePricePanPointerDown, {
+        passive: false,
+      });
+      this.container.addEventListener("pointermove", this.handleMobilePricePanPointerMove, {
+        passive: false,
+      });
+      this.container.addEventListener("pointerup", this.handleMobilePricePanPointerUp, {
+        passive: false,
+      });
+      this.container.addEventListener("pointercancel", this.handleMobilePricePanPointerUp, {
+        passive: false,
       });
       this.installMobileChartControls();
     }
@@ -2121,6 +2177,10 @@ setMarketContext(symbol?: string, timeframe?: string): void {
 
   destroy(): void {
     this.container.removeEventListener("pointerup", this.handleMobilePointerUp);
+    this.container.removeEventListener("pointerdown", this.handleMobilePricePanPointerDown);
+    this.container.removeEventListener("pointermove", this.handleMobilePricePanPointerMove);
+    this.container.removeEventListener("pointerup", this.handleMobilePricePanPointerUp);
+    this.container.removeEventListener("pointercancel", this.handleMobilePricePanPointerUp);
     this.mobileResetButton?.remove();
     this.mobileResetButton = null;
     this.mobileGestureHint?.remove();

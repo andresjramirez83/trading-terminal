@@ -472,3 +472,30 @@ button, input, select {
   }
 }
 /* MOBILE_CHART_TOUCH_PHASE8_END */
+
+/* MOBILE_CHART_PHASE9_BEGIN
+   Standalone iPhone safe-area fallback + dedicated price-axis touch zone. */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .chart-v2-page {
+    padding-top: max(env(safe-area-inset-top), 48px) !important;
+  }
+
+  .scanner-page {
+    padding-top: max(env(safe-area-inset-top), 48px) !important;
+  }
+
+  .mobile-touch-chart {
+    touch-action: none;
+  }
+}
+
+@media (display-mode: standalone) and (max-width: 767px) {
+  .chart-v2-page {
+    padding-top: max(env(safe-area-inset-top), 54px) !important;
+  }
+
+  .scanner-page {
+    padding-top: max(env(safe-area-inset-top), 54px) !important;
+  }
+}
+/* MOBILE_CHART_PHASE9_END */
