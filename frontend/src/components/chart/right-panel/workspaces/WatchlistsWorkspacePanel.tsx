@@ -39,6 +39,14 @@ function isManualWatchlist(watchlist: { id?: string; name?: string; type?: strin
   return type === "manual" || id.includes("manual") || name.includes("manual");
 }
 
+function isCustomWatchlist(
+  watchlist: { id?: string; type?: string } | null | undefined
+): boolean {
+  const id = String(watchlist?.id ?? "").toLowerCase();
+  const type = String(watchlist?.type ?? "").toLowerCase();
+  return Boolean(id && id !== "manual" && (type === "custom" || type === "favorites"));
+}
+
 function getTypeLabel(type: WatchlistType): string {
   if (type === "scanner") return "Scanner";
   if (type === "manual") return "Manual";
@@ -258,12 +266,15 @@ export default function WatchlistsWorkspacePanel() {
 
   const selectedWatchlist = activeWatchlist ?? watchlists[0];
   const selectedIsManual = isManualWatchlist(selectedWatchlist);
+  const selectedIsCustom = isCustomWatchlist(selectedWatchlist);
+  const selectedCanEditSymbols = selectedIsManual || selectedIsCustom;
+  const selectedCanManageList = selectedIsCustom;
   const displaySymbols = selectedWatchlist?.symbols ?? [];
 
   const sortedSymbols = useMemo(() => {
-    if (selectedIsManual) return displaySymbols;
+    if (selectedCanEditSymbols) return displaySymbols;
     return [...displaySymbols].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-  }, [displaySymbols, selectedIsManual]);
+  }, [displaySymbols, selectedCanEditSymbols]);
 
   const readyCount = displaySymbols.filter((item) => item.tone === "ready").length;
   const weakCount = displaySymbols.filter((item) => item.tone === "weak").length;
@@ -277,7 +288,7 @@ export default function WatchlistsWorkspacePanel() {
         );
 
   function handleAddSymbols(raw: string) {
-    if (!selectedIsManual || !selectedWatchlist?.id) return;
+    if (!selectedCanEditSymbols || !selectedWatchlist?.id) return;
 
     const symbols = parseSymbols(raw);
     if (!symbols.length) return;
@@ -290,7 +301,7 @@ export default function WatchlistsWorkspacePanel() {
   }
 
   function handleRemoveSymbol(symbol: string) {
-    if (!selectedIsManual || !selectedWatchlist?.id) return;
+    if (!selectedCanEditSymbols || !selectedWatchlist?.id) return;
 
     const normalized = normalizeWorkspaceSymbol(symbol);
     removeSymbol(selectedWatchlist.id, normalized);
@@ -314,7 +325,7 @@ export default function WatchlistsWorkspacePanel() {
   }
 
   function handleRenameWatchlist() {
-    if (!selectedWatchlist) return;
+    if (!selectedWatchlist || !selectedCanManageList) return;
 
     const name = window.prompt("Rename watchlist:", selectedWatchlist.name);
     if (!name?.trim()) return;
@@ -323,7 +334,7 @@ export default function WatchlistsWorkspacePanel() {
   }
 
   function handleDeleteWatchlist() {
-    if (!selectedWatchlist) return;
+    if (!selectedWatchlist || !selectedCanManageList) return;
 
     if (watchlists.length <= 1) {
       window.alert("You need at least one watchlist.");
@@ -382,17 +393,29 @@ export default function WatchlistsWorkspacePanel() {
             + New
           </button>
 
-          <button type="button" onClick={handleRenameWatchlist} style={styles.actionButton}>
+          <button
+            type="button"
+            onClick={handleRenameWatchlist}
+            disabled={!selectedCanManageList}
+            style={{
+              ...styles.actionButton,
+              opacity: selectedCanManageList ? 1 : 0.45,
+              cursor: selectedCanManageList ? "pointer" : "not-allowed",
+            }}
+          >
             Rename
           </button>
 
           <button
             type="button"
             onClick={handleDeleteWatchlist}
+            disabled={!selectedCanManageList}
             style={{
               ...styles.actionButton,
               borderColor: "#7f1d1d",
               color: "#fca5a5",
+              opacity: selectedCanManageList ? 1 : 0.45,
+              cursor: selectedCanManageList ? "pointer" : "not-allowed",
             }}
           >
             Delete
@@ -425,7 +448,13 @@ export default function WatchlistsWorkspacePanel() {
       </Card>
 
       <Card
-        title={selectedIsManual ? "Manual Watchlist" : "Ranked Opportunities"}
+        title={
+          selectedIsManual
+            ? "Manual Watchlist"
+            : selectedIsCustom
+              ? "Custom Watchlist"
+              : "Ranked Opportunities"
+        }
         right={
           <span
             style={{
@@ -442,8 +471,8 @@ export default function WatchlistsWorkspacePanel() {
       >
         {sortedSymbols.length === 0 ? (
           <div style={styles.emptyState}>
-            {selectedIsManual
-              ? "Manual watchlist is empty. Add symbols below."
+            {selectedCanEditSymbols
+              ? "This watchlist is empty. Add symbols below."
               : "This watchlist is empty. Scanner-generated lists will populate here automatically."}
           </div>
         ) : (
@@ -587,7 +616,7 @@ export default function WatchlistsWorkspacePanel() {
                     {item.tone ?? "watch"}
                   </Badge>
 
-                  {selectedIsManual ? (
+                  {selectedCanEditSymbols ? (
                     <button
                       type="button"
                       onClick={(event) => {
@@ -625,7 +654,7 @@ export default function WatchlistsWorkspacePanel() {
           </div>
         )}
 
-        {selectedIsManual ? (
+        {selectedCanEditSymbols ? (
           <div style={styles.addRow}>
             <input
               value={addText}

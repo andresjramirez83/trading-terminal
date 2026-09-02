@@ -177,6 +177,12 @@ class ManualWatchlistPayload(BaseModel):
     symbols: List[str] = []
 
 
+class UserWatchlistPayload(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    symbols: Optional[List[str]] = None
+
+
 class ChartPreferencesPayload(BaseModel):
     preferences: Dict[str, Any] = {}
 
@@ -256,6 +262,63 @@ def _normalize_symbol_list(items: List[str]) -> List[str]:
     return out
 
 
+def _normalize_user_watchlist_id(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    out: List[str] = []
+    previous_underscore = False
+    for ch in raw:
+        if ch.isalnum():
+            out.append(ch)
+            previous_underscore = False
+        elif not previous_underscore:
+            out.append("_")
+            previous_underscore = True
+    normalized = "".join(out).strip("_")
+    return normalized[:100]
+
+
+def _normalize_user_watchlists(items: Any) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        watchlist_id = _normalize_user_watchlist_id(item.get("id"))
+        if not watchlist_id or watchlist_id in {"manual", "scanner"} or watchlist_id in seen:
+            continue
+
+        name = str(item.get("name") or "").strip()[:80]
+        if not name:
+            name = watchlist_id.replace("_", " ").title()
+
+        description = str(item.get("description") or "").strip()[:240]
+        symbols = _normalize_symbol_list(item.get("symbols") or [])
+
+        seen.add(watchlist_id)
+        out.append({
+            "id": watchlist_id,
+            "name": name,
+            "description": description,
+            "symbols": symbols,
+        })
+
+    return out
+
+
+def _user_watchlist_response(state: Dict[str, Any]) -> Dict[str, Any]:
+    watchlists = _normalize_user_watchlists(state.get("userWatchlists") or [])
+    return {
+        "watchlists": watchlists,
+        "count": len(watchlists),
+        "revision": max(0, int(state.get("userWatchlistsRevision") or 0)),
+        "updatedAt": state.get("userWatchlistsUpdatedAt"),
+    }
+
+
 @contextmanager
 def _locked_alpaca_state():
     """Serialize app-state access across threads and Gunicorn workers."""
@@ -282,6 +345,9 @@ def _empty_alpaca_state() -> Dict[str, Any]:
         "watchlist": [],
         "manualWatchlist": [],
         "manualWatchlistUpdatedAt": None,
+        "userWatchlists": [],
+        "userWatchlistsRevision": 0,
+        "userWatchlistsUpdatedAt": None,
         "studyVisibility": {},
         "chartPreferences": {},
         "chartPreferencesRevision": 0,
@@ -311,6 +377,9 @@ def _read_alpaca_state_unlocked() -> Dict[str, Any]:
         "watchlist": data.get("watchlist") if isinstance(data.get("watchlist"), list) else [],
         "manualWatchlist": data.get("manualWatchlist") if isinstance(data.get("manualWatchlist"), list) else [],
         "manualWatchlistUpdatedAt": data.get("manualWatchlistUpdatedAt"),
+        "userWatchlists": _normalize_user_watchlists(data.get("userWatchlists") or []),
+        "userWatchlistsRevision": max(0, int(data.get("userWatchlistsRevision") or 0)),
+        "userWatchlistsUpdatedAt": data.get("userWatchlistsUpdatedAt"),
         "studyVisibility": data.get("studyVisibility") if isinstance(data.get("studyVisibility"), dict) else {},
         "chartPreferences": data.get("chartPreferences") if isinstance(data.get("chartPreferences"), dict) else {},
         "chartPreferencesRevision": max(0, int(data.get("chartPreferencesRevision") or 0)),
@@ -3374,6 +3443,18 @@ def put_shared_alpaca_state(payload: SharedAlpacaStatePayload):
         else:
             clean["manualWatchlistUpdatedAt"] = None
 
+        # Custom user watchlists have their own atomic endpoints. Preserve them
+        # when an older browser saves the legacy full Alpaca state document.
+        clean["userWatchlists"] = _normalize_user_watchlists(
+            existing.get("userWatchlists") or []
+        )
+        clean["userWatchlistsRevision"] = max(
+            0, int(existing.get("userWatchlistsRevision") or 0)
+        )
+        clean["userWatchlistsUpdatedAt"] = existing.get(
+            "userWatchlistsUpdatedAt"
+        )
+
         # Chart preferences have their own atomic endpoint. Preserve them when
         # an older browser saves the legacy full Alpaca state document.
         clean["chartPreferences"] = existing.get("chartPreferences") or {}
@@ -3506,6 +3587,123 @@ def toggle_manual_watchlist_symbol(payload: dict = Body(default={})):
         "count": len(current),
         "updatedAt": updated_at,
     }
+
+
+@app.get("/app-state/alpaca/user-watchlists")
+def get_user_watchlists():
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        return _user_watchlist_response(state)
+
+
+@app.put("/app-state/alpaca/user-watchlists/{watchlist_id}")
+def put_user_watchlist(watchlist_id: str, payload: UserWatchlistPayload):
+    normalized_id = _normalize_user_watchlist_id(watchlist_id)
+    if not normalized_id or normalized_id in {"manual", "scanner"}:
+        raise HTTPException(status_code=400, detail="A valid custom watchlist id is required")
+
+    updated_at = datetime.now(timezone.utc).timestamp() * 1000
+
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        current = _normalize_user_watchlists(state.get("userWatchlists") or [])
+        existing = next((item for item in current if item["id"] == normalized_id), None)
+
+        if existing is None:
+            name = str(payload.name or "").strip()[:80]
+            if not name:
+                name = normalized_id.replace("_", " ").title()
+            watchlist = {
+                "id": normalized_id,
+                "name": name,
+                "description": str(payload.description or "Custom watchlist ready for symbols.").strip()[:240],
+                "symbols": _normalize_symbol_list(payload.symbols or []),
+            }
+            current.append(watchlist)
+        else:
+            if payload.name is not None:
+                name = str(payload.name).strip()[:80]
+                if name:
+                    existing["name"] = name
+            if payload.description is not None:
+                existing["description"] = str(payload.description).strip()[:240]
+            if payload.symbols is not None:
+                existing["symbols"] = _normalize_symbol_list(payload.symbols)
+
+        state["userWatchlists"] = _normalize_user_watchlists(current)
+        state["userWatchlistsRevision"] = max(
+            0, int(state.get("userWatchlistsRevision") or 0)
+        ) + 1
+        state["userWatchlistsUpdatedAt"] = updated_at
+        state["updatedAt"] = updated_at
+        _write_alpaca_state_unlocked(state)
+        return _user_watchlist_response(state)
+
+
+@app.delete("/app-state/alpaca/user-watchlists/{watchlist_id}")
+def delete_user_watchlist(watchlist_id: str):
+    normalized_id = _normalize_user_watchlist_id(watchlist_id)
+    if not normalized_id or normalized_id in {"manual", "scanner"}:
+        raise HTTPException(status_code=400, detail="A valid custom watchlist id is required")
+
+    updated_at = datetime.now(timezone.utc).timestamp() * 1000
+
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        current = _normalize_user_watchlists(state.get("userWatchlists") or [])
+        next_lists = [item for item in current if item["id"] != normalized_id]
+
+        if len(next_lists) != len(current):
+            state["userWatchlists"] = next_lists
+            state["userWatchlistsRevision"] = max(
+                0, int(state.get("userWatchlistsRevision") or 0)
+            ) + 1
+            state["userWatchlistsUpdatedAt"] = updated_at
+            state["updatedAt"] = updated_at
+            _write_alpaca_state_unlocked(state)
+
+        return _user_watchlist_response(state)
+
+
+@app.post("/app-state/alpaca/user-watchlists/{watchlist_id}/toggle")
+def toggle_user_watchlist_symbol(watchlist_id: str, payload: dict = Body(default={})):
+    normalized_id = _normalize_user_watchlist_id(watchlist_id)
+    if not normalized_id or normalized_id in {"manual", "scanner"}:
+        raise HTTPException(status_code=400, detail="A valid custom watchlist id is required")
+
+    symbol = _normalize_symbol_list([str(payload.get("symbol") or "")])
+    if not symbol:
+        raise HTTPException(status_code=400, detail="A valid symbol is required")
+
+    normalized_symbol = symbol[0]
+    requested_enabled = payload.get("enabled")
+    updated_at = datetime.now(timezone.utc).timestamp() * 1000
+
+    with _locked_alpaca_state():
+        state = _read_alpaca_state_unlocked()
+        current = _normalize_user_watchlists(state.get("userWatchlists") or [])
+        target = next((item for item in current if item["id"] == normalized_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Custom watchlist not found")
+
+        symbols = _normalize_symbol_list(target.get("symbols") or [])
+        is_present = normalized_symbol in symbols
+        enabled = (not is_present) if requested_enabled is None else bool(requested_enabled)
+
+        if enabled and not is_present:
+            symbols.append(normalized_symbol)
+        elif not enabled and is_present:
+            symbols = [item for item in symbols if item != normalized_symbol]
+
+        target["symbols"] = symbols
+        state["userWatchlists"] = _normalize_user_watchlists(current)
+        state["userWatchlistsRevision"] = max(
+            0, int(state.get("userWatchlistsRevision") or 0)
+        ) + 1
+        state["userWatchlistsUpdatedAt"] = updated_at
+        state["updatedAt"] = updated_at
+        _write_alpaca_state_unlocked(state)
+        return _user_watchlist_response(state)
 
 
 @app.get("/health")

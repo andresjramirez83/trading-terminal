@@ -97,6 +97,7 @@ const WatchlistContext = createContext<WatchlistContextValue | null>(null);
 const WATCHLIST_STORAGE_KEY = "trading.workstation.watchlists.v1";
 const ACTIVE_WATCHLIST_STORAGE_KEY = "trading.workstation.activeWatchlist.v1";
 const MANUAL_WATCHLIST_POLL_MS = 10_000;
+const USER_WATCHLIST_POLL_MS = 10_000;
 const SCANNER_WATCHLIST_POLL_MS = 45_000;
 
 type CachedScannerRow = {
@@ -163,6 +164,20 @@ type ManualWatchlistApiResponse = {
   updatedAt: number | null;
 };
 
+type CloudUserWatchlist = {
+  id: string;
+  name: string;
+  description?: string;
+  symbols: string[];
+};
+
+type UserWatchlistsApiResponse = {
+  watchlists: CloudUserWatchlist[];
+  count: number;
+  revision: number;
+  updatedAt: number | null;
+};
+
 async function parseManualWatchlistResponse(
   response: Response
 ): Promise<ManualWatchlistApiResponse> {
@@ -218,6 +233,80 @@ async function setManualWatchlistSymbol(
   );
 
   return parseManualWatchlistResponse(response);
+}
+
+async function parseUserWatchlistsResponse(
+  response: Response
+): Promise<UserWatchlistsApiResponse> {
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`User watchlist request failed: ${response.status} ${text}`);
+  }
+
+  const payload = JSON.parse(text) as Partial<UserWatchlistsApiResponse>;
+  const watchlists = Array.isArray(payload.watchlists)
+    ? payload.watchlists
+        .map((item) => ({
+          id: normalizeWatchlistId(item?.id ?? ""),
+          name: String(item?.name ?? "").trim(),
+          description: String(item?.description ?? ""),
+          symbols: uniqueSymbolStrings(item?.symbols ?? []),
+        }))
+        .filter((item) => item.id && item.id !== "manual" && item.id !== "scanner")
+    : [];
+
+  return {
+    watchlists,
+    count: watchlists.length,
+    revision: Math.max(0, Number(payload.revision ?? 0) || 0),
+    updatedAt: typeof payload.updatedAt === "number" ? payload.updatedAt : null,
+  };
+}
+
+async function fetchUserWatchlists(): Promise<UserWatchlistsApiResponse> {
+  const response = await fetch(`${API_BASE}/app-state/alpaca/user-watchlists`);
+  return parseUserWatchlistsResponse(response);
+}
+
+async function upsertUserWatchlist(
+  watchlistId: string,
+  payload: { name?: string; description?: string; symbols?: string[] }
+): Promise<UserWatchlistsApiResponse> {
+  const response = await fetch(
+    `${API_BASE}/app-state/alpaca/user-watchlists/${encodeURIComponent(normalizeWatchlistId(watchlistId))}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+  return parseUserWatchlistsResponse(response);
+}
+
+async function deleteUserWatchlistCloud(
+  watchlistId: string
+): Promise<UserWatchlistsApiResponse> {
+  const response = await fetch(
+    `${API_BASE}/app-state/alpaca/user-watchlists/${encodeURIComponent(normalizeWatchlistId(watchlistId))}`,
+    { method: "DELETE" }
+  );
+  return parseUserWatchlistsResponse(response);
+}
+
+async function setUserWatchlistSymbol(
+  watchlistId: string,
+  symbol: string,
+  enabled: boolean
+): Promise<UserWatchlistsApiResponse> {
+  const response = await fetch(
+    `${API_BASE}/app-state/alpaca/user-watchlists/${encodeURIComponent(normalizeWatchlistId(watchlistId))}/toggle`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol: normalizeSymbol(symbol), enabled }),
+    }
+  );
+  return parseUserWatchlistsResponse(response);
 }
 
 function readMarketDataMode(): MarketDataMode {
@@ -572,12 +661,55 @@ function normalizeWatchlist(input: Watchlist): Watchlist | null {
   };
 }
 
-function ensureDefaults(watchlists: Watchlist[]): Watchlist[] {
-  const storedManual = watchlists
-    .map((item) => normalizeWatchlist(item))
-    .find((item) => item?.id === "manual");
+function isUserOwnedWatchlist(watchlist: Watchlist | null | undefined): boolean {
+  return Boolean(
+    watchlist &&
+      watchlist.id !== "manual" &&
+      watchlist.type !== "scanner" &&
+      (watchlist.type === "custom" || watchlist.type === "favorites")
+  );
+}
 
-  return [storedManual ?? DEFAULT_WATCHLISTS[0]];
+function cloudUserWatchlistToWatchlist(
+  input: CloudUserWatchlist
+): Watchlist | null {
+  const id = normalizeWatchlistId(input.id);
+  if (!id || id === "manual" || id === "scanner") return null;
+
+  return {
+    id,
+    name: input.name?.trim() || titleCaseFromId(id),
+    type: "custom",
+    description: input.description ?? "Custom watchlist ready for symbols.",
+    symbols: uniqueSymbolStrings(input.symbols ?? [])
+      .map((symbol) => normalizeWatchlistSymbol(symbol))
+      .filter((item): item is WatchlistSymbol => item !== null),
+  };
+}
+
+function mergeCloudUserWatchlists(
+  current: Watchlist[],
+  cloudWatchlists: CloudUserWatchlist[]
+): Watchlist[] {
+  const manual =
+    current.find((watchlist) => watchlist.id === "manual") ??
+    DEFAULT_WATCHLISTS[0];
+  const scanners = current.filter((watchlist) => watchlist.type === "scanner");
+  const userWatchlists = cloudWatchlists
+    .map((watchlist) => cloudUserWatchlistToWatchlist(watchlist))
+    .filter((watchlist): watchlist is Watchlist => watchlist !== null);
+
+  return [manual, ...userWatchlists, ...scanners];
+}
+
+function ensureDefaults(watchlists: Watchlist[]): Watchlist[] {
+  const normalized = watchlists
+    .map((item) => normalizeWatchlist(item))
+    .filter((item): item is Watchlist => item !== null);
+  const storedManual = normalized.find((item) => item.id === "manual");
+  const userWatchlists = normalized.filter((item) => isUserOwnedWatchlist(item));
+
+  return [storedManual ?? DEFAULT_WATCHLISTS[0], ...userWatchlists];
 }
 
 function parseStoredWatchlists(raw: string | null): Watchlist[] {
@@ -722,6 +854,10 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   const initialManualSymbolsRef = useRef<string[]>(getManualSymbols(watchlists));
   const liveWatchlistsRef = useRef<Watchlist[]>(watchlists);
   const manualMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const userWatchlistMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const initialUserWatchlistsRef = useRef<Watchlist[]>(
+    watchlists.filter((watchlist) => isUserOwnedWatchlist(watchlist))
+  );
   const previousManualSymbolsRef = useRef<Set<string>>(new Set());
   const didCaptureInitialManualRef = useRef(false);
 
@@ -805,8 +941,12 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
           const manual =
             current.find((watchlist) => watchlist.id === "manual") ??
             DEFAULT_WATCHLISTS[0];
+          const userWatchlists = current.filter((watchlist) =>
+            isUserOwnedWatchlist(watchlist)
+          );
           return [
             manual,
+            ...userWatchlists,
             ...normalizedDefinitions.map((definition) => {
               const cached = cachedById.get(definition.id);
               const rows = Array.isArray(cached?.rows) ? cached.rows : [];
@@ -831,6 +971,9 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         setActiveWatchlistId((current) => {
           const validIds = new Set([
             "manual",
+            ...liveWatchlistsRef.current
+              .filter((watchlist) => isUserOwnedWatchlist(watchlist))
+              .map((watchlist) => watchlist.id),
             ...normalizedDefinitions.map((definition) => definition.id),
           ]);
           return validIds.has(current) ? current : "manual";
@@ -914,13 +1057,29 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const queueUserWatchlistMutation = useCallback(
+    (operation: () => Promise<UserWatchlistsApiResponse>) => {
+      userWatchlistMutationQueueRef.current = userWatchlistMutationQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const snapshot = await operation();
+          setWatchlists((current) =>
+            mergeCloudUserWatchlists(current, snapshot.watchlists)
+          );
+        })
+        .catch((error) => {
+          console.warn("[WatchlistContext] custom watchlist sync failed", error);
+        });
+    },
+    []
+  );
+
   useEffect(() => {
     if (typeof window === "undefined" || marketDataMode === "replay") return;
 
     // Scanner watchlists are runtime data refreshed from the backend every 45s.
-    // Persisting every scanner row (price, volume, notes, scores, etc.) can easily
-    // exceed the browser's localStorage quota and crash the React tree.  Only the
-    // small manual list needs local persistence; the backend remains authoritative.
+    // Keep only user-owned lists in localStorage as an offline/startup fallback.
+    // Scanner rows stay runtime-only so large payloads never exhaust browser storage.
     const manual = watchlists.find((watchlist) => watchlist.id === "manual");
     const compactWatchlists: Watchlist[] = [
       {
@@ -933,6 +1092,17 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
           (manual?.symbols ?? []).map((item) => item.symbol)
         ).map((symbol) => ({ symbol })),
       },
+      ...watchlists
+        .filter((watchlist) => isUserOwnedWatchlist(watchlist))
+        .map((watchlist) => ({
+          id: watchlist.id,
+          name: watchlist.name,
+          type: "custom" as const,
+          description: watchlist.description ?? "Custom watchlist ready for symbols.",
+          symbols: uniqueSymbolStrings(
+            (watchlist.symbols ?? []).map((item) => item.symbol)
+          ).map((symbol) => ({ symbol })),
+        })),
     ];
 
     try {
@@ -1111,6 +1281,73 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     };
   }, [backendSyncReady, marketDataMode]);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || marketDataMode === "replay") return;
+
+    let cancelled = false;
+    let refreshInFlight = false;
+    let didAttemptMigration = false;
+
+    const refreshUserWatchlists = async () => {
+      if (cancelled || refreshInFlight) return;
+      refreshInFlight = true;
+
+      try {
+        await userWatchlistMutationQueueRef.current.catch(() => undefined);
+        let snapshot = await fetchUserWatchlists();
+
+        if (
+          !didAttemptMigration &&
+          snapshot.revision === 0 &&
+          snapshot.watchlists.length === 0 &&
+          initialUserWatchlistsRef.current.length > 0
+        ) {
+          didAttemptMigration = true;
+          for (const watchlist of initialUserWatchlistsRef.current) {
+            snapshot = await upsertUserWatchlist(watchlist.id, {
+              name: watchlist.name,
+              description: watchlist.description,
+              symbols: watchlist.symbols.map((item) => item.symbol),
+            });
+          }
+        }
+
+        if (!cancelled) {
+          setWatchlists((current) =>
+            mergeCloudUserWatchlists(current, snapshot.watchlists)
+          );
+        }
+      } catch (error) {
+        console.warn("[WatchlistContext] custom watchlist refresh failed", error);
+      } finally {
+        refreshInFlight = false;
+      }
+    };
+
+    const handleFocus = () => void refreshUserWatchlists();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshUserWatchlists();
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    const pollTimer = window.setInterval(
+      () => void refreshUserWatchlists(),
+      USER_WATCHLIST_POLL_MS
+    );
+
+    void refreshUserWatchlists();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollTimer);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [marketDataMode]);
+
   const activeWatchlist = useMemo(
     () =>
       watchlists.find((watchlist) => watchlist.id === activeWatchlistId) ??
@@ -1141,8 +1378,18 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
       setWatchlists((current) => [...current, watchlist]);
       setActiveWatchlistId(watchlist.id);
+
+      if (marketDataMode !== "replay" && isUserOwnedWatchlist(watchlist)) {
+        queueUserWatchlistMutation(() =>
+          upsertUserWatchlist(watchlist.id, {
+            name: watchlist.name,
+            description: watchlist.description,
+            symbols: [],
+          })
+        );
+      }
     },
-    []
+    [marketDataMode, queueUserWatchlistMutation]
   );
 
   const renameWatchlist = useCallback((id: string, name: string) => {
@@ -1151,6 +1398,11 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
     if (!normalizedId || !trimmed) return;
 
+    const target = liveWatchlistsRef.current.find(
+      (watchlist) => watchlist.id === normalizedId
+    );
+    if (!isUserOwnedWatchlist(target)) return;
+
     setWatchlists((current) =>
       current.map((watchlist) =>
         watchlist.id === normalizedId
@@ -1158,12 +1410,23 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
           : watchlist
       )
     );
-  }, []);
+
+    if (marketDataMode !== "replay") {
+      queueUserWatchlistMutation(() =>
+        upsertUserWatchlist(normalizedId, { name: trimmed })
+      );
+    }
+  }, [marketDataMode, queueUserWatchlistMutation]);
 
   const deleteWatchlist = useCallback(
     (id: string) => {
       const normalizedId = normalizeWatchlistId(id);
-      if (!normalizedId || normalizedId === "manual" || normalizedId === "scanner") return;
+      if (!normalizedId) return;
+
+      const target = liveWatchlistsRef.current.find(
+        (watchlist) => watchlist.id === normalizedId
+      );
+      if (!isUserOwnedWatchlist(target)) return;
 
       setWatchlists((current) => {
         if (current.length <= 1) return current;
@@ -1176,8 +1439,12 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
         return next;
       });
+
+      if (marketDataMode !== "replay") {
+        queueUserWatchlistMutation(() => deleteUserWatchlistCloud(normalizedId));
+      }
     },
-    [activeWatchlistId]
+    [activeWatchlistId, marketDataMode, queueUserWatchlistMutation]
   );
 
   const addSymbol = useCallback(
@@ -1238,9 +1505,18 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         queueManualMutation(() =>
           setManualWatchlistSymbol(normalized.symbol, true)
         );
+      } else if (marketDataMode !== "replay") {
+        const target = liveWatchlistsRef.current.find(
+          (watchlist) => watchlist.id === normalizedId
+        );
+        if (isUserOwnedWatchlist(target)) {
+          queueUserWatchlistMutation(() =>
+            setUserWatchlistSymbol(normalizedId, normalized.symbol, true)
+          );
+        }
       }
     },
-    [marketDataMode, queueManualMutation]
+    [marketDataMode, queueManualMutation, queueUserWatchlistMutation]
   );
 
   const removeSymbol = useCallback((watchlistId: string, symbol: string) => {
@@ -1272,8 +1548,17 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       queueManualMutation(() =>
         setManualWatchlistSymbol(normalizedSymbol, false)
       );
+    } else if (marketDataMode !== "replay") {
+      const target = liveWatchlistsRef.current.find(
+        (watchlist) => watchlist.id === normalizedId
+      );
+      if (isUserOwnedWatchlist(target)) {
+        queueUserWatchlistMutation(() =>
+          setUserWatchlistSymbol(normalizedId, normalizedSymbol, false)
+        );
+      }
     }
-  }, [marketDataMode, queueManualMutation]);
+  }, [marketDataMode, queueManualMutation, queueUserWatchlistMutation]);
 
   const replaceSymbols = useCallback(
     (
@@ -1336,13 +1621,25 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         queueManualMutation(() =>
           saveManualWatchlist(normalizedSymbols.map((item) => item.symbol))
         );
+      } else if (
+        marketDataMode !== "replay" &&
+        resolvedType !== "scanner" &&
+        normalizedId
+      ) {
+        queueUserWatchlistMutation(() =>
+          upsertUserWatchlist(normalizedId, {
+            name: resolvedName,
+            description: options.description ?? existingWatchlist?.description,
+            symbols: normalizedSymbols.map((item) => item.symbol),
+          })
+        );
       }
 
       if (options.activate && normalizedId) {
         setActiveWatchlistId(normalizedId);
       }
     },
-    [marketDataMode, queueManualMutation, watchlists]
+    [marketDataMode, queueManualMutation, queueUserWatchlistMutation, watchlists]
   );
 
   const syncScannerWatchlists = useCallback(
@@ -1363,8 +1660,13 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
           current.map((watchlist) => [watchlist.id, watchlist])
         );
 
+        const userWatchlists = current.filter((watchlist) =>
+          isUserOwnedWatchlist(watchlist)
+        );
+
         return [
           manual,
+          ...userWatchlists,
           ...normalizedDefinitions.map((definition) => ({
             id: definition.id,
             name: definition.name,
@@ -1380,6 +1682,9 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       setActiveWatchlistId((current) => {
         const validIds = new Set([
           "manual",
+          ...liveWatchlistsRef.current
+            .filter((watchlist) => isUserOwnedWatchlist(watchlist))
+            .map((watchlist) => watchlist.id),
           ...normalizedDefinitions.map((definition) => definition.id),
         ]);
         return validIds.has(current) ? current : "manual";
