@@ -643,3 +643,129 @@ button, input, select {
   }
 }
 /* MOBILE_WORKSPACE_PHASE11_END */
+
+/* MOBILE_CHART_TRADE_PHASE12_BEGIN */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-chart-trade-launch {
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 12px 13px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    border: 1px solid rgba(59, 130, 246, 0.34);
+    border-radius: 12px;
+    background: rgba(30, 64, 175, 0.18);
+    color: #eff6ff;
+    text-align: left;
+  }
+
+  .mobile-chart-trade-launch__title {
+    font-size: 14px;
+    font-weight: 900;
+  }
+
+  .mobile-chart-trade-launch__copy {
+    color: #93c5fd;
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  .mobile-chart-trade-hud {
+    position: fixed;
+    z-index: 3900;
+    left: 10px;
+    right: 10px;
+    bottom: calc(52px + env(safe-area-inset-bottom));
+    padding: 10px;
+    border: 1px solid rgba(96, 165, 250, 0.34);
+    border-radius: 14px;
+    background: rgba(4, 10, 20, 0.94);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.46);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .mobile-chart-trade-hud__top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .mobile-chart-trade-hud__kicker {
+    color: #60a5fa;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 0.7px;
+  }
+
+  .mobile-chart-trade-hud__step {
+    margin-top: 2px;
+    color: #f8fafc;
+    font-size: 15px;
+    font-weight: 950;
+  }
+
+  .mobile-chart-trade-hud__cancel {
+    min-width: 64px;
+    height: 34px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 9px;
+    background: #111827;
+    color: #cbd5e1;
+    font-size: 11px;
+    font-weight: 800;
+  }
+
+  .mobile-chart-trade-hud__prices {
+    margin-top: 8px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+  }
+
+  .mobile-chart-trade-hud__prices span {
+    padding: 5px 4px;
+    border-radius: 7px;
+    background: rgba(15, 23, 42, 0.9);
+    color: #cbd5e1;
+    font-size: 10px;
+    font-weight: 800;
+    text-align: center;
+  }
+
+  .mobile-chart-trade-hud__candidate {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: #94a3b8;
+    font-size: 10px;
+  }
+
+  .mobile-chart-trade-hud__candidate strong {
+    color: #f8fafc;
+    font-size: 13px;
+  }
+
+  .mobile-chart-trade-hud__set {
+    width: 100%;
+    height: 44px;
+    margin-top: 8px;
+    border: 1px solid rgba(96, 165, 250, 0.5);
+    border-radius: 11px;
+    background: #1d4ed8;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 950;
+    letter-spacing: 0.5px;
+  }
+
+  .mobile-chart-trade-hud__set:disabled {
+    opacity: 0.42;
+  }
+}
+/* MOBILE_CHART_TRADE_PHASE12_END */

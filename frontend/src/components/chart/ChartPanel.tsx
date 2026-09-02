@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useRef, useState } from "react";
 
-import { ChartEngine } from "./ChartEngine";
+import { ChartEngine, type ChartPointerPoint } from "./ChartEngine";
 import type { ChartState } from "./ChartState";
 import type { CrosshairInfo, LiveStatus, StudyVisibility } from "./ChartTypes";
 import { connectLiveBars, loadHistoricalBars } from "./LiveDataEngine";
@@ -335,6 +335,20 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const [crosshairInfo, setCrosshairInfo] = useState<CrosshairInfo | null>(
     null,
   );
+
+  // MOBILE_CHART_TRADE_PHASE12
+  type MobileChartTradeStep = "entry" | "stop" | "target";
+  const [mobileChartTradeActive, setMobileChartTradeActive] = useState(false);
+  const [mobileChartTradeStep, setMobileChartTradeStep] =
+    useState<MobileChartTradeStep>("entry");
+  const [mobileChartTradeCandidate, setMobileChartTradeCandidate] =
+    useState<number | null>(null);
+  const [mobileChartTradeEntry, setMobileChartTradeEntry] =
+    useState<number | null>(null);
+  const [mobileChartTradeStop, setMobileChartTradeStop] =
+    useState<number | null>(null);
+  const [mobileChartTradeTarget, setMobileChartTradeTarget] =
+    useState<number | null>(null);
   const [studyVisibility, setStudyVisibility] =
     useState<StudyVisibility>(loadStudyVisibility);
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("cursor");
@@ -660,6 +674,123 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       },
     );
   }, [setActiveSymbol]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ action?: string }>).detail;
+      if (detail?.action !== "start") return;
+
+      setMobileChartTradeActive(true);
+      setMobileChartTradeStep("entry");
+      setMobileChartTradeCandidate(null);
+      setMobileChartTradeEntry(null);
+      setMobileChartTradeStop(null);
+      setMobileChartTradeTarget(null);
+    };
+
+    window.addEventListener("trading-mobile-chart-trade", handler);
+    return () => window.removeEventListener("trading-mobile-chart-trade", handler);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileChartTradeActive) return;
+
+    const engine = engineRef.current;
+    if (!engine) return;
+
+    const updateCandidate = (point: ChartPointerPoint) => {
+      const price = Number(point.rawPrice ?? point.price);
+      if (Number.isFinite(price) && price > 0) {
+        setMobileChartTradeCandidate(price);
+      }
+    };
+
+    const unsubscribeMove = engine.subscribePointerMove(updateCandidate);
+    const unsubscribeDown = engine.subscribePointerDown(updateCandidate);
+
+    return () => {
+      unsubscribeMove();
+      unsubscribeDown();
+    };
+  }, [mobileChartTradeActive, symbol, timeframe]);
+
+  function cancelMobileChartTrade(): void {
+    setMobileChartTradeActive(false);
+    setMobileChartTradeCandidate(null);
+    setMobileChartTradeEntry(null);
+    setMobileChartTradeStop(null);
+    setMobileChartTradeTarget(null);
+    setMobileChartTradeStep("entry");
+  }
+
+  function commitMobileChartTradePrice(): void {
+    const price = mobileChartTradeCandidate;
+    if (!Number.isFinite(price) || price == null || price <= 0) return;
+
+    if (mobileChartTradeStep === "entry") {
+      setMobileChartTradeEntry(price);
+      setMobileChartTradeStep("stop");
+      return;
+    }
+
+    if (mobileChartTradeStep === "stop") {
+      if (mobileChartTradeEntry == null) return;
+      if (price >= mobileChartTradeEntry) {
+        window.alert("For a long trade, set the stop below the entry price.");
+        return;
+      }
+
+      setMobileChartTradeStop(price);
+      setMobileChartTradeStep("target");
+      return;
+    }
+
+    const entry = mobileChartTradeEntry;
+    const stop = mobileChartTradeStop;
+    const target = price;
+
+    if (entry == null || stop == null) return;
+
+    if (target <= entry) {
+      window.alert("For a long trade, set the target above the entry price.");
+      return;
+    }
+
+    setMobileChartTradeTarget(target);
+
+    const riskPerShare = Math.abs(entry - stop);
+    const rewardPerShare = Math.abs(target - entry);
+    const rr = riskPerShare > 0 ? rewardPerShare / riskPerShare : 0;
+
+    window.dispatchEvent(
+      new CustomEvent("trading-terminal:quick-trade-plan", {
+        detail: {
+          source: "mobileChartTrade",
+          symbol,
+          side: "buy",
+          entry,
+          stop,
+          target,
+          riskPerShare,
+          rewardPerShare,
+          rr,
+          drawingId: null,
+        },
+      }),
+    );
+
+    setMobileChartTradeActive(false);
+    setMobileChartTradeStep("entry");
+    setMobileChartTradeCandidate(null);
+
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("trading-mobile-workspace", {
+          detail: { workspace: "trade", action: "open" },
+        }),
+      );
+    }, 80);
+  }
 
   useEffect(() => {
     const container = containerRef.current;
@@ -2253,6 +2384,73 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         />
 
         {/* MOBILE_WORKSPACE_PHASE11 */}
+        {mobileChartTradeActive && (
+          <div className="mobile-chart-trade-hud">
+            <div className="mobile-chart-trade-hud__top">
+              <div>
+                <div className="mobile-chart-trade-hud__kicker">
+                  Chart Trade - LONG
+                </div>
+                <div className="mobile-chart-trade-hud__step">
+                  {mobileChartTradeStep === "entry"
+                    ? "1/3 SET ENTRY"
+                    : mobileChartTradeStep === "stop"
+                      ? "2/3 SET STOP"
+                      : "3/3 SET TARGET"}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="mobile-chart-trade-hud__cancel"
+                onClick={cancelMobileChartTrade}
+              >
+                Cancel
+              </button>
+            </div>
+
+            <div className="mobile-chart-trade-hud__prices">
+              <span>
+                E {mobileChartTradeEntry != null
+                  ? `$${mobileChartTradeEntry.toFixed(2)}`
+                  : "-"}
+              </span>
+              <span>
+                S {mobileChartTradeStop != null
+                  ? `$${mobileChartTradeStop.toFixed(2)}`
+                  : "-"}
+              </span>
+              <span>
+                T {mobileChartTradeTarget != null
+                  ? `$${mobileChartTradeTarget.toFixed(2)}`
+                  : "-"}
+              </span>
+            </div>
+
+            <div className="mobile-chart-trade-hud__candidate">
+              Crosshair price
+              <strong>
+                {mobileChartTradeCandidate != null
+                  ? `$${mobileChartTradeCandidate.toFixed(2)}`
+                  : " Move/hold finger on chart"}
+              </strong>
+            </div>
+
+            <button
+              type="button"
+              className="mobile-chart-trade-hud__set"
+              disabled={mobileChartTradeCandidate == null}
+              onClick={commitMobileChartTradePrice}
+            >
+              {mobileChartTradeStep === "entry"
+                ? "SET ENTRY"
+                : mobileChartTradeStep === "stop"
+                  ? "SET STOP"
+                  : "SET TARGET"}
+            </button>
+          </div>
+        )}
+
         <MobileChartWorkspace
           symbol={symbol}
           currentPrice={chartState?.price ?? 0}

@@ -137,10 +137,34 @@ export default function MobileChartWorkspace({
             {workspace === "lists" && <WatchlistsWorkspacePanel />}
 
             {workspace === "trade" && (
-              <TradingWorkspacePanel
-                symbol={symbol}
-                currentPrice={currentPrice}
-              />
+              <>
+                <button
+                  type="button"
+                  className="mobile-chart-trade-launch"
+                  onClick={() => {
+                    setWorkspace(null);
+                    window.setTimeout(() => {
+                      window.dispatchEvent(
+                        new CustomEvent("trading-mobile-chart-trade", {
+                          detail: { action: "start" },
+                        }),
+                      );
+                    }, 40);
+                  }}
+                >
+                  <span className="mobile-chart-trade-launch__title">
+                    Chart Trade
+                  </span>
+                  <span className="mobile-chart-trade-launch__copy">
+                    Set entry, stop and target with the chart crosshair.
+                  </span>
+                </button>
+
+                <TradingWorkspacePanel
+                  symbol={symbol}
+                  currentPrice={currentPrice}
+                />
+              </>
             )}
           </Suspense>
         </div>
