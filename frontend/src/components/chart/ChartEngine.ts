@@ -364,6 +364,11 @@ export class ChartEngine {
   private lastMobileTapX = 0;
   private lastMobileTapY = 0;
   private mobileViewNeedsReset = true;
+
+  // MOBILE_CHART_SCALING_PHASE7
+  // Keeps mobile candles readable while preserving the visible price story.
+  private mobileScaleTimer: number | null = null;
+  private mobileRangeGuard = false;
   private readonly handleMobilePointerUp = (event: PointerEvent) => {
     if (!this.isMobileChartViewport() || event.pointerType !== "touch") return;
 
@@ -492,6 +497,14 @@ export class ChartEngine {
         rightOffset: 5,
         barSpacing: 2.9,
         minBarSpacing: 1.5,
+      });
+
+      this.chart.priceScale("right").applyOptions({
+        autoScale: true,
+        scaleMargins: {
+          top: 0.10,
+          bottom: 0.12,
+        },
       });
     }
 
@@ -661,6 +674,9 @@ export class ChartEngine {
     });
 
     this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      this.normalizeMobileScale();
+    });
     this.chart.subscribeCrosshairMove(this.handleCrosshairMove);
 
     if (this.isMobileChartViewport()) {
@@ -734,6 +750,55 @@ export class ChartEngine {
     }
   }
 
+  private normalizeMobileScale(): void {
+    if (!this.isMobileChartViewport() || this.mobileRangeGuard) return;
+
+    if (this.mobileScaleTimer !== null) {
+      window.clearTimeout(this.mobileScaleTimer);
+    }
+
+    this.mobileScaleTimer = window.setTimeout(() => {
+      this.mobileScaleTimer = null;
+      if (!this.bars.length) return;
+
+      const range = this.chart.timeScale().getVisibleLogicalRange();
+      if (!range) return;
+
+      const visibleBars = range.to - range.from;
+      const minVisibleBars = this.container.clientWidth <= 430 ? 22 : 28;
+
+      // If pinch zoom gets too tight, keep enough neighboring candles visible
+      // to preserve swing context instead of spreading 5-10 candles widely.
+      if (visibleBars < minVisibleBars) {
+        const center = (range.from + range.to) / 2;
+        const half = minVisibleBars / 2;
+
+        this.mobileRangeGuard = true;
+        this.chart.timeScale().setVisibleLogicalRange({
+          from: center - half,
+          to: center + half,
+        });
+        this.mobileRangeGuard = false;
+      }
+
+      // Reframe Y around the currently visible candle range. This is what
+      // makes peaks/valleys use the phone screen instead of staying compressed.
+      this.autoScaleManager.clearFocusedPriceRange();
+      this.autoScaleManager.clearVerticalPan();
+      this.chart.priceScale("right").applyOptions({
+        autoScale: true,
+        scaleMargins: {
+          top: 0.10,
+          bottom: 0.12,
+        },
+      });
+
+      this.studyRenderer.scheduleOverlayRender();
+      this.scheduleSessionBandsRender();
+      this.scheduleVwap3OverlayRender();
+    }, 55);
+  }
+
   public resetMobileView(): void {
     if (!this.bars.length) {
       this.chart.timeScale().fitContent();
@@ -752,7 +817,13 @@ export class ChartEngine {
 
     this.autoScaleManager.clearFocusedPriceRange();
     this.autoScaleManager.clearVerticalPan();
-    this.chart.priceScale("right").applyOptions({ autoScale: true });
+    this.chart.priceScale("right").applyOptions({
+      autoScale: true,
+      scaleMargins: {
+        top: 0.10,
+        bottom: 0.12,
+      },
+    });
     this.chart.timeScale().setVisibleLogicalRange({ from, to });
     this.studyRenderer.scheduleOverlayRender();
     this.scheduleSessionBandsRender();
@@ -2103,6 +2174,11 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   }
 
   destroy(): void {
+    if (this.mobileScaleTimer !== null) {
+      window.clearTimeout(this.mobileScaleTimer);
+      this.mobileScaleTimer = null;
+    }
+
     this.container.removeEventListener("pointerup", this.handleMobilePointerUp);
     this.mobileResetButton?.remove();
     this.mobileResetButton = null;

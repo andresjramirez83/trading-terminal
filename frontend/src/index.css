@@ -454,3 +454,13 @@ button, input, select {
   }
 }
 /* MOBILE_CHART_STORY_VIEW_PHASE6_END */
+
+/* MOBILE_CHART_SCALING_PHASE7_BEGIN
+   Gesture-first mobile scaling. Desktop unaffected. */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-chart-reset,
+  .mobile-chart-reset-shell {
+    display: none !important;
+  }
+}
+/* MOBILE_CHART_SCALING_PHASE7_END */
