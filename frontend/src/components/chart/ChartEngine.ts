@@ -365,10 +365,8 @@ export class ChartEngine {
   private lastMobileTapY = 0;
   private mobileViewNeedsReset = true;
 
-  // MOBILE_CHART_SCALING_PHASE7
-  // Keeps mobile candles readable while preserving the visible price story.
-  private mobileScaleTimer: number | null = null;
-  private mobileRangeGuard = false;
+  // MOBILE_CHART_TOUCH_PHASE8
+  // Mobile interaction now relies on Lightweight Charts native gestures.
   private readonly handleMobilePointerUp = (event: PointerEvent) => {
     if (!this.isMobileChartViewport() || event.pointerType !== "touch") return;
 
@@ -480,7 +478,7 @@ export class ChartEngine {
           mouseWheel: true,
           pressedMouseMove: false,
           horzTouchDrag: true,
-          vertTouchDrag: false,
+          vertTouchDrag: true,
         },
         handleScale: {
           axisPressedMouseMove: false,
@@ -495,8 +493,8 @@ export class ChartEngine {
 
       this.chart.timeScale().applyOptions({
         rightOffset: 5,
-        barSpacing: 2.9,
-        minBarSpacing: 1.5,
+        barSpacing: 3.2,
+        minBarSpacing: 2.0,
       });
 
       this.chart.priceScale("right").applyOptions({
@@ -674,9 +672,6 @@ export class ChartEngine {
     });
 
     this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
-    this.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
-      this.normalizeMobileScale();
-    });
     this.chart.subscribeCrosshairMove(this.handleCrosshairMove);
 
     if (this.isMobileChartViewport()) {
@@ -748,55 +743,6 @@ export class ChartEngine {
     } catch {
       // Storage can be unavailable in private/restricted modes; gestures still work.
     }
-  }
-
-  private normalizeMobileScale(): void {
-    if (!this.isMobileChartViewport() || this.mobileRangeGuard) return;
-
-    if (this.mobileScaleTimer !== null) {
-      window.clearTimeout(this.mobileScaleTimer);
-    }
-
-    this.mobileScaleTimer = window.setTimeout(() => {
-      this.mobileScaleTimer = null;
-      if (!this.bars.length) return;
-
-      const range = this.chart.timeScale().getVisibleLogicalRange();
-      if (!range) return;
-
-      const visibleBars = range.to - range.from;
-      const minVisibleBars = this.container.clientWidth <= 430 ? 22 : 28;
-
-      // If pinch zoom gets too tight, keep enough neighboring candles visible
-      // to preserve swing context instead of spreading 5-10 candles widely.
-      if (visibleBars < minVisibleBars) {
-        const center = (range.from + range.to) / 2;
-        const half = minVisibleBars / 2;
-
-        this.mobileRangeGuard = true;
-        this.chart.timeScale().setVisibleLogicalRange({
-          from: center - half,
-          to: center + half,
-        });
-        this.mobileRangeGuard = false;
-      }
-
-      // Reframe Y around the currently visible candle range. This is what
-      // makes peaks/valleys use the phone screen instead of staying compressed.
-      this.autoScaleManager.clearFocusedPriceRange();
-      this.autoScaleManager.clearVerticalPan();
-      this.chart.priceScale("right").applyOptions({
-        autoScale: true,
-        scaleMargins: {
-          top: 0.10,
-          bottom: 0.12,
-        },
-      });
-
-      this.studyRenderer.scheduleOverlayRender();
-      this.scheduleSessionBandsRender();
-      this.scheduleVwap3OverlayRender();
-    }, 55);
   }
 
   public resetMobileView(): void {
@@ -1066,7 +1012,7 @@ export class ChartEngine {
             mouseWheel: true,
             pressedMouseMove: false,
             horzTouchDrag: true,
-            vertTouchDrag: mobile ? false : true,
+            vertTouchDrag: true,
           }
         : false,
       handleScale: enabled
@@ -2174,11 +2120,6 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   }
 
   destroy(): void {
-    if (this.mobileScaleTimer !== null) {
-      window.clearTimeout(this.mobileScaleTimer);
-      this.mobileScaleTimer = null;
-    }
-
     this.container.removeEventListener("pointerup", this.handleMobilePointerUp);
     this.mobileResetButton?.remove();
     this.mobileResetButton = null;

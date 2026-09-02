@@ -316,7 +316,6 @@ button, input, select {
    Touch-first chart controls. Desktop is unaffected. */
 @media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
   .mobile-touch-chart {
-    touch-action: none;
     -webkit-user-select: none;
     user-select: none;
     -webkit-touch-callout: none;
@@ -464,3 +463,12 @@ button, input, select {
   }
 }
 /* MOBILE_CHART_SCALING_PHASE7_END */
+
+/* MOBILE_CHART_TOUCH_PHASE8_BEGIN
+   Native mobile chart gestures; no forced range correction while touching. */
+@media (max-width: 767px), ((hover: none) and (pointer: coarse) and (max-width: 1024px)) {
+  .mobile-touch-chart {
+    overscroll-behavior: contain;
+  }
+}
+/* MOBILE_CHART_TOUCH_PHASE8_END */
