@@ -719,9 +719,18 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     setMobileChartTradeStep("entry");
   }
 
+  // MOBILE_CHART_TRADE_PHASE16_PRICE_ROUNDING
+  function normalizeMobileTradePrice(value: number): number {
+    const decimals = value < 1 ? 4 : 2;
+    const factor = 10 ** decimals;
+    return Math.round((value + Number.EPSILON) * factor) / factor;
+  }
+
   function commitMobileChartTradePrice(): void {
-    const price = mobileChartTradeCandidate;
-    if (!Number.isFinite(price) || price == null || price <= 0) return;
+    const candidate = mobileChartTradeCandidate;
+    if (!Number.isFinite(candidate) || candidate == null || candidate <= 0) return;
+
+    const price = normalizeMobileTradePrice(candidate);
 
     if (mobileChartTradeStep === "entry") {
       setMobileChartTradeEntry(price);
@@ -2414,17 +2423,23 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             <div className="mobile-chart-trade-hud__prices">
               <span>
                 E {mobileChartTradeEntry != null
-                  ? `$${mobileChartTradeEntry.toFixed(2)}`
+                  ? `$${mobileChartTradeEntry.toFixed(
+                      mobileChartTradeEntry < 1 ? 4 : 2,
+                    )}`
                   : "-"}
               </span>
               <span>
                 S {mobileChartTradeStop != null
-                  ? `$${mobileChartTradeStop.toFixed(2)}`
+                  ? `$${mobileChartTradeStop.toFixed(
+                      mobileChartTradeStop < 1 ? 4 : 2,
+                    )}`
                   : "-"}
               </span>
               <span>
                 T {mobileChartTradeTarget != null
-                  ? `$${mobileChartTradeTarget.toFixed(2)}`
+                  ? `$${mobileChartTradeTarget.toFixed(
+                      mobileChartTradeTarget < 1 ? 4 : 2,
+                    )}`
                   : "-"}
               </span>
             </div>
@@ -2433,7 +2448,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
               Y-axis line price
               <strong>
                 {mobileChartTradeCandidate != null
-                  ? `$${mobileChartTradeCandidate.toFixed(2)}`
+                  ? `$${mobileChartTradeCandidate.toFixed(
+                      mobileChartTradeCandidate < 1 ? 4 : 2,
+                    )}`
                   : " Move Y-axis line"}
               </strong>
             </div>

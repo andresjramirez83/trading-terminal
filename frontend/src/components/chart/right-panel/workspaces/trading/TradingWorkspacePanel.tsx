@@ -87,6 +87,7 @@ export default function TradingWorkspacePanel({
   const historyStore = useTradeHistoryStore();
 
   // MOBILE_CHART_TRADE_PHASE13
+  // MOBILE_CHART_TRADE_PHASE16_PRICE_ROUNDING
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (
@@ -113,11 +114,24 @@ export default function TradingWorkspacePanel({
         return;
       }
 
-      const entry = Number(detail.entry);
-      const stop = Number(detail.stop);
-      const target = Number(detail.target);
+      const normalizeTradePrice = (value: number): number => {
+        const decimals = value < 1 ? 4 : 2;
+        const factor = 10 ** decimals;
+        return Math.round((value + Number.EPSILON) * factor) / factor;
+      };
+
+      const rawEntry = Number(detail.entry);
+      const rawStop = Number(detail.stop);
+      const rawTarget = Number(detail.target);
+
+      const entry = normalizeTradePrice(rawEntry);
+      const stop = normalizeTradePrice(rawStop);
+      const target = normalizeTradePrice(rawTarget);
 
       if (
+        !Number.isFinite(rawEntry) ||
+        !Number.isFinite(rawStop) ||
+        !Number.isFinite(rawTarget) ||
         !Number.isFinite(entry) ||
         !Number.isFinite(stop) ||
         !Number.isFinite(target) ||
