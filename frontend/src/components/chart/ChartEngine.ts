@@ -855,6 +855,34 @@ export class ChartEngine {
     });
   }
 
+  // MOBILE_CHART_TRADE_PHASE14_SYNC
+  // Returns the exact price represented by the visible horizontal crosshair.
+  public subscribeChartTradeCrosshairPrice(
+    listener: (price: number | null) => void,
+  ): () => void {
+    const handler = (param: MouseEventParams<Time>) => {
+      if (!param.point) {
+        listener(null);
+        return;
+      }
+
+      const price = this.series.candles.coordinateToPrice(param.point.y);
+
+      if (price == null || !Number.isFinite(Number(price))) {
+        listener(null);
+        return;
+      }
+
+      listener(Number(price));
+    };
+
+    this.chart.subscribeCrosshairMove(handler);
+
+    return () => {
+      this.chart.unsubscribeCrosshairMove(handler);
+    };
+  }
+
   subscribeCrosshairInfo(
     listener: (info: CrosshairInfo | null) => void,
   ): () => void {

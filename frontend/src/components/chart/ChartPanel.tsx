@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useRef, useState } from "react";
 
-import { ChartEngine, type ChartPointerPoint } from "./ChartEngine";
+import { ChartEngine } from "./ChartEngine";
 import type { ChartState } from "./ChartState";
 import type { CrosshairInfo, LiveStatus, StudyVisibility } from "./ChartTypes";
 import { connectLiveBars, loadHistoricalBars } from "./LiveDataEngine";
@@ -699,20 +699,14 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     const engine = engineRef.current;
     if (!engine) return;
 
-    const updateCandidate = (point: ChartPointerPoint) => {
-      const price = Number(point.rawPrice ?? point.price);
-      if (Number.isFinite(price) && price > 0) {
+    // MOBILE_CHART_TRADE_PHASE14_SYNC
+    // Use the exact visible horizontal crosshair price, not a separate
+    // raw pointer calculation.
+    return engine.subscribeChartTradeCrosshairPrice((price) => {
+      if (price != null && Number.isFinite(price) && price > 0) {
         setMobileChartTradeCandidate(price);
       }
-    };
-
-    const unsubscribeMove = engine.subscribePointerMove(updateCandidate);
-    const unsubscribeDown = engine.subscribePointerDown(updateCandidate);
-
-    return () => {
-      unsubscribeMove();
-      unsubscribeDown();
-    };
+    });
   }, [mobileChartTradeActive, symbol, timeframe]);
 
   function cancelMobileChartTrade(): void {
@@ -2431,11 +2425,11 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
             </div>
 
             <div className="mobile-chart-trade-hud__candidate">
-              Horizontal line price
+              Y-axis line price
               <strong>
                 {mobileChartTradeCandidate != null
                   ? `$${mobileChartTradeCandidate.toFixed(2)}`
-                  : " Move horizontal line"}
+                  : " Move Y-axis line"}
               </strong>
             </div>
 
