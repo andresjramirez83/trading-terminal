@@ -4329,7 +4329,12 @@ async def market_ws(
         await alpaca_ws_manager.subscribe_client(websocket, symbol, timeframe)
 
         while True:
-            await websocket.receive_text()
+            message = await websocket.receive_text()
+            if str(message).strip().lower() in {"ping", "heartbeat"}:
+                # Keep the browser/nginx WebSocket path active during quiet
+                # symbols. An empty array is intentionally ignored by both
+                # chart WebSocket clients and does not look like a market bar.
+                await websocket.send_text("[]")
 
     except WebSocketDisconnect:
         print(f"[market_ws/alpaca] frontend disconnected for {symbol}", flush=True)

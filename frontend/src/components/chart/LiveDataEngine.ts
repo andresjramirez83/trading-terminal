@@ -82,23 +82,183 @@ export function connectLiveBars(params: {
   const cleanSymbol = String(params.symbol || "SPY").trim().toUpperCase();
   const cleanTimeframe = String(params.timeframe || "5m").trim().toLowerCase();
 
-  params.onStatus("live");
+  const BASE_RECONNECT_DELAY_MS = 750;
+  const MAX_RECONNECT_DELAY_MS = 10_000;
+  const HEARTBEAT_INTERVAL_MS = 20_000;
 
-  const ws = connectChartV2BarsSocket({
-    symbol: cleanSymbol,
-    timeframe: cleanTimeframe,
-    onOpen: () => params.onStatus("live"),
-    onClose: () => params.onStatus("disconnected"),
-    onError: () => params.onStatus("disconnected"),
-    onBar: (bar) => {
-      const cleanBar = normalizeLiveBar(bar);
-      if (!cleanBar) return;
-      params.onBar(cleanBar);
-    },
-  });
+  let disposed = false;
+  let ws: WebSocket | null = null;
+  let reconnectTimer: number | null = null;
+  let heartbeatTimer: number | null = null;
+  let reconnectAttempt = 0;
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimer != null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatTimer != null) {
+      window.clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
+
+  const startHeartbeat = () => {
+    stopHeartbeat();
+    heartbeatTimer = window.setInterval(() => {
+      if (disposed || !ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send("ping");
+      } catch {
+        // onclose handles reconnection if the socket has actually failed.
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  };
+
+  const scheduleReconnect = () => {
+    if (disposed || reconnectTimer != null) return;
+
+    const delay = Math.min(
+      MAX_RECONNECT_DELAY_MS,
+      BASE_RECONNECT_DELAY_MS * Math.pow(2, Math.min(reconnectAttempt, 4)),
+    );
+    reconnectAttempt += 1;
+
+    params.onStatus("connecting");
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, delay);
+  };
+
+  const connect = () => {
+    if (disposed) return;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    params.onStatus("connecting");
+
+    let nextWs: WebSocket;
+    nextWs = connectChartV2BarsSocket({
+      symbol: cleanSymbol,
+      timeframe: cleanTimeframe,
+      onOpen: () => {
+        if (disposed || ws !== nextWs) {
+          try {
+            nextWs.close();
+          } catch {
+            // Safe to ignore during cleanup races.
+          }
+          return;
+        }
+
+        clearReconnectTimer();
+        reconnectAttempt = 0;
+        params.onStatus("live");
+        startHeartbeat();
+      },
+      onClose: () => {
+        if (ws !== nextWs) return;
+
+        stopHeartbeat();
+        ws = null;
+
+        if (disposed) return;
+
+        params.onStatus("disconnected");
+        scheduleReconnect();
+      },
+      onError: () => {
+        if (disposed || ws !== nextWs) return;
+
+        params.onStatus("disconnected");
+        // The browser fires onclose after an unrecoverable socket error.
+        // Reconnect from onclose so duplicate sockets are never created.
+      },
+      onBar: (bar) => {
+        if (disposed || ws !== nextWs) return;
+
+        const cleanBar = normalizeLiveBar(bar);
+        if (!cleanBar) return;
+
+        params.onBar(cleanBar);
+      },
+    });
+
+    ws = nextWs;
+  };
+
+  const reconnectNow = () => {
+    if (disposed) return;
+
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "hidden"
+    ) {
+      return;
+    }
+
+    if (
+      ws &&
+      (ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+
+    clearReconnectTimer();
+    reconnectAttempt = 0;
+    connect();
+  };
+
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === "visible") {
+      reconnectNow();
+    }
+  };
+
+  const handleOnline = () => {
+    reconnectNow();
+  };
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+  }
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("online", handleOnline);
+  }
+
+  connect();
 
   return () => {
-    ws.close();
+    disposed = true;
+
+    clearReconnectTimer();
+    stopHeartbeat();
+
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    }
+
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", handleOnline);
+    }
+
+    const currentWs = ws;
+    ws = null;
+
+    if (currentWs) {
+      try {
+        currentWs.close(1000, "chart-live-cleanup");
+      } catch {
+        // Safe to ignore if the socket is already closed.
+      }
+    }
   };
 }
 
