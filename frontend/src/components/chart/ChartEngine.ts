@@ -356,6 +356,35 @@ export class ChartEngine {
   private lastLiveStudyRenderAt = 0;
   private liveStudyRenderTimer: number | null = null;
 
+  // MOBILE_CHART_GESTURES_PHASE4
+  // Mobile-only interaction state. Desktop mouse behavior is not changed.
+  private mobileResetButton: HTMLButtonElement | null = null;
+  private mobileGestureHint: HTMLDivElement | null = null;
+  private lastMobileTapAt = 0;
+  private lastMobileTapX = 0;
+  private lastMobileTapY = 0;
+  private mobileViewNeedsReset = true;
+  private readonly handleMobilePointerUp = (event: PointerEvent) => {
+    if (!this.isMobileChartViewport() || event.pointerType !== "touch") return;
+
+    const now = performance.now();
+    const elapsed = now - this.lastMobileTapAt;
+    const distance = Math.hypot(
+      event.clientX - this.lastMobileTapX,
+      event.clientY - this.lastMobileTapY,
+    );
+
+    if (elapsed > 0 && elapsed <= 325 && distance <= 34) {
+      this.lastMobileTapAt = 0;
+      this.resetMobileView();
+      return;
+    }
+
+    this.lastMobileTapAt = now;
+    this.lastMobileTapX = event.clientX;
+    this.lastMobileTapY = event.clientY;
+  };
+
   // Decision Center / intelligence can request ChartState on every live tick.
   // Structure, compression and momentum only need a full recalculation when a
   // new bar arrives (or historical data/context is replaced).
@@ -440,7 +469,40 @@ export class ChartEngine {
       },
     });
 
+    if (this.isMobileChartViewport()) {
+      this.chart.applyOptions({
+        handleScroll: {
+          mouseWheel: true,
+          pressedMouseMove: false,
+          horzTouchDrag: true,
+          vertTouchDrag: false,
+        },
+        handleScale: {
+          axisPressedMouseMove: false,
+          mouseWheel: true,
+          pinch: true,
+        },
+        kineticScroll: {
+          mouse: false,
+          touch: true,
+        },
+      });
+
+      this.chart.timeScale().applyOptions({
+        rightOffset: 7,
+        barSpacing: 6,
+        minBarSpacing: 3.5,
+      });
+    }
+
     const candles = this.chart.addSeries(CandlestickSeries);
+
+    if (this.isMobileChartViewport()) {
+      candles.applyOptions({
+        wickVisible: true,
+        borderVisible: false,
+      });
+    }
 
     const volume = this.chart.addSeries(HistogramSeries, {
       priceScaleId: "volume",
@@ -600,6 +662,98 @@ export class ChartEngine {
 
     this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
     this.chart.subscribeCrosshairMove(this.handleCrosshairMove);
+
+    if (this.isMobileChartViewport()) {
+      this.container.classList.add("mobile-touch-chart");
+      this.container.addEventListener("pointerup", this.handleMobilePointerUp, {
+        passive: true,
+      });
+      this.installMobileChartControls();
+    }
+  }
+
+  private isMobileChartViewport(): boolean {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return false;
+    }
+
+    return window.matchMedia(
+      "(max-width: 767px), (hover: none) and (pointer: coarse) and (max-width: 1024px)",
+    ).matches;
+  }
+
+  private installMobileChartControls(): void {
+    if (!this.isMobileChartViewport() || this.mobileResetButton) return;
+
+    const resetButton = document.createElement("button");
+    resetButton.type = "button";
+    resetButton.className = "mobile-chart-reset";
+    resetButton.setAttribute("aria-label", "Reset chart view");
+    resetButton.title = "Reset chart view";
+    resetButton.textContent = "↺";
+    resetButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.resetMobileView();
+    });
+
+    this.container.appendChild(resetButton);
+    this.mobileResetButton = resetButton;
+
+    try {
+      const hintSeen = window.localStorage.getItem(
+        "trading.mobileChartGesturesHint.v1",
+      );
+
+      if (!hintSeen) {
+        const hint = document.createElement("div");
+        hint.className = "mobile-chart-gesture-hint";
+        hint.textContent =
+          "Drag to pan · Pinch to zoom · Double-tap to reset · Hold for crosshair";
+        this.container.appendChild(hint);
+        this.mobileGestureHint = hint;
+
+        window.setTimeout(() => {
+          hint.classList.add("mobile-chart-gesture-hint--hide");
+        }, 4200);
+
+        window.setTimeout(() => {
+          hint.remove();
+          if (this.mobileGestureHint === hint) {
+            this.mobileGestureHint = null;
+          }
+        }, 5000);
+
+        window.localStorage.setItem(
+          "trading.mobileChartGesturesHint.v1",
+          "true",
+        );
+      }
+    } catch {
+      // Storage can be unavailable in private/restricted modes; gestures still work.
+    }
+  }
+
+  private resetMobileView(): void {
+    if (!this.bars.length) {
+      this.chart.timeScale().fitContent();
+      return;
+    }
+
+    const lastIndex = this.bars.length - 1;
+    const width = Math.max(1, this.container.clientWidth);
+    const visibleCandles = width <= 430 ? 70 : width <= 600 ? 82 : 96;
+    const futureBars = width <= 430 ? 7 : 9;
+    const from = Math.max(0, lastIndex - visibleCandles + 1);
+    const to = lastIndex + futureBars;
+
+    this.autoScaleManager.clearFocusedPriceRange();
+    this.autoScaleManager.clearVerticalPan();
+    this.chart.priceScale("right").applyOptions({ autoScale: true });
+    this.chart.timeScale().setVisibleLogicalRange({ from, to });
+    this.studyRenderer.scheduleOverlayRender();
+    this.scheduleSessionBandsRender();
+    this.scheduleVwap3OverlayRender();
   }
 
   subscribeCrosshairInfo(
@@ -830,13 +984,15 @@ export class ChartEngine {
   }
 
   setChartNavigationEnabled(enabled: boolean): void {
+    const mobile = this.isMobileChartViewport();
+
     this.chart.applyOptions({
       handleScroll: enabled
         ? {
             mouseWheel: true,
             pressedMouseMove: false,
             horzTouchDrag: true,
-            vertTouchDrag: true,
+            vertTouchDrag: mobile ? false : true,
           }
         : false,
       handleScale: enabled
@@ -846,6 +1002,14 @@ export class ChartEngine {
             pinch: true,
           }
         : false,
+      ...(mobile && enabled
+        ? {
+            kineticScroll: {
+              mouse: false,
+              touch: true,
+            },
+          }
+        : {}),
     });
   }
 
@@ -1182,6 +1346,11 @@ export class ChartEngine {
     this.renderFxAnalysis();
     this.scheduleSessionBandsRender();
     this.scheduleVwap3OverlayRender();
+    if (this.isMobileChartViewport() && this.mobileViewNeedsReset) {
+      this.mobileViewNeedsReset = false;
+      window.requestAnimationFrame(() => this.resetMobileView());
+    }
+
   }
 
   updateBar(bar: CleanBar): void {
@@ -1436,6 +1605,7 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   this.symbol = nextSymbol;
   this.timeframe = nextTimeframe;
   this.invalidateDerivedStateCache();
+  this.mobileViewNeedsReset = true;
 
   if (symbolChanged && this.vwap3SetupOverlay?.symbol !== nextSymbol) {
     this.setVwap3SetupOverlay(null);
@@ -1930,6 +2100,12 @@ setMarketContext(symbol?: string, timeframe?: string): void {
   }
 
   destroy(): void {
+    this.container.removeEventListener("pointerup", this.handleMobilePointerUp);
+    this.mobileResetButton?.remove();
+    this.mobileResetButton = null;
+    this.mobileGestureHint?.remove();
+    this.mobileGestureHint = null;
+
     this.chart.timeScale().unsubscribeVisibleLogicalRangeChange(this.handleVisibleRangeChange);
     this.chart.unsubscribeCrosshairMove(this.handleCrosshairMove);
     this.interactionManager.destroy();
