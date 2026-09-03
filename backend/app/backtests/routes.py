@@ -14,6 +14,7 @@ from .alpaca_history_loader import (
 )
 from .sweep_backtest import run_scanner_sweep_backtest, run_sweep_backtest
 from .vwap_std_backtest import run_vwap3_backtest
+from .fib_continuation_backtest import run_fib_continuation_backtest
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 daily_watchlists = DailyWatchlistStore()
@@ -73,6 +74,37 @@ class WatchlistHistoryLoadRequest(BaseModel):
     timeframe: str = "5m"
     warmup_calendar_days: int = Field(default=7, ge=0, le=30)
     future_calendar_days: int = Field(default=10, ge=0, le=30)
+
+
+class FibContinuationBacktestRequest(BaseModel):
+    symbols: Optional[List[str]] = None
+    include_archived_watchlists: bool = True
+    include_scanner: bool = True
+    include_manual: bool = True
+    scanner_ids: Optional[List[str]] = None
+
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    timeframe: str = "5m"
+    months: int = Field(default=12, ge=1, le=24)
+    auto_load_alpaca: bool = True
+    max_symbols: int = Field(default=200, ge=1, le=1000)
+
+    min_range_pct: float = Field(default=12.0, ge=0)
+    min_body_pct: float = Field(default=6.0, ge=0)
+    min_close_location: float = Field(default=0.65, ge=0, le=1)
+    min_volume: float = Field(default=50_000.0, ge=0)
+
+    retrace_min: float = Field(default=0.50, ge=0, le=1)
+    retrace_max: float = Field(default=0.70, ge=0, le=1)
+    max_retrace: float = Field(default=0.786, ge=0, le=1)
+    min_hold_bars: int = Field(default=12, ge=0, le=1000)
+    min_hold_sessions: int = Field(default=1, ge=0, le=20)
+    max_setup_sessions: int = Field(default=6, ge=1, le=30)
+    target_sessions: int = Field(default=5, ge=1, le=30)
+    cooldown_bars: int = Field(default=12, ge=1, le=1000)
+    fib_lookback_bars: int = Field(default=6, ge=0, le=100)
+    example_limit: int = Field(default=100, ge=1, le=500)
 
 
 class VwapStdBacktestRequest(BaseModel):
@@ -295,6 +327,117 @@ async def load_watchlist_history(req: WatchlistHistoryLoadRequest):
         "candidate_dates": len(candidate_by_date),
         "symbols_requested": len(ranges),
     }
+
+
+@router.post("/fib-continuation/run")
+async def run_fib_continuation(req: FibContinuationBacktestRequest):
+    init_db()
+
+    explicit_symbols: List[str] = []
+    for raw in req.symbols or []:
+        symbol = "".join(ch for ch in str(raw).upper().strip() if ch.isalpha() or ch == ".")
+        if symbol and symbol not in explicit_symbols:
+            explicit_symbols.append(symbol)
+
+    candidate_by_date: Dict[str, List[str]] = {}
+    archive_counts: Dict[str, int] = defaultdict(int)
+    if req.include_archived_watchlists:
+        candidate_by_date = _candidate_map(
+            start_date=req.start_date,
+            end_date=req.end_date,
+            include_scanner=req.include_scanner,
+            include_manual=req.include_manual,
+            scanner_ids=req.scanner_ids,
+        )
+        for day_symbols in candidate_by_date.values():
+            for symbol in day_symbols or []:
+                archive_counts[symbol] += 1
+
+    ranked_archive_symbols = [
+        symbol
+        for symbol, _count in sorted(
+            archive_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+    symbols: List[str] = list(explicit_symbols)
+    for symbol in ranked_archive_symbols:
+        if symbol not in symbols:
+            symbols.append(symbol)
+
+    available_symbol_count = len(symbols)
+    symbols = symbols[: req.max_symbols]
+    if not symbols:
+        return {
+            "ok": False,
+            "error": "No symbols supplied and no archived watchlist symbols were found.",
+            "hint": "Supply symbols explicitly or archive manual/scanner watchlists first.",
+        }
+
+    if (req.start_date and not req.end_date) or (req.end_date and not req.start_date):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide both start_date and end_date or neither.",
+        )
+    if req.retrace_min > req.retrace_max:
+        raise HTTPException(status_code=400, detail="retrace_min must be <= retrace_max")
+    if req.retrace_max > req.max_retrace:
+        raise HTTPException(status_code=400, detail="retrace_max must be <= max_retrace")
+
+    alpaca_load: Optional[Dict[str, Any]] = None
+    if req.auto_load_alpaca:
+        if req.start_date and req.end_date:
+            ranges = {
+                symbol: {
+                    "start_date": str(req.start_date)[:10],
+                    "end_date": str(req.end_date)[:10],
+                }
+                for symbol in symbols
+            }
+            alpaca_load = await load_alpaca_history_for_ranges(
+                ranges,
+                timeframe=req.timeframe,
+                warmup_calendar_days=2,
+                future_calendar_days=req.max_setup_sessions + req.target_sessions + 3,
+            )
+        else:
+            alpaca_load = await load_alpaca_history(
+                symbols=symbols,
+                timeframes=[req.timeframe],
+                months=req.months,
+            )
+
+    result = run_fib_continuation_backtest(
+        symbols,
+        timeframe=req.timeframe,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        min_range_pct=req.min_range_pct,
+        min_body_pct=req.min_body_pct,
+        min_close_location=req.min_close_location,
+        min_volume=req.min_volume,
+        retrace_min=req.retrace_min,
+        retrace_max=req.retrace_max,
+        max_retrace=req.max_retrace,
+        min_hold_bars=req.min_hold_bars,
+        min_hold_sessions=req.min_hold_sessions,
+        max_setup_sessions=req.max_setup_sessions,
+        target_sessions=req.target_sessions,
+        cooldown_bars=req.cooldown_bars,
+        fib_lookback_bars=req.fib_lookback_bars,
+        example_limit=req.example_limit,
+    )
+    result["universe"] = {
+        "explicit_symbols": explicit_symbols,
+        "archived_symbol_count": len(ranked_archive_symbols),
+        "available_symbol_count": available_symbol_count,
+        "tested_symbol_count": len(symbols),
+        "max_symbols": req.max_symbols,
+        "truncated": available_symbol_count > len(symbols),
+    }
+    result["alpaca_load"] = alpaca_load
+    return result
 
 
 @router.post("/vwap-std/run")
