@@ -124,6 +124,7 @@ function geometryForDrawing(drawing: ChartDrawing): MarketObjectGeometry | null 
     case "marketStructure":
       return geometryForMarketStructure(drawing);
     case "priceRange":
+    case "fibonacci":
     case "longPosition":
       return null;
   }
@@ -143,6 +144,7 @@ function objectIdentity(drawing: ChartDrawing): {
     case "marketStructure":
       return { type: "marketStructureLeg", bias: "neutral" };
     case "priceRange":
+    case "fibonacci":
     case "longPosition":
       return null;
   }

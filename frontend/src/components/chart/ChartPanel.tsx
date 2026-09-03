@@ -36,6 +36,7 @@ import { TrendlineTool } from "./interaction/tools/TrendlineTool";
 import { HorizontalLineTool } from "./interaction/tools/HorizontalLineTool";
 import { RectangleTool } from "./interaction/tools/RectangleTool";
 import { PriceRangeTool } from "./interaction/tools/PriceRangeTool";
+import { FibonacciRetracementTool } from "./interaction/tools/FibonacciRetracementTool";
 import { LongPositionTool } from "./interaction/tools/LongPositionTool";
 import { MarketStructureTool } from "./interaction/tools/MarketStructureTool";
 import { SelectTool } from "./interaction/tools/SelectTool";
@@ -260,6 +261,7 @@ function getInteractionToolId(tool: DrawingTool): string {
   if (tool === "horizontal") return "horizontal-line";
   if (tool === "rectangle") return "rectangle";
   if (tool === "priceRange") return "price-range";
+  if (tool === "fibonacci") return "fibonacci";
   if (tool === "longPosition") return "long-position";
   return "select";
 }
@@ -271,6 +273,7 @@ function isInteractionOwnedDrawingTool(tool: DrawingTool): boolean {
     tool === "horizontal" ||
     tool === "rectangle" ||
     tool === "priceRange" ||
+    tool === "fibonacci" ||
     tool === "longPosition"
   );
 }
@@ -917,6 +920,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     );
     engine.registerInteractionTool(
       new PriceRangeTool(drawingEngine, () => drawingStyleRef.current),
+    );
+    engine.registerInteractionTool(
+      new FibonacciRetracementTool(drawingEngine, () => drawingStyleRef.current),
     );
     engine.registerInteractionTool(
       new LongPositionTool(drawingEngine, () => drawingStyleRef.current),

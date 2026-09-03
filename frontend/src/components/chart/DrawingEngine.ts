@@ -11,6 +11,7 @@ import type {
   HorizontalLineDrawing,
   RectangleDrawing,
   PriceRangeDrawing,
+  FibonacciDrawing,
   LongPositionDrawing,
   TrendlineDrawing,
   MarketStructureDrawing,
@@ -338,6 +339,36 @@ export class DrawingEngine {
       p1: clonePoint(p1),
       p2: clonePoint(p2),
       style: cloneStyle(style),
+      selected: true,
+    };
+
+    this.pendingTrendPoint = null;
+    this.store.add(drawing);
+    this.selectedDrawingId = drawing.id;
+    this.renderAll();
+    this.scheduleRenderAll();
+    this.emitDrawingChange("create");
+    return drawing;
+  }
+
+  createFibonacciFromPoints(
+    p1: DrawingPoint,
+    p2: DrawingPoint,
+    style: DrawingStyle = this.defaultStyle,
+  ): FibonacciDrawing | null {
+    if (
+      Number(p1.time) === Number(p2.time) &&
+      Number(p1.price) === Number(p2.price)
+    ) {
+      return null;
+    }
+
+    const drawing: FibonacciDrawing = {
+      id: makeId("fibonacci"),
+      type: "fibonacci",
+      p1: clonePoint(p1),
+      p2: clonePoint(p2),
+      style: { ...cloneStyle(style), extendRight: false },
       selected: true,
     };
 
@@ -836,6 +867,8 @@ export class DrawingEngine {
           ? "rect"
           : source.type === "priceRange"
             ? "priceRange"
+            : source.type === "fibonacci"
+              ? "fibonacci"
             : source.type === "longPosition"
               ? "longPosition"
               : source.type === "marketStructure"
@@ -848,6 +881,7 @@ export class DrawingEngine {
       cloned.type === "marketStructure" ||
       cloned.type === "rectangle" ||
       cloned.type === "priceRange" ||
+      cloned.type === "fibonacci" ||
       cloned.type === "longPosition"
     ) {
       cloned.selected = true;
@@ -1078,6 +1112,11 @@ export class DrawingEngine {
         if (hit) return hit;
       }
 
+      if (drawing.type === "fibonacci") {
+        const hit = this.hitTestFibonacci(drawing, x, y);
+        if (hit) return hit;
+      }
+
       if (drawing.type === "longPosition") {
         const hit = this.hitTestLongPosition(drawing, x, y);
         if (hit) return hit;
@@ -1216,6 +1255,50 @@ export class DrawingEngine {
     if (r1x == null || r1y == null || r2x == null || r2y == null) return null;
 
     if (distanceToSegment(x, y, r1x, r1y, r2x, r2y) <= 8) {
+      return { drawingId: drawing.id, mode: "line" };
+    }
+
+    return null;
+  }
+
+  private hitTestFibonacci(
+    drawing: FibonacciDrawing,
+    x: number,
+    y: number,
+  ): HitResult {
+    const p1x = this.chart.timeScale().timeToCoordinate(Number(drawing.p1.time) as Time);
+    const p2x = this.chart.timeScale().timeToCoordinate(Number(drawing.p2.time) as Time);
+    const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
+    const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
+
+    if (p1x == null || p2x == null || p1y == null || p2y == null) return null;
+
+    if (pointDistance(x, y, p1x, p1y) <= 12) {
+      return { drawingId: drawing.id, mode: "p1" };
+    }
+    if (pointDistance(x, y, p2x, p2y) <= 12) {
+      return { drawingId: drawing.id, mode: "p2" };
+    }
+
+    const left = Math.min(p1x, p2x);
+    const right = Math.max(p1x, p2x);
+    const p1Price = Number(drawing.p1.price);
+    const p2Price = Number(drawing.p2.price);
+    const delta = p2Price - p1Price;
+
+    for (const ratio of [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]) {
+      const levelY = this.priceSeries.priceToCoordinate(p1Price + delta * ratio);
+      if (
+        levelY != null &&
+        Math.abs(y - levelY) <= 7 &&
+        x >= left - 8 &&
+        x <= right + 8
+      ) {
+        return { drawingId: drawing.id, mode: "line" };
+      }
+    }
+
+    if (distanceToSegment(x, y, p1x, p1y, p2x, p2y) <= 8) {
       return { drawingId: drawing.id, mode: "line" };
     }
 

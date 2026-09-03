@@ -42,6 +42,16 @@ type Props = {
   onToggleSettings: () => void;
 };
 
+
+function FibonacciIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 5H20M4 9H17M4 13H15M4 17H18M4 21H20" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M6 4V22" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2 2" opacity="0.65" />
+    </svg>
+  );
+}
+
 function MarketStructureIcon() {
   return (
     <svg
@@ -87,6 +97,7 @@ const TOOLS: ToolItem[] = [
   { key: "rectangle", label: "Rectangle", shortcut: "R", icon: <RectangleIcon /> },
   { key: "ray", label: "Ray", icon: <RayIcon />, disabled: true },
   { key: "priceRange", label: "Price Range", shortcut: "P", icon: <PriceRangeIcon /> },
+  { key: "fibonacci", label: "Fibonacci Retracement", shortcut: "F", icon: <FibonacciIcon /> },
   { key: "longPosition", label: "Long Position", shortcut: "L", icon: <PriceRangeIcon /> },
   { key: "dateRange", label: "Date Range", icon: <DateRangeIcon />, disabled: true },
   { key: "text", label: "Text", icon: <TextIcon />, disabled: true },

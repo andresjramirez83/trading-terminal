@@ -14,6 +14,7 @@ import type {
   LongPositionDrawing,
   MarketStructureDrawing,
   PriceRangeDrawing,
+  FibonacciDrawing,
   RectangleDrawing,
   TrendlineDrawing,
 } from "./DrawingTypes";
@@ -187,6 +188,12 @@ export class DrawingRenderer {
       // SVG immediately on a normal redraw.
       this.removeBox(drawing.id);
       this.renderBox(drawing, selectedDrawingId);
+      return;
+    }
+
+    if (drawing.type === "fibonacci") {
+      this.removeBox(drawing.id);
+      this.renderFibonacci(drawing, selectedDrawingId);
       return;
     }
 
@@ -603,6 +610,112 @@ export class DrawingRenderer {
     text.textContent = textValue;
     overlay.appendChild(text);
     elements.push(text);
+  }
+
+  private renderFibonacci(
+    drawing: FibonacciDrawing,
+    selectedDrawingId: string | null,
+  ): void {
+    const overlay = this.ensureSvgOverlay();
+    if (!overlay) return;
+
+    const p1x =
+      this.chart.timeScale().timeToCoordinate(Number(drawing.p1.time) as Time) ??
+      drawing.p1.x ??
+      null;
+    const p2x =
+      this.chart.timeScale().timeToCoordinate(Number(drawing.p2.time) as Time) ??
+      drawing.p2.x ??
+      null;
+    const p1y =
+      this.priceSeries.priceToCoordinate(Number(drawing.p1.price)) ??
+      drawing.p1.y ??
+      null;
+    const p2y =
+      this.priceSeries.priceToCoordinate(Number(drawing.p2.price)) ??
+      drawing.p2.y ??
+      null;
+
+    if (p1x == null || p2x == null || p1y == null || p2y == null) return;
+
+    const left = Math.min(p1x, p2x);
+    const right = Math.max(p1x, p2x);
+    const width = Math.max(1, right - left);
+    const p1Price = Number(drawing.p1.price);
+    const p2Price = Number(drawing.p2.price);
+    const delta = p2Price - p1Price;
+    const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+    const elements: SVGElement[] = [];
+
+    for (const ratio of levels) {
+      const price = p1Price + delta * ratio;
+      const y = this.priceSeries.priceToCoordinate(price);
+      if (y == null) continue;
+
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", svgNumber(left));
+      line.setAttribute("y1", svgNumber(y));
+      line.setAttribute("x2", svgNumber(right));
+      line.setAttribute("y2", svgNumber(y));
+      line.setAttribute("stroke", drawing.style.color);
+      line.setAttribute("stroke-width", String(lineWidth(drawing.style.width)));
+      line.setAttribute("stroke-opacity", ratio === 0 || ratio === 1 ? "1" : "0.78");
+      line.setAttribute("vector-effect", "non-scaling-stroke");
+      overlay.appendChild(line);
+      elements.push(line);
+
+      this.appendLabel(
+        overlay,
+        elements,
+        right + 6,
+        y + 4,
+        `${ratio.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}  ${formatPrice(price)}`,
+        drawing.style.color,
+      );
+    }
+
+    const guide = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    guide.setAttribute("x1", svgNumber(p1x));
+    guide.setAttribute("y1", svgNumber(p1y));
+    guide.setAttribute("x2", svgNumber(p2x));
+    guide.setAttribute("y2", svgNumber(p2y));
+    guide.setAttribute("stroke", drawing.style.color);
+    guide.setAttribute("stroke-width", "1");
+    guide.setAttribute("stroke-opacity", "0.45");
+    guide.setAttribute("stroke-dasharray", "4 4");
+    guide.setAttribute("vector-effect", "non-scaling-stroke");
+    overlay.appendChild(guide);
+    elements.push(guide);
+
+    if (drawing.id === selectedDrawingId) {
+      for (const [cx, cy] of [[p1x, p1y], [p2x, p2y]] as Array<[number, number]>) {
+        const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        handle.setAttribute("cx", svgNumber(cx));
+        handle.setAttribute("cy", svgNumber(cy));
+        handle.setAttribute("r", "5");
+        handle.setAttribute("fill", drawing.style.color);
+        handle.setAttribute("stroke", "#ffffff");
+        handle.setAttribute("stroke-width", "1");
+        handle.setAttribute("vector-effect", "non-scaling-stroke");
+        overlay.appendChild(handle);
+        elements.push(handle);
+      }
+
+      const outline = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      outline.setAttribute("x", svgNumber(left));
+      outline.setAttribute("y", svgNumber(Math.min(p1y, p2y)));
+      outline.setAttribute("width", svgNumber(width));
+      outline.setAttribute("height", svgNumber(Math.max(1, Math.abs(p2y - p1y))));
+      outline.setAttribute("fill", "none");
+      outline.setAttribute("stroke", "#ffffff");
+      outline.setAttribute("stroke-width", "1");
+      outline.setAttribute("stroke-dasharray", "4 4");
+      outline.setAttribute("vector-effect", "non-scaling-stroke");
+      overlay.appendChild(outline);
+      elements.push(outline);
+    }
+
+    this.boxElements.set(drawing.id, elements);
   }
 
   private renderLongPosition(

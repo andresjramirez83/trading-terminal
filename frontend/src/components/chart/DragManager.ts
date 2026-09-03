@@ -7,6 +7,7 @@ import type {
   HorizontalLineDrawing,
   RectangleDrawing,
   PriceRangeDrawing,
+  FibonacciDrawing,
   LongPositionDrawing,
   TrendlineDrawing,
   MarketStructureDrawing,
@@ -192,6 +193,10 @@ export class DragManager {
       return this.dragRectangle(drawing, point);
     }
 
+    if (drawing.type === "fibonacci") {
+      return this.dragFibonacci(drawing, point);
+    }
+
     if (drawing.type === "longPosition") {
       return this.dragLongPosition(drawing, point);
     }
@@ -253,6 +258,56 @@ export class DragManager {
       rawPrice: Number(original.p1.price) + deltaPrice,
     };
 
+    updated.p2 = {
+      ...original.p2,
+      time: Number(original.p2.time) + deltaTime,
+      price: Number(original.p2.price) + deltaPrice,
+      rawPrice: Number(original.p2.price) + deltaPrice,
+    };
+
+    return updated;
+  }
+
+  private dragFibonacci(
+    drawing: FibonacciDrawing,
+    point: DrawingPointerEvent,
+  ): FibonacciDrawing | null {
+    if (!this.dragState) return null;
+    if (this.dragState.original.type !== "fibonacci") return null;
+
+    const original = this.dragState.original;
+    const updated: FibonacciDrawing = {
+      ...drawing,
+      p1: clonePoint(drawing.p1),
+      p2: clonePoint(drawing.p2),
+      style: { ...drawing.style },
+    };
+
+    if (this.dragState.mode === "p1") {
+      updated.p1 = clonePoint(point);
+      return updated;
+    }
+
+    if (this.dragState.mode === "p2") {
+      updated.p2 = clonePoint(point);
+      return updated;
+    }
+
+    if (this.dragState.mode !== "line") return null;
+
+    const deltaTime = Number(point.time) - Number(this.dragState.startPoint.time);
+    const startPrice = Number(
+      this.dragState.startPoint.rawPrice ?? this.dragState.startPoint.price,
+    );
+    const currentPrice = getPointPrice(point);
+    const deltaPrice = currentPrice - startPrice;
+
+    updated.p1 = {
+      ...original.p1,
+      time: Number(original.p1.time) + deltaTime,
+      price: Number(original.p1.price) + deltaPrice,
+      rawPrice: Number(original.p1.price) + deltaPrice,
+    };
     updated.p2 = {
       ...original.p2,
       time: Number(original.p2.time) + deltaTime,

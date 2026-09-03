@@ -10,6 +10,7 @@ export type DrawingTool =
   | "ray"
   | "rectangle"
   | "priceRange"
+  | "fibonacci"
   | "longPosition"
   | "dateRange"
   | "text"
@@ -99,6 +100,15 @@ export type PriceRangeDrawing = {
   selected?: boolean;
 };
 
+export type FibonacciDrawing = {
+  id: string;
+  type: "fibonacci";
+  p1: DrawingPoint;
+  p2: DrawingPoint;
+  style: DrawingStyle;
+  selected?: boolean;
+};
+
 export type LongPositionDrawing = {
   id: string;
   type: "longPosition";
@@ -116,4 +126,5 @@ export type ChartDrawing =
   | MarketStructureDrawing
   | RectangleDrawing
   | PriceRangeDrawing
+  | FibonacciDrawing
   | LongPositionDrawing;
