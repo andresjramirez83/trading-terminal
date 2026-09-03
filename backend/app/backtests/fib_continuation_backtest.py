@@ -96,14 +96,26 @@ def _progress_to_target(entry: float, target: float, max_high: float) -> float:
 
 def _summarize(rows: Sequence[Dict[str, Any]], key: str = "target_hit") -> Dict[str, Any]:
     total = len(rows)
-    hits = sum(1 for row in rows if bool(row.get(key)))
-    low, high = _wilson_interval(hits, total)
-    progress_values = [_float(row.get("target_progress")) for row in rows if row.get("target_progress") is not None]
+    resolved_rows = [row for row in rows if str(row.get("outcome_status") or "").lower() != "unresolved"]
+    unresolved = total - len(resolved_rows)
+    resolved = len(resolved_rows)
+    hits = sum(1 for row in resolved_rows if bool(row.get(key)))
+    misses = max(0, resolved - hits)
+    low, high = _wilson_interval(hits, resolved)
+    progress_values = [
+        _float(row.get("target_progress"))
+        for row in resolved_rows
+        if row.get("target_progress") is not None
+    ]
     return {
         "setups": total,
+        "resolved_setups": resolved,
+        "unresolved_setups": unresolved,
         "target_hits": hits,
-        "hit_rate": round(hits / total, 4) if total else None,
-        "hit_rate_pct": round((hits / total) * 100.0, 2) if total else None,
+        "target_misses": misses,
+        "hit_rate_denominator": resolved,
+        "hit_rate": round(hits / resolved, 4) if resolved else None,
+        "hit_rate_pct": round((hits / resolved) * 100.0, 2) if resolved else None,
         "wilson_95_low_pct": round(low * 100.0, 2) if low is not None else None,
         "wilson_95_high_pct": round(high * 100.0, 2) if high is not None else None,
         "avg_target_progress_pct": round(mean(progress_values) * 100.0, 2) if progress_values else None,
@@ -148,6 +160,9 @@ def _evaluate_target(
 ) -> Dict[str, Any]:
     if breakout_index >= len(rows) - 1:
         return {
+            "outcome_status": "unresolved",
+            "evaluation_complete": False,
+            "sessions_observed_after_breakout": 0,
             "target_hit": False,
             "target_hit_time": None,
             "target_hit_session": None,
@@ -163,6 +178,9 @@ def _evaluate_target(
     start_day = str(rows[breakout_index].get("trade_date") or "")[:10]
     start_session = session_map.get(start_day, 0)
     end_index = _future_window_end_index(rows, breakout_index + 1, session_map, target_sessions)
+    last_day = str(rows[-1].get("trade_date") or "")[:10]
+    last_session = session_map.get(last_day, start_session)
+    sessions_observed_after_breakout = max(0, last_session - start_session)
 
     target_hit_time = None
     target_hit_session = None
@@ -189,6 +207,8 @@ def _evaluate_target(
             break
 
     target_hit = target_hit_time is not None
+    evaluation_complete = target_hit or sessions_observed_after_breakout >= target_sessions
+    outcome_status = "hit" if target_hit else ("missed" if evaluation_complete else "unresolved")
     target_ts = None
     close_fail_ts = None
     deep_fail_ts = None
@@ -201,6 +221,9 @@ def _evaluate_target(
             deep_fail_ts = int(row.get("ts") or 0)
 
     return {
+        "outcome_status": outcome_status,
+        "evaluation_complete": evaluation_complete,
+        "sessions_observed_after_breakout": sessions_observed_after_breakout,
         "target_hit": target_hit,
         "target_hit_time": target_hit_time,
         "target_hit_session": target_hit_session,
@@ -416,7 +439,7 @@ def run_fib_continuation_backtest(
     strict_618 = _summarize(all_setups, key="target_before_close_below_618")
     strict_786 = _summarize(all_setups, key="target_before_low_below_786")
 
-    sample_size = len(all_setups)
+    sample_size = int(setup_summary.get("resolved_setups") or 0)
     if sample_size < 30:
         verdict = "insufficient_sample"
         verdict_text = "Fewer than 30 qualifying setups. Treat the result as exploratory, not validated."
@@ -445,7 +468,8 @@ def run_fib_continuation_backtest(
         "setup": "bullish_expansion_fib_hold_rebreak_fx_resistance",
         "description": (
             "Bullish expansion candle -> retracement into configured Fib band -> hold/base -> "
-            "later bullish close above the expansion high -> target = high + (high - low), matching FX Resistance."
+            "later bullish close above the expansion high -> target = high + (high - low), matching FX Resistance. "
+            "Setups without the full target evaluation window are reported as unresolved and excluded from hit-rate denominators."
         ),
         "formula": {
             "fib_retracement_price": "expansion_high - (expansion_high - impulse_anchor_low) * retracement_ratio",
