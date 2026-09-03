@@ -18,6 +18,7 @@ import type {
   RectangleDrawing,
   TrendlineDrawing,
 } from "./DrawingTypes";
+import { FIBONACCI_DRAWING_COLOR } from "./DrawingTypes";
 import { formatTickPrice, roundToTick } from "../../trading/pricing/TickSizeManager";
 
 type LineSeriesApi = ISeriesApi<"Line">;
@@ -612,6 +613,20 @@ export class DrawingRenderer {
     elements.push(text);
   }
 
+  private fibonacciLevelLabel(ratio: number): string {
+    if (ratio === 0 || ratio === 1) return ratio.toFixed(0);
+    return ratio.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  private fibonacciLevelPrice(
+    startPrice: number,
+    endPrice: number,
+    ratio: number,
+  ): number {
+    const delta = endPrice - startPrice;
+    return endPrice - delta * ratio;
+  }
+
   private renderFibonacci(
     drawing: FibonacciDrawing,
     selectedDrawingId: string | null,
@@ -638,17 +653,17 @@ export class DrawingRenderer {
 
     if (p1x == null || p2x == null || p1y == null || p2y == null) return;
 
+    const lineColor = FIBONACCI_DRAWING_COLOR;
     const left = Math.min(p1x, p2x);
     const right = Math.max(p1x, p2x);
     const width = Math.max(1, right - left);
-    const p1Price = Number(drawing.p1.price);
-    const p2Price = Number(drawing.p2.price);
-    const delta = p2Price - p1Price;
+    const startPrice = Number(drawing.p1.price);
+    const endPrice = Number(drawing.p2.price);
     const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
     const elements: SVGElement[] = [];
 
     for (const ratio of levels) {
-      const price = p1Price + delta * ratio;
+      const price = this.fibonacciLevelPrice(startPrice, endPrice, ratio);
       const y = this.priceSeries.priceToCoordinate(price);
       if (y == null) continue;
 
@@ -657,9 +672,9 @@ export class DrawingRenderer {
       line.setAttribute("y1", svgNumber(y));
       line.setAttribute("x2", svgNumber(right));
       line.setAttribute("y2", svgNumber(y));
-      line.setAttribute("stroke", drawing.style.color);
+      line.setAttribute("stroke", lineColor);
       line.setAttribute("stroke-width", String(lineWidth(drawing.style.width)));
-      line.setAttribute("stroke-opacity", ratio === 0 || ratio === 1 ? "1" : "0.78");
+      line.setAttribute("stroke-opacity", ratio === 0 || ratio === 1 ? "1" : "0.9");
       line.setAttribute("vector-effect", "non-scaling-stroke");
       overlay.appendChild(line);
       elements.push(line);
@@ -669,8 +684,8 @@ export class DrawingRenderer {
         elements,
         right + 6,
         y + 4,
-        `${ratio.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}  ${formatPrice(price)}`,
-        drawing.style.color,
+        `${this.fibonacciLevelLabel(ratio)}  ${formatPrice(price)}`,
+        lineColor,
       );
     }
 
@@ -679,9 +694,9 @@ export class DrawingRenderer {
     guide.setAttribute("y1", svgNumber(p1y));
     guide.setAttribute("x2", svgNumber(p2x));
     guide.setAttribute("y2", svgNumber(p2y));
-    guide.setAttribute("stroke", drawing.style.color);
+    guide.setAttribute("stroke", lineColor);
     guide.setAttribute("stroke-width", "1");
-    guide.setAttribute("stroke-opacity", "0.45");
+    guide.setAttribute("stroke-opacity", "0.55");
     guide.setAttribute("stroke-dasharray", "4 4");
     guide.setAttribute("vector-effect", "non-scaling-stroke");
     overlay.appendChild(guide);
@@ -693,7 +708,7 @@ export class DrawingRenderer {
         handle.setAttribute("cx", svgNumber(cx));
         handle.setAttribute("cy", svgNumber(cy));
         handle.setAttribute("r", "5");
-        handle.setAttribute("fill", drawing.style.color);
+        handle.setAttribute("fill", lineColor);
         handle.setAttribute("stroke", "#ffffff");
         handle.setAttribute("stroke-width", "1");
         handle.setAttribute("vector-effect", "non-scaling-stroke");

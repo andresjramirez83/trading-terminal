@@ -5,7 +5,7 @@ import type { ChartMouseEvent } from "../events/ChartMouseEvent";
 import type { ToolContext } from "../ToolContext";
 import type { ChartPointerPoint } from "../../ChartEngine";
 import type { DrawingEngine } from "../../DrawingEngine";
-import type { DrawingStyle } from "../../DrawingTypes";
+import { FIBONACCI_DRAWING_COLOR, type DrawingStyle } from "../../DrawingTypes";
 
 function clonePoint(point: ChartPointerPoint): ChartPointerPoint {
   return {
@@ -130,8 +130,8 @@ export class FibonacciRetracementTool implements ChartTool {
     const height = Math.abs(end.y - start.y);
 
     ctx.save();
-    ctx.strokeStyle = style.color;
-    ctx.fillStyle = style.color;
+    ctx.strokeStyle = FIBONACCI_DRAWING_COLOR;
+    ctx.fillStyle = FIBONACCI_DRAWING_COLOR;
     ctx.globalAlpha = 1;
     ctx.lineWidth = lineWidth(style.width);
     ctx.setLineDash([6, 4]);

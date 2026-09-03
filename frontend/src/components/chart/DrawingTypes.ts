@@ -45,6 +45,8 @@ export const DEFAULT_DRAWING_STYLE: DrawingStyle = {
   extendRight: true,
 };
 
+export const FIBONACCI_DRAWING_COLOR = "#facc15";
+
 export type MarketStructureNodeClassification =
   | "high"
   | "low"

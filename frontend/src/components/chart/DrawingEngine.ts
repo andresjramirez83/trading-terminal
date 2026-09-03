@@ -17,7 +17,7 @@ import type {
   MarketStructureDrawing,
   MarketStructureNode,
 } from "./DrawingTypes";
-import { DEFAULT_DRAWING_STYLE } from "./DrawingTypes";
+import { DEFAULT_DRAWING_STYLE, FIBONACCI_DRAWING_COLOR } from "./DrawingTypes";
 import { DrawingStore } from "./DrawingStore";
 import { DrawingRenderer } from "./DrawingRenderer";
 import { DragManager, type DragMode } from "./DragManager";
@@ -368,7 +368,11 @@ export class DrawingEngine {
       type: "fibonacci",
       p1: clonePoint(p1),
       p2: clonePoint(p2),
-      style: { ...cloneStyle(style), extendRight: false },
+      style: {
+        ...cloneStyle(style),
+        color: FIBONACCI_DRAWING_COLOR,
+        extendRight: false,
+      },
       selected: true,
     };
 
