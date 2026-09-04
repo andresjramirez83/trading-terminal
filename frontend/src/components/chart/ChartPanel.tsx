@@ -2342,9 +2342,12 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   return (
     <div
       style={{
+        // CHART_PANEL_PARENT_SIZE_20260904
         position: "relative",
-        width: "100vw",
-        height: "100vh",
+        width: "100%",
+        height: "100%",
+        maxWidth: "100%",
+        maxHeight: "100%",
         minWidth: 0,
         minHeight: 0,
         overflow: "hidden",

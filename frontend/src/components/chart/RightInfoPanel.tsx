@@ -15,9 +15,6 @@ const TradingWorkspacePanel = lazy(
 const WatchlistsWorkspacePanel = lazy(
   () => import("./right-panel/workspaces/WatchlistsWorkspacePanel"),
 );
-const ScannerWorkspacePanel = lazy(
-  () => import("./right-panel/workspaces/ScannerWorkspacePanel"),
-);
 const NewsWorkspacePanel = lazy(
   () => import("./right-panel/workspaces/NewsWorkspacePanel"),
 );
@@ -44,7 +41,6 @@ const WORKSPACES: { id: RightPanelWorkspace; label: string }[] = [
   { id: "trade", label: "Trading" },
   { id: "watchlists", label: "Lists" },
   { id: "chart", label: "Chart" },
-  { id: "scanner", label: "Scanner" },
   { id: "news", label: "News" },
   { id: "coach", label: "Coach" },
   { id: "level2", label: "Level 2" },
@@ -139,9 +135,12 @@ export default function RightInfoPanel({
   return (
     <aside
       style={{
+        // RIGHT_PANEL_SCROLL_LOCK_20260904
         width: 340,
         flexShrink: 0,
         height: "100%",
+        minHeight: 0,
+        overflow: "hidden",
         background: "#0b0f14",
         borderLeft: "1px solid rgba(255,255,255,.08)",
         color: "#e5e7eb",
@@ -266,6 +265,8 @@ export default function RightInfoPanel({
           flex: 1,
           minHeight: 0,
           overflowY: "auto",
+          overflowX: "hidden",
+          overscrollBehavior: "contain",
           padding: 10,
         }}
       >
@@ -284,8 +285,6 @@ export default function RightInfoPanel({
           )}
 
           {workspace === "watchlists" && <WatchlistsWorkspacePanel />}
-
-          {workspace === "scanner" && <ScannerWorkspacePanel />}
 
           {workspace === "news" && <NewsWorkspacePanel symbol={symbol} />}
 
