@@ -463,6 +463,33 @@ class AutoTradeEngine:
             if reason is None:
                 continue
 
+            # A real stop/target touch is a one-way flatten trigger. Latch it
+            # BEFORE submitting the exit so a broker/API error or a fast move
+            # back below the target cannot disarm the exit on the next poll.
+            if reason in {"stop_loss", "target_hit"} and forced_reason != reason:
+                latched_state = dict(state)
+                latched_state.update({
+                    "force_exit_reason": reason,
+                    "exit_triggered_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_trigger_market_snapshot": market_snapshot,
+                    "last_market_snapshot": market_snapshot,
+                })
+                self.store.upsert_runner_state(symbol, latched_state)
+                state = latched_state
+                forced_reason = reason
+                self.store.log_event(
+                    "synthetic_exit_trigger_latched",
+                    {
+                        "reason": reason,
+                        "trigger_price": trigger_price,
+                        "target_price": target,
+                        "stop_price": stop,
+                        "market": market_snapshot,
+                    },
+                    symbol,
+                    strategy_id,
+                )
+
             if reason == "manual_scale_out":
                 exit_qty = min(manual_exit_qty, max(0, live_qty - 1))
             else:
@@ -476,14 +503,13 @@ class AutoTradeEngine:
             limit_price = None
             if order_type == "limit":
                 bid_price = self._safe_float(market_snapshot.get("bid_price"))
-                if reason == "target_hit" and not forced_reason:
-                    limit_price = target
-                else:
-                    # A retry is already committed to exiting. Reprice from the
-                    # executable bid so a stale target/stop limit cannot remain
-                    # stranded after the market moves away.
-                    reference_price = bid_price or trigger_price
-                    limit_price = self._alpaca_price(max(0.0001, reference_price * 0.995))
+                # Extended-hours exits must be limit orders, so emulate a
+                # flatten/market exit with a marketable sell limit below the
+                # executable bid. Do this on the FIRST target-hit attempt too;
+                # never leave a target sell parked at the old target after the
+                # market has already touched it and started pulling back.
+                reference_price = bid_price or trigger_price
+                limit_price = self._alpaca_price(max(0.0001, reference_price * 0.995))
 
             try:
                 order = alpaca.place_order(
@@ -807,7 +833,13 @@ class AutoTradeEngine:
             return
 
         exit_age_seconds = self._seconds_since_iso(state.get("exit_submitted_at"))
-        if exit_age_seconds >= 15 and status in {
+        exit_reason = str(state.get("exit_reason") or state.get("force_exit_reason") or "")
+        retry_after_seconds = (
+            3.0
+            if exit_reason in {"target_hit", "stop_loss", "manual_close"}
+            else 15.0
+        )
+        if exit_age_seconds >= retry_after_seconds and status in {
             "new",
             "accepted",
             "pending_new",
@@ -1203,52 +1235,86 @@ class AutoTradeEngine:
                 if status not in {"new", "accepted", "pending_new", "partially_filled", "held"}:
                     continue
 
-                # LOCKED OWNERSHIP RULE FOR MANUAL OVERNIGHT ORDERS:
-                # Once Alpaca accepts the pending limit entry, the AutoTrade
-                # worker is NEVER allowed to cancel that unfilled order.
-                #
-                # Previous versions stored entry_cancel_reason and retried
-                # cancel_order() every few seconds.  That stale flag could keep
-                # deleting newly accepted overnight orders even after the market
-                # data/freshness logic was corrected.  Clear any legacy cancel
-                # state and leave the broker order untouched until it fills, the
-                # user cancels it, or Alpaca itself returns a terminal status.
-                if protected_manual_entry:
-                    had_legacy_cancel = bool(
-                        payload.get("entry_cancel_reason")
-                        or payload.get("entry_cancel_requested_at")
-                        or payload.get("entry_cancel_error")
-                    )
-                    for key in (
-                        "entry_cancel_reason",
-                        "entry_cancel_requested_at",
-                        "entry_cancel_attempts",
-                        "entry_cancel_market_snapshot",
-                        "entry_cancel_error",
-                    ):
-                        payload.pop(key, None)
-                    payload["phase"] = "entry_submitted"
-                    payload["pending_entry_locked"] = True
-                    payload["pending_entry_lock_reason"] = "manual_overnight_order_owned_by_broker_until_fill"
-                    payload["last_reconciled_at"] = datetime.now(timezone.utc).isoformat()
-                    self.store.upsert_pending_entry(order_id, payload)
-                    self.store.upsert_runner_state(symbol, {"phase": "entry_submitted", **payload})
-                    if had_legacy_cancel:
-                        self.store.log_event(
-                            "pending_entry_legacy_cancel_cleared",
-                            {
-                                "order_id": order_id,
-                                "order_status": status,
-                                "pending": payload,
-                            },
-                            symbol,
-                            strategy_id,
-                        )
-                    continue
+                # Pending-entry protection is one-way once a valid target/stop
+                # trigger is observed. For manual Overnight Protected Orders we
+                # only trust a fresh, timestamped quote newer than the entry.
+                # This prevents stale BOATS/SIP data from cancelling a good order,
+                # while still invalidating an entry whose target or stop has
+                # already traded before the entry fills.
+                cancel_reason = str(payload.get("entry_cancel_reason") or "")
 
-                # Non-manual strategies may still use their own cancellation
-                # lifecycle.  Do not apply that lifecycle to locked manual
-                # Overnight Protected Orders.
+                if protected_manual_entry and not cancel_reason:
+                    cancel_reason, market_snapshot = await self._entry_invalidation_reason(
+                        symbol=symbol,
+                        stop=stop,
+                        target=target,
+                        market=market,
+                        submitted_at=payload.get("submitted_at"),
+                    )
+                    payload["entry_guard_market_snapshot"] = market_snapshot
+                    payload["entry_guard_status"] = str(
+                        market_snapshot.get("invalidation_status") or ""
+                    )
+                    payload["pending_entry_locked"] = False
+                    payload.pop("pending_entry_lock_reason", None)
+                    payload["last_reconciled_at"] = datetime.now(timezone.utc).isoformat()
+
+                    if cancel_reason:
+                        payload.update({
+                            "phase": "entry_cancel_requested",
+                            "entry_cancel_reason": cancel_reason,
+                            "entry_cancel_requested_at": datetime.now(timezone.utc).isoformat(),
+                            "entry_cancel_attempts": 1,
+                            "entry_cancel_market_snapshot": market_snapshot,
+                            "entry_cancel_error": None,
+                        })
+                        self.store.upsert_pending_entry(order_id, payload)
+                        self.store.upsert_runner_state(
+                            symbol,
+                            {"phase": "entry_cancel_requested", **payload},
+                        )
+                        try:
+                            alpaca.cancel_order(order_id)
+                            self.store.log_event(
+                                "pending_entry_cancel_requested",
+                                {
+                                    "order_id": order_id,
+                                    "cancel_reason": cancel_reason,
+                                    "market": market_snapshot,
+                                    "pending": payload,
+                                },
+                                symbol,
+                                strategy_id,
+                            )
+                        except Exception as cancel_exc:
+                            payload["entry_cancel_error"] = str(cancel_exc)
+                            self.store.upsert_pending_entry(order_id, payload)
+                            self.store.log_event(
+                                "pending_entry_cancel_error",
+                                {
+                                    "order_id": order_id,
+                                    "cancel_reason": cancel_reason,
+                                    "error": str(cancel_exc),
+                                    "pending": payload,
+                                },
+                                symbol,
+                                strategy_id,
+                            )
+                        continue
+
+                    payload["phase"] = "entry_submitted"
+                    payload["entry_guard_armed"] = True
+                    self.store.upsert_pending_entry(order_id, payload)
+                    self.store.upsert_runner_state(
+                        symbol,
+                        {"phase": "entry_submitted", **payload},
+                    )
+
+                # Once cancellation has been triggered, do not disarm it just
+                # because price moves back inside the stop/target range. Keep
+                # asking Alpaca to cancel until the broker reports a terminal
+                # status. If shares fill in the race, _promote_filled_entry_to_active
+                # converts the latched reason into an immediate forced exit.
                 cancel_reason = str(payload.get("entry_cancel_reason") or "")
                 if cancel_reason:
                     cancel_age = self._seconds_since_iso(payload.get("entry_cancel_requested_at"))
@@ -1257,11 +1323,15 @@ class AutoTradeEngine:
                             alpaca.cancel_order(order_id)
                             payload["entry_cancel_requested_at"] = datetime.now(timezone.utc).isoformat()
                             payload["entry_cancel_attempts"] = int(payload.get("entry_cancel_attempts") or 1) + 1
+                            payload["entry_cancel_error"] = None
                             self.store.upsert_pending_entry(order_id, payload)
                             self.store.upsert_runner_state(symbol, {"phase": "entry_cancel_requested", **payload})
                         except Exception as cancel_exc:
                             payload["entry_cancel_error"] = str(cancel_exc)
                             self.store.upsert_pending_entry(order_id, payload)
+                    continue
+
+                if protected_manual_entry:
                     continue
             except Exception as exc:
                 self.store.log_event(
