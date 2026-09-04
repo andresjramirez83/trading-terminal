@@ -575,12 +575,17 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
 
   const tradePlan = tradePlanDraft;
 
+  const allOpenOrders = executionSnapshot.openOrders;
+  const allPositions = executionSnapshot.positions;
+  const allRawPositions = executionSnapshot.rawPositions;
+  const recentBrokerOrders = executionSnapshot.rawClosedOrders;
+
   const openOrders = useMemo<OpenOrderState[]>(
     () =>
-      executionSnapshot.openOrders.filter(
+      allOpenOrders.filter(
         (order) => order.symbol === safeSymbol || safeSymbol === "—",
       ),
-    [executionSnapshot.openOrders, safeSymbol],
+    [allOpenOrders, safeSymbol],
   );
 
   const livePosition = useMemo(
@@ -1253,6 +1258,12 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
 
   const cancelOpenOrder = useCallback(
     async (orderId: string) => {
+      const brokerOrder = executionSnapshot.openOrders.find(
+        (order) => order.id === orderId,
+      );
+      const targetSymbol =
+        brokerOrder?.symbol.trim().toUpperCase() || safeSymbol;
+
       const cancelled = await executionService.cancelOrder(orderId);
 
       if (!cancelled) {
@@ -1260,7 +1271,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         return;
       }
 
-      const hasLivePosition = livePosition.shares > 0;
+      const hasLivePosition =
+        findPositionForSymbol(executionSnapshot.positions, targetSymbol).shares > 0;
       const selectedTrade = tradeEngine.getSelectedTrade();
 
       const linkedTrade =
@@ -1275,7 +1287,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
           .getTrades()
           .filter(
             (trade) =>
-              trade.symbol.trim().toUpperCase() === safeSymbol &&
+              trade.symbol.trim().toUpperCase() === targetSymbol &&
               ["submitted", "accepted", "partially_filled"].includes(
                 trade.status,
               ),
@@ -1285,7 +1297,7 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       const trade =
         linkedTrade ??
         (selectedTrade &&
-        selectedTrade.symbol.trim().toUpperCase() === safeSymbol
+        selectedTrade.symbol.trim().toUpperCase() === targetSymbol
           ? selectedTrade
           : null) ??
         symbolTrade;
@@ -1295,9 +1307,9 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
         !hasLivePosition &&
         ["submitted", "accepted", "partially_filled"].includes(trade.status)
       ) {
-        // Canceling the parent bracket order cancels the working entry and its
-        // child legs together. Clear all linked Alpaca IDs so a stale child ID
-        // cannot keep the trade looking active until the next refresh.
+        // Global Orders Center can cancel a symbol that is not currently on
+        // the chart. Reconcile the linked trade by the broker order's symbol
+        // rather than by the active chart symbol.
         tradeEngine.updateTrade(trade.id, {
           status: "cancelled",
           links: {
@@ -1305,10 +1317,6 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
             alpacaOrderIds: [],
           },
         });
-
-        // Always emit a selected-trade event so the Plan Trade card receives
-        // the cancelled status immediately, even when this trade was already
-        // selected.
         tradeEngine.selectTrade(trade.id);
       }
 
@@ -1316,7 +1324,8 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
     },
     [
       executionService,
-      livePosition.shares,
+      executionSnapshot.openOrders,
+      executionSnapshot.positions,
       safeSymbol,
       tradeEngine,
     ],
@@ -1592,6 +1601,11 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       flattenAllPositions,
 
       openOrders,
+      allOpenOrders,
+      allPositions,
+      allRawPositions,
+      recentBrokerOrders,
+      autoTradeStatus,
       cancelOpenOrder,
       fillOpenOrder,
 
@@ -1632,6 +1646,11 @@ export function useTradeEngineStore(symbol: string, currentPrice: number) {
       journalTrades,
       moveStopToBreakEven,
       openOrders,
+      allOpenOrders,
+      allPositions,
+      allRawPositions,
+      recentBrokerOrders,
+      autoTradeStatus,
       positionProtection,
       positionProtectionOwner,
       positionStage,

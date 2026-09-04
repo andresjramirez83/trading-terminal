@@ -13,6 +13,7 @@ from app.autotrade.state import AutoTradeStore
 from app.autotrade.symbols import resolve_symbols
 from app.services.alpaca_service import AlpacaService
 from app.services.market_data_provider import MarketDataProvider, get_market_data_provider
+from app.services.trading_order_alert_service import TradingOrderAlertService
 from app.strategies.registry import StrategyRegistry
 
 
@@ -26,6 +27,7 @@ class AutoTradeEngine:
     def __init__(self, store: Optional[AutoTradeStore] = None) -> None:
         self.store = store or AutoTradeStore()
         self.strategy_registry = StrategyRegistry()
+        self.order_alert_service = TradingOrderAlertService(self.store)
         self.stop_requested = False
 
     @staticmethod
@@ -47,6 +49,12 @@ class AutoTradeEngine:
             while not self.stop_requested:
                 cfg = self.store.get_config()
                 try:
+                    # Broker-backed push alerts run independently from the web
+                    # frontend. The service baselines on worker start, then
+                    # announces new entry fills and final flat-position closes
+                    # with realized P/L from actual broker fills.
+                    await self.order_alert_service.poll_if_due()
+
                     # Protection is intentionally checked more frequently than
                     # scanner strategies. This reduces the time an overnight
                     # entry or open position can remain exposed during a fast move.
@@ -489,6 +497,20 @@ class AutoTradeEngine:
                     symbol,
                     strategy_id,
                 )
+                if strategy_id in {"overnight_protected_order", "overnite_hail_mary"}:
+                    # Push delivery must never delay the actual protective exit.
+                    asyncio.create_task(
+                        self.order_alert_service.notify_protected_exit_trigger(
+                            symbol=symbol,
+                            reason=reason,
+                            trigger_price=trigger_price,
+                            entry=self._alpaca_price(state.get("entry_price")),
+                            stop=stop,
+                            target=target,
+                            qty=live_qty,
+                            mode=trade_mode,
+                        )
+                    )
 
             if reason == "manual_scale_out":
                 exit_qty = min(manual_exit_qty, max(0, live_qty - 1))
@@ -1272,6 +1294,18 @@ class AutoTradeEngine:
                         self.store.upsert_runner_state(
                             symbol,
                             {"phase": "entry_cancel_requested", **payload},
+                        )
+                        # Announce the invalidation without holding up the broker
+                        # cancel request. The reason is latched so this fires once.
+                        asyncio.create_task(
+                            self.order_alert_service.notify_protected_entry_invalidation(
+                                symbol=symbol,
+                                reason=cancel_reason,
+                                entry=self._alpaca_price(payload.get("entry_price")),
+                                stop=stop,
+                                target=target,
+                                mode=str(payload.get("mode") or cfg.mode),
+                            )
                         )
                         try:
                             alpaca.cancel_order(order_id)

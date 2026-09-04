@@ -80,10 +80,16 @@ export type OpenOrderState = {
   side: TradeSide;
   type: OrderType | "bracket";
   shares: number;
+  filledShares?: number;
+  remainingShares?: number;
   limitPrice?: number;
   stopPrice?: number;
   targetPrice?: number;
   status: OpenOrderStatus;
+  rawStatus?: string;
+  orderClass?: string;
+  extendedHours?: boolean;
+  submittedAt?: string;
   createdAt: string;
 };
 

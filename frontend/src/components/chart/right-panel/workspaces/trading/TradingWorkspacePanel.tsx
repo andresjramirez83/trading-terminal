@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useState, type CSSProperties } from "react";
 import AccountWidget from "./AccountWidget";
 import QuickOrderWidget from "./QuickOrderWidget";
 import CurrentPositionWidget from "./CurrentPositionWidget";
-import OpenOrdersWidget from "./OpenOrdersWidget";
+import OrdersCenterWidget from "./OrdersCenterWidget";
 import FilledOrdersWidget from "./FilledOrdersWidget";
 import TradeJournalWidget from "./TradeJournalWidget";
 import PerformanceWidget from "./PerformanceWidget";
@@ -466,11 +466,14 @@ export default function TradingWorkspacePanel({
         onFlattenAllPositions={store.flattenAllPositions}
       />
 
-      <OpenOrdersWidget
-        orders={store.openOrders}
+      <OrdersCenterWidget
+        orders={store.allOpenOrders}
+        positions={store.allPositions}
+        rawPositions={store.allRawPositions}
+        recentBrokerOrders={store.recentBrokerOrders}
+        autoTradeStatus={store.autoTradeStatus}
         mode={store.executionMode === "live" ? "live" : "paper"}
         onCancelOrder={store.cancelOpenOrder}
-        onFillOrder={store.fillOpenOrder}
       />
 
       <FilledOrdersWidget orders={historyStore.filledOrders} />

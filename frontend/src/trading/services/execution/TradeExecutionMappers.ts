@@ -164,21 +164,29 @@ export function normalizePosition(raw: any): CurrentPositionState {
 }
 
 export function normalizeOpenOrder(raw: any): OpenOrderState {
-  const qty = toNumber(raw?.qty);
+  const qty = Math.abs(toNumber(raw?.qty));
+  const filledShares = Math.abs(toNumber(raw?.filled_qty));
   const limitPrice = toNumber(raw?.limit_price);
   const stopPrice = toNumber(raw?.stop_price) || findNestedStop(raw);
   const targetPrice = findNestedTarget(raw);
+  const rawStatus = String(raw?.status ?? "").trim().toLowerCase();
 
   return {
     id: String(raw?.id ?? crypto.randomUUID()),
     symbol: cleanSymbol(raw?.symbol),
     side: String(raw?.side ?? "buy").toLowerCase() === "sell" ? "sell" : "buy",
     type: normalizeOrderType(raw),
-    shares: Math.abs(qty),
+    shares: qty,
+    filledShares,
+    remainingShares: Math.max(0, qty - filledShares),
     limitPrice: limitPrice > 0 ? limitPrice : undefined,
     stopPrice: stopPrice && stopPrice > 0 ? stopPrice : undefined,
     targetPrice: targetPrice && targetPrice > 0 ? targetPrice : undefined,
     status: normalizeOpenOrderStatus(raw),
+    rawStatus: rawStatus || undefined,
+    orderClass: String(raw?.order_class ?? "").trim().toLowerCase() || undefined,
+    extendedHours: Boolean(raw?.extended_hours),
+    submittedAt: raw?.submitted_at ? String(raw.submitted_at) : undefined,
     createdAt: getOrderCreatedAt(raw),
   };
 }

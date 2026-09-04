@@ -1,6 +1,7 @@
-import { Suspense, lazy, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import type { RightPanelWorkspace } from "./right-panel/RightPanelTypes";
 import type { ChartState } from "./ChartState";
+import { getSharedExecutionGateway } from "../../trading/execution/ExecutionGateway";
 
 const ChartWorkspacePanel = lazy(
   () => import("./right-panel/workspaces/ChartWorkspacePanel"),
@@ -76,6 +77,26 @@ export default function RightInfoPanel({
   chartState,
 }: Props) {
   const [workspace, setWorkspace] = useState<RightPanelWorkspace>("trade");
+  const executionGateway = getSharedExecutionGateway();
+  const [orderSummary, setOrderSummary] = useState(() => {
+    const snapshot = executionGateway.getSnapshot();
+    return {
+      openOrders: snapshot.openOrders.length,
+      positions: snapshot.positions.length,
+      mode: executionGateway.getMode(),
+    };
+  });
+
+  useEffect(() => {
+    executionGateway.startPolling(8000);
+    return executionGateway.subscribe((snapshot) => {
+      setOrderSummary({
+        openOrders: snapshot.openOrders.length,
+        positions: snapshot.positions.length,
+        mode: executionGateway.getMode(),
+      });
+    });
+  }, [executionGateway]);
 
   if (collapsed) {
     return (
@@ -209,6 +230,35 @@ export default function RightInfoPanel({
             })}
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={() => setWorkspace("trade")}
+          title="Open global Orders Center"
+          style={{
+            width: "100%",
+            margin: "4px 0 7px",
+            border: "1px solid rgba(96,165,250,.2)",
+            borderRadius: 8,
+            background:
+              orderSummary.openOrders > 0 || orderSummary.positions > 0
+                ? "rgba(37,99,235,.12)"
+                : "rgba(15,23,42,.55)",
+            color: "#cbd5e1",
+            padding: "5px 7px",
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 8,
+            cursor: "pointer",
+            fontSize: 9,
+            fontWeight: 800,
+          }}
+        >
+          <span>ORDERS {orderSummary.openOrders} WORKING · {orderSummary.positions} POSITION{orderSummary.positions === 1 ? "" : "S"}</span>
+          <span style={{ color: orderSummary.mode === "live" ? "#fca5a5" : "#93c5fd" }}>
+            {orderSummary.mode.toUpperCase()}
+          </span>
+        </button>
       </div>
 
       <div
