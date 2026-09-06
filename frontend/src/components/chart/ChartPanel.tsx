@@ -150,6 +150,7 @@ const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
   bullishFvg: false,
   bearishFvg: false,
   marketStructure: true,
+  swingFailurePatterns: true,
   demandZones: true,
 };
 

@@ -48,6 +48,9 @@ export interface StudyVisibility {
 
   /** Automatic structure + FVG confirmed bullish demand zones. */
   demandZones: boolean;
+
+  /** High-confidence confirmed HH/LL swing failure patterns. */
+  swingFailurePatterns: boolean;
 }
 
 export type ChartSeriesBundle = {

@@ -16,6 +16,7 @@ const TOGGLES: { key: keyof StudyVisibility; label: string }[] = [
   { key: "bullishFvg", label: "Bullish Fair Value Gaps" },
   { key: "bearishFvg", label: "Bearish Fair Value Gaps" },
   { key: "marketStructure", label: "Auto Market Structure" },
+  { key: "swingFailurePatterns", label: "Smart Swing Failure Patterns" },
   { key: "demandZones", label: "Auto Demand Zones" },
 ];
 

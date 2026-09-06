@@ -1584,6 +1584,7 @@ export class ChartEngine {
 
   setStudyVisibility(visibility: StudyVisibility): void {
     this.studyRenderer.setStructureVisible(visibility.marketStructure);
+    this.studyRenderer.setSwingFailureVisible(visibility.swingFailurePatterns);
     this.studyRenderer.setDemandZonesVisible(visibility.demandZones);
     this.studyRenderer.setFvgVisibility(visibility.bullishFvg, visibility.bearishFvg);
     this.series.vwap.applyOptions({ visible: visibility.vwap });

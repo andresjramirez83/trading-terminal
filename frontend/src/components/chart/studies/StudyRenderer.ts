@@ -16,6 +16,10 @@ import {
 import { analyzeLiquidity, type LiquidityEvent } from "../analysis/LiquiditySweepEngine";
 import { buildMarketStructure } from "../analysis/MarketStructureEngine";
 import {
+  buildSmartSwingFailures,
+  type SwingFailurePattern,
+} from "../analysis/SwingFailureEngine";
+import {
   buildAutomaticDemandZones,
   type AutomaticDemandZone,
 } from "../DemandZoneEngine";
@@ -331,6 +335,54 @@ function createLiquiditySweepLabelElement(
   return element;
 }
 
+function formatSfpPrice(price: number): string {
+  if (Math.abs(price) < 1) return price.toFixed(4);
+  if (Math.abs(price) < 10) return price.toFixed(3);
+  return price.toFixed(2);
+}
+
+function createSwingFailureLabelElement(
+  pattern: SwingFailurePattern,
+  x: number,
+  y: number,
+): HTMLDivElement {
+  const element = document.createElement("div");
+  const bullish = pattern.direction === "bullish";
+  const color = bullish ? "#22c55e" : "#fb7185";
+
+  element.title = [
+    `${bullish ? "Bullish" : "Bearish"} Swing Failure Pattern`,
+    `${pattern.levelType} ${formatSfpPrice(pattern.levelPrice)}`,
+    `${pattern.grade} / ${pattern.confidence}% confidence`,
+    `structure ${pattern.structureConfidence}%`,
+    `wick ${(pattern.wickFraction * 100).toFixed(0)}%`,
+    `penetration ${pattern.penetrationAtr.toFixed(2)} ATR`,
+    `reclaim ${pattern.reclaimAtr.toFixed(2)} ATR`,
+    `volume ${pattern.volumeRatio.toFixed(2)}x`,
+    "confirmed on next candle",
+  ].join(" | ");
+  element.textContent = `SFP ${pattern.grade}`;
+  element.style.position = "absolute";
+  element.style.left = `${x}px`;
+  element.style.top = `${y}px`;
+  element.style.padding = "1px 4px";
+  element.style.borderRadius = "4px";
+  element.style.background = "rgba(2, 6, 23, 0.96)";
+  element.style.border = `1px solid ${color}`;
+  element.style.boxShadow = `0 0 0 1px rgba(2, 6, 23, 0.55)`;
+  element.style.color = color;
+  element.style.fontSize = "9px";
+  element.style.fontWeight = "900";
+  element.style.lineHeight = "14px";
+  element.style.whiteSpace = "nowrap";
+  element.style.pointerEvents = "none";
+  element.style.transform = bullish
+    ? "translate(-50%, 7px)"
+    : "translate(-50%, calc(-100% - 7px))";
+
+  return element;
+}
+
 function createDemandZoneElement(
   zone: AutomaticDemandZone,
   left: number,
@@ -413,10 +465,12 @@ export class StudyRenderer {
   private latestContext: StudyRenderContext | null = null;
   private structureLines: StructureStudyLine[] = [];
   private liquiditySweepEvents: LiquidityEvent[] = [];
+  private swingFailurePatterns: SwingFailurePattern[] = [];
   private demandZones: AutomaticDemandZone[] = [];
   private bullishFvgs: FairValueGap[] = [];
   private bearishFvgs: FairValueGap[] = [];
   private structureVisible = true;
+  private swingFailureVisible = true;
   private demandZonesVisible = true;
   private bullishFvgVisible = false;
   private bearishFvgVisible = false;
@@ -485,11 +539,21 @@ export class StudyRenderer {
       ? buildStructureStudyLines(context.bars)
       : [];
 
-    this.liquiditySweepEvents = analyzeLiquidity(context.bars, {
+    const liquidityEvents = analyzeLiquidity(context.bars, {
       swingHigh: structure.swingHigh,
       swingLow: structure.swingLow,
       points: structure.points,
-    }).sweepEvents.slice(-80);
+    }).sweepEvents;
+
+    // Confirmed HH/LL sweeps are classified as SFPs when they pass the smart
+    // quality filter. Keep LS labels for major repeated liquidity pools so the
+    // chart never prints duplicate LS + SFP labels on the same structure sweep.
+    this.swingFailurePatterns = this.swingFailureVisible
+      ? buildSmartSwingFailures(context.bars, structure, liquidityEvents)
+      : [];
+    this.liquiditySweepEvents = liquidityEvents
+      .filter((event) => event.source !== "structure")
+      .slice(-80);
 
     this.scheduleOverlayRender();
 
@@ -506,6 +570,32 @@ export class StudyRenderer {
         ? buildStructureStudyLines(this.latestContext.bars)
         : [];
 
+    this.scheduleOverlayRender();
+  }
+
+  setSwingFailureVisible(visible: boolean): void {
+    if (this.swingFailureVisible === visible) return;
+
+    this.swingFailureVisible = visible;
+    const bars = this.latestContext?.bars ?? [];
+
+    if (!visible || !bars.length) {
+      this.swingFailurePatterns = [];
+      this.scheduleOverlayRender();
+      return;
+    }
+
+    const structure = buildMarketStructure(bars);
+    const liquidityEvents = analyzeLiquidity(bars, {
+      swingHigh: structure.swingHigh,
+      swingLow: structure.swingLow,
+      points: structure.points,
+    }).sweepEvents;
+    this.swingFailurePatterns = buildSmartSwingFailures(
+      bars,
+      structure,
+      liquidityEvents,
+    );
     this.scheduleOverlayRender();
   }
 
@@ -569,6 +659,7 @@ export class StudyRenderer {
     this.latestContext = null;
     this.structureLines = [];
     this.liquiditySweepEvents = [];
+    this.swingFailurePatterns = [];
     this.demandZones = [];
     this.bullishFvgs = [];
     this.bearishFvgs = [];
@@ -725,6 +816,27 @@ export class StudyRenderer {
           createStructureLabelElement(line, pointX, y),
         );
       }
+    }
+
+    for (const pattern of this.swingFailurePatterns) {
+      const bar = this.latestContext.bars[pattern.barIndex];
+      if (!bar) continue;
+
+      const x = timeScale.timeToCoordinate(bar.time as Time);
+      const markerPrice = pattern.direction === "bearish" ? bar.high : bar.low;
+      const y = this.series.priceToCoordinate(markerPrice);
+
+      if (
+        x == null ||
+        y == null ||
+        !Number.isFinite(x) ||
+        !Number.isFinite(y) ||
+        !isVisibleX(x)
+      ) {
+        continue;
+      }
+
+      fragment.appendChild(createSwingFailureLabelElement(pattern, x, y));
     }
 
     for (const event of this.liquiditySweepEvents) {
