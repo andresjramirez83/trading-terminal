@@ -9,6 +9,8 @@ export type SwingFailureDirection = "bullish" | "bearish";
 export type SwingFailureGrade = "A" | "A+";
 export type SwingFailureLevelType =
   | "HH"
+  | "HL"
+  | "LH"
   | "LL"
   | "Internal High"
   | "Internal Low";
@@ -84,6 +86,15 @@ const INTERNAL_FAST_MIN_SEPARATION_BARS = 2;
 const INTERNAL_FAST_ARM_WINDOW_BARS = 3;
 const INTERNAL_FAST_MIN_REACTION_ATR = 0.50;
 const INTERNAL_FAST_MIN_CLOSE_AWAY_ATR = 0.26;
+// A second way to prove a fast level: a genuine micro-structure reaction.
+// This lets an internal low/high become actionable before a full 0.50 ATR
+// excursion when price has already closed through the candidate candle's
+// opposite extreme with a directional reaction. It is market-confirmation
+// based rather than a simple age/threshold relaxation.
+const INTERNAL_FAST_MICRO_BREAK_MIN_DISPLACEMENT_ATR = 0.22;
+const INTERNAL_FAST_MICRO_BREAK_BUFFER_ATR = 0.02;
+const INTERNAL_FAST_MICRO_BREAK_MIN_BODY_FRACTION = 0.26;
+const INTERNAL_FAST_MICRO_BREAK_MIN_CLOSE_LOCATION = 0.58;
 const INTERNAL_FAST_MIN_REACTION_BODY_FRACTION = 0.28;
 const INTERNAL_FAST_MIN_REACTION_CLOSE_LOCATION = 0.62;
 const INTERNAL_FAST_SINGLE_TOUCH_MIN_EXCURSION_ATR = 0.68;
@@ -98,6 +109,15 @@ const INTERNAL_TEMPORARY_ACCEPTANCE_ATR = 0.24;
 const INTERNAL_DELAYED_RECLAIM_TARGET_ATR = 0.08;
 const INTERNAL_DELAYED_CONFIRM_MIN_RANGE_ATR = 0.45;
 const INTERNAL_DELAYED_CONFIRM_MIN_BODY_FRACTION = 0.34;
+
+// A confirmed continuation swing (HL for bullish, LH for bearish) is real
+// structural liquidity even though HH/LL remain the highest-priority external
+// anchors. If an otherwise-qualified internal SFP actually sweeps and reclaims
+// that confirmed HL/LH, give it a structural bonus. This is intentionally
+// enough to promote a normal A-quality setup to A+ without bypassing any of
+// the wick/reclaim/confirmation quality gates.
+const CONTINUATION_STRUCTURE_BONUS = 6;
+const CONTINUATION_STRUCTURE_MAX_AGE_BARS = 180;
 
 type InternalAnchorMode = "confirmed" | "fast-reaction";
 
@@ -122,6 +142,8 @@ interface PatternInputs {
   confirmationBarIndex: number;
   anchorQuality: number;
   touches: number;
+  supportingStructureType?: "HL" | "LH";
+  supportingStructureConfidence?: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -281,19 +303,13 @@ function findFastReactionArmedIndex(
     bars.length - 2,
     candidateIndex + INTERNAL_FAST_ARM_WINDOW_BARS,
   );
+  const candidate = bars[candidateIndex];
 
   let bestDistance = 0;
+  let microStructureProof: FastReactionArm | null = null;
 
   for (let index = candidateIndex + 1; index <= end; index += 1) {
     const bar = bars[index];
-
-    // If price makes a genuinely new extreme before proving a reaction, the
-    // old candidate never became an actionable liquidity level. The newer
-    // extreme can become its own candidate instead.
-    const superseded = direction === "bullish"
-      ? bar.low < levelPrice - tolerance
-      : bar.high > levelPrice + tolerance;
-    if (superseded) return null;
 
     const distance = direction === "bullish"
       ? Math.max(bar.high, bar.close) - levelPrice
@@ -318,6 +334,46 @@ function findFastReactionArmedIndex(
       (directionalBody &&
         bodyFraction >= INTERNAL_FAST_MIN_REACTION_BODY_FRACTION) ||
       closeLocation >= INTERNAL_FAST_MIN_REACTION_CLOSE_LOCATION;
+
+    const microBreakTarget = direction === "bullish"
+      ? candidate.high + safeAtr * INTERNAL_FAST_MICRO_BREAK_BUFFER_ATR
+      : candidate.low - safeAtr * INTERNAL_FAST_MICRO_BREAK_BUFFER_ATR;
+    const microStructureBreak = direction === "bullish"
+      ? bar.close >= microBreakTarget
+      : bar.close <= microBreakTarget;
+    const microReaction =
+      displacementAtr >= INTERNAL_FAST_MICRO_BREAK_MIN_DISPLACEMENT_ATR &&
+      directionalBody &&
+      bodyFraction >= INTERNAL_FAST_MICRO_BREAK_MIN_BODY_FRACTION &&
+      closeLocation >= INTERNAL_FAST_MICRO_BREAK_MIN_CLOSE_LOCATION &&
+      microStructureBreak;
+
+    if (microReaction && !microStructureProof) {
+      const displacementScore = normalizedLinearScore(
+        displacementAtr,
+        INTERNAL_FAST_MICRO_BREAK_MIN_DISPLACEMENT_ATR,
+        0.80,
+      );
+      const closeScore = normalizedLinearScore(
+        closeLocation,
+        INTERNAL_FAST_MICRO_BREAK_MIN_CLOSE_LOCATION,
+        0.86,
+      );
+      const bodyScore = normalizedLinearScore(
+        bodyFraction,
+        INTERNAL_FAST_MICRO_BREAK_MIN_BODY_FRACTION,
+        0.62,
+      );
+      microStructureProof = {
+        index,
+        displacementAtr,
+        reactionQuality: clamp(
+          displacementScore * 0.44 + closeScore * 0.34 + bodyScore * 0.22,
+          0,
+          100,
+        ),
+      };
+    }
 
     if (enoughReaction && convincingReaction) {
       const displacementScore = normalizedLinearScore(
@@ -349,9 +405,18 @@ function findFastReactionArmedIndex(
         reactionQuality,
       };
     }
+
+    // A later new extreme is the potential sweep. Do not erase an older
+    // candidate if the market had already proved a real micro-structure
+    // reaction away from it on a prior printed candle. In that case the old
+    // level was actionable before the sweep arrived.
+    const superseded = direction === "bullish"
+      ? bar.low < levelPrice - tolerance
+      : bar.high > levelPrice + tolerance;
+    if (superseded) return microStructureProof;
   }
 
-  return null;
+  return microStructureProof;
 }
 
 function fastReactionAnchorQuality(
@@ -990,6 +1055,47 @@ function confirmationHeld(
   return undefined;
 }
 
+function matchingContinuationStructurePoint(
+  bars: readonly CleanBar[],
+  structure: MarketStructureResult,
+  direction: SwingFailureDirection,
+  sweepIndex: number,
+  confirmationIndex: number,
+  atr: number,
+): MarketStructurePoint | undefined {
+  const wantedType = direction === "bullish" ? "HL" : "LH";
+  const sweepBar = bars[sweepIndex];
+  const confirmationBar = bars[confirmationIndex];
+  if (!sweepBar || !confirmationBar) return undefined;
+
+  const penetrationBuffer = Math.max(levelTolerance(sweepBar.close, atr), atr * 0.04);
+  const reclaimBuffer = atr * 0.02;
+  const oldestIndex = Math.max(0, sweepIndex - CONTINUATION_STRUCTURE_MAX_AGE_BARS);
+
+  return structure.points
+    .filter((point) => {
+      if (point.type !== wantedType) return false;
+      if (point.index < oldestIndex || point.index >= sweepIndex) return false;
+      if (point.confirmationIndex >= sweepIndex) return false;
+
+      if (direction === "bullish") {
+        const swept = sweepBar.low <= point.price - penetrationBuffer;
+        const reclaimed = confirmationBar.close >= point.price + reclaimBuffer;
+        return swept && reclaimed;
+      }
+
+      const swept = sweepBar.high >= point.price + penetrationBuffer;
+      const reclaimed = confirmationBar.close <= point.price - reclaimBuffer;
+      return swept && reclaimed;
+    })
+    .sort((left, right) => {
+      if (right.confirmationIndex !== left.confirmationIndex) {
+        return right.confirmationIndex - left.confirmationIndex;
+      }
+      return right.index - left.index;
+    })[0];
+}
+
 function scorePattern(
   bars: readonly CleanBar[],
   inputs: PatternInputs,
@@ -1149,6 +1255,14 @@ function scorePattern(
   // versus a classic same-candle SFP. Strong confirmation can still earn A+.
   if (delayedInternalReclaim) confidence = Math.max(0, confidence - 2);
 
+  // Sweeping a previously confirmed HL/LH is materially stronger than sweeping
+  // a generic internal pivot. The setup must still pass every normal SFP gate
+  // above; this bonus only upgrades the grade once that structural liquidity
+  // sweep/reclaim has been independently verified.
+  if (inputs.supportingStructureType && inputs.supportingStructureConfidence != null) {
+    confidence = Math.min(100, confidence + CONTINUATION_STRUCTURE_BONUS);
+  }
+
   const minimumConfidence = internal
     ? INTERNAL_MIN_CONFIDENCE
     : STRUCTURE_MIN_CONFIDENCE;
@@ -1165,7 +1279,9 @@ function scorePattern(
     confirmationBarIndex: inputs.confirmationBarIndex,
     confidence,
     grade: confidence >= A_PLUS_CONFIDENCE ? "A+" : "A",
-    structureConfidence: Math.round(anchorScore),
+    structureConfidence: Math.round(
+      Math.max(anchorScore, inputs.supportingStructureConfidence ?? 0),
+    ),
     penetrationAtr: Number(penetrationAtr.toFixed(2)),
     wickFraction: Number(wickFraction.toFixed(2)),
     reclaimAtr: Number(reclaimAtr.toFixed(2)),
@@ -1253,9 +1369,22 @@ function buildInternalPatterns(
         100,
       );
 
+      const supportingStructure = matchingContinuationStructurePoint(
+        bars,
+        structure,
+        anchor.direction,
+        barIndex,
+        confirmationBarIndex,
+        atr,
+      );
+
       const pattern = scorePattern(bars, {
         direction: anchor.direction,
-        levelType: anchor.direction === "bullish" ? "Internal Low" : "Internal High",
+        levelType: supportingStructure?.type === "HL" || supportingStructure?.type === "LH"
+          ? supportingStructure.type
+          : anchor.direction === "bullish"
+            ? "Internal Low"
+            : "Internal High",
         anchorSource: "internal",
         levelPrice: anchor.price,
         swingIndex: anchor.swingIndex,
@@ -1263,6 +1392,10 @@ function buildInternalPatterns(
         confirmationBarIndex,
         anchorQuality,
         touches,
+        supportingStructureType: supportingStructure?.type === "HL" || supportingStructure?.type === "LH"
+          ? supportingStructure.type
+          : undefined,
+        supportingStructureConfidence: supportingStructure?.confidence,
       });
 
       if (pattern) {
