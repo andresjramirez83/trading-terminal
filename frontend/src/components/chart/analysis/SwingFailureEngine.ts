@@ -73,6 +73,16 @@ const INTERNAL_MIN_SWEEP_RANGE_ATR = 0.55;
 const INTERNAL_MULTI_TOUCH_MIN_EXCURSION_ATR = 0.62;
 const INTERNAL_SINGLE_TOUCH_MIN_EXCURSION_ATR = 0.92;
 
+// Internal SFPs support both a classic same-candle reclaim and a controlled
+// failed-breakdown / failed-breakout reclaim on candle 1 or 2. The sweep
+// candle may close slightly through the level, but not far enough to show
+// sustained acceptance.
+const INTERNAL_MAX_SWEEP_CLOSE_BEYOND_ATR = 0.38;
+const INTERNAL_TEMPORARY_ACCEPTANCE_ATR = 0.24;
+const INTERNAL_DELAYED_RECLAIM_TARGET_ATR = 0.08;
+const INTERNAL_DELAYED_CONFIRM_MIN_RANGE_ATR = 0.45;
+const INTERNAL_DELAYED_CONFIRM_MIN_BODY_FRACTION = 0.34;
+
 interface InternalAnchor {
   id: string;
   direction: SwingFailureDirection;
@@ -482,18 +492,26 @@ function internalSweepCandidate(
   const atr = Math.max(averageTrueRange(bars, barIndex, 14), 0.000001);
   const tolerance = levelTolerance(anchor.price, atr);
   const minPenetration = Math.max(tolerance, atr * 0.08);
-  const reclaimBuffer = Math.max(tolerance * 0.25, atr * 0.02);
+  const maxCloseBeyond = Math.max(
+    tolerance * 1.5,
+    atr * INTERNAL_MAX_SWEEP_CLOSE_BEYOND_ATR,
+  );
 
+  // Do NOT require the sweep candle itself to reclaim the level. A legitimate
+  // failed breakdown / breakout can close slightly through the level and then
+  // reclaim it decisively on candle 1 or 2. We only reject a sweep candle that
+  // already closes too far through the level, which is more consistent with
+  // acceptance than a liquidity grab.
   if (anchor.direction === "bullish") {
     return (
       bar.low <= anchor.price - minPenetration &&
-      bar.close >= anchor.price + reclaimBuffer
+      bar.close >= anchor.price - maxCloseBeyond
     );
   }
 
   return (
     bar.high >= anchor.price + minPenetration &&
-    bar.close <= anchor.price - reclaimBuffer
+    bar.close <= anchor.price + maxCloseBeyond
   );
 }
 
@@ -571,8 +589,15 @@ function confirmationHeld(
     0.000001,
   );
   const tolerance = levelTolerance(levelPrice, atr);
-  const invalidationBuffer = Math.max(tolerance, atr * 0.05);
-  const directionalTarget = atr * 0.07;
+  const temporaryAcceptanceBuffer = Math.max(
+    tolerance,
+    atr * INTERNAL_TEMPORARY_ACCEPTANCE_ATR,
+  );
+  const hardAcceptanceBuffer = Math.max(
+    tolerance * 1.5,
+    atr * INTERNAL_MAX_SWEEP_CLOSE_BEYOND_ATR,
+  );
+  const directionalTarget = atr * INTERNAL_DELAYED_RECLAIM_TARGET_ATR;
   const sweepMidpoint = (sweepBar.high + sweepBar.low) / 2;
 
   for (
@@ -584,23 +609,40 @@ function confirmationHeld(
     if (index >= bars.length) break;
     const bar = bars[index];
 
-    // If price accepts back through the swept level before confirmation, the
-    // reclaim failed and this is not an SFP.
-    if (direction === "bullish" && bar.close < levelPrice - invalidationBuffer) {
-      return undefined;
-    }
-    if (direction === "bearish" && bar.close > levelPrice + invalidationBuffer) {
+    const closeBeyond = direction === "bullish"
+      ? levelPrice - bar.close
+      : bar.close - levelPrice;
+
+    // One temporary close slightly beyond the swept level is allowed. A deep
+    // close through the level, or a second close still accepting beyond it,
+    // is treated as a real break rather than an SFP.
+    if (closeBeyond > hardAcceptanceBuffer) return undefined;
+    if (closeBeyond > temporaryAcceptanceBuffer) return undefined;
+    if (offset === INTERNAL_CONFIRMATION_WINDOW_BARS && closeBeyond > 0) {
       return undefined;
     }
 
+    const range = Math.max(bar.high - bar.low, 0.000001);
+    const body = Math.abs(bar.close - bar.open);
+    const bodyFraction = body / range;
+    const rangeAtr = range / atr;
+    const directionalBody = direction === "bullish"
+      ? bar.close > bar.open
+      : bar.close < bar.open;
     const directionalClose = direction === "bullish"
       ? bar.close >= levelPrice + directionalTarget
       : bar.close <= levelPrice - directionalTarget;
     const regainedSweepBody = direction === "bullish"
       ? bar.close >= sweepMidpoint - atr * 0.03
       : bar.close <= sweepMidpoint + atr * 0.03;
+    const meaningfulReclaimCandle =
+      rangeAtr >= INTERNAL_DELAYED_CONFIRM_MIN_RANGE_ATR &&
+      directionalBody &&
+      bodyFraction >= INTERNAL_DELAYED_CONFIRM_MIN_BODY_FRACTION;
 
-    if (directionalClose && regainedSweepBody) return index;
+    if (directionalClose && regainedSweepBody && meaningfulReclaimCandle) {
+      return index;
+    }
   }
 
   return undefined;
@@ -644,6 +686,19 @@ function scorePattern(
     confirmationBar,
     inputs.direction,
   );
+  const confirmationReclaimAtr = inputs.direction === "bullish"
+    ? (confirmationBar.close - inputs.levelPrice) / atr
+    : (inputs.levelPrice - confirmationBar.close) / atr;
+  const confirmationRange = Math.max(
+    confirmationBar.high - confirmationBar.low,
+    0.000001,
+  );
+  const confirmationRangeAtr = confirmationRange / atr;
+  const confirmationBodyFraction =
+    Math.abs(confirmationBar.close - confirmationBar.open) / confirmationRange;
+  const confirmationDirectionalBody = inputs.direction === "bullish"
+    ? confirmationBar.close > confirmationBar.open
+    : confirmationBar.close < confirmationBar.open;
 
   const confirmationMoveAtr = inputs.direction === "bullish"
     ? (confirmationBar.close - sweepBar.close) / atr
@@ -661,52 +716,79 @@ function scorePattern(
     ? sweepVolume / baselineVolume
     : 1;
 
-  // Hard reliability gates. Internal anchors use slightly stricter gates than
-  // confirmed HH/LL because their structural importance is inherently lower.
   const internal = inputs.anchorSource === "internal";
-  const minPenetration = internal ? 0.07 : 0.07;
+  const minPenetration = 0.07;
   const minWickFraction = internal ? 0.26 : 0.32;
   const minReclaim = internal ? 0.02 : 0.04;
   const minCloseLocation = internal ? 0.46 : 0.55;
+  const delayedInternalReclaim = internal && reclaimAtr < minReclaim;
 
   if (penetrationAtr < minPenetration) return null;
-  if (wickFraction < minWickFraction) return null;
-  if (reclaimAtr < minReclaim) return null;
-  if (closeLocation < minCloseLocation) return null;
+
+  if (delayedInternalReclaim) {
+    // Failed-breakdown / failed-breakout SFP: the sweep candle is allowed to
+    // close slightly through the level, but the following candle(s) must do
+    // the real reclaim with directional body and displacement.
+    if (reclaimAtr < -INTERNAL_MAX_SWEEP_CLOSE_BEYOND_ATR) return null;
+    if (wickFraction < 0.08) return null;
+    if (confirmationReclaimAtr < INTERNAL_DELAYED_RECLAIM_TARGET_ATR) return null;
+    if (confirmationCloseLocation < 0.58) return null;
+    if (confirmationRangeAtr < INTERNAL_DELAYED_CONFIRM_MIN_RANGE_ATR) return null;
+    if (!confirmationDirectionalBody) return null;
+    if (confirmationBodyFraction < INTERNAL_DELAYED_CONFIRM_MIN_BODY_FRACTION) {
+      return null;
+    }
+  } else {
+    if (wickFraction < minWickFraction) return null;
+    if (reclaimAtr < minReclaim) return null;
+    if (closeLocation < minCloseLocation) return null;
+  }
 
   const held = inputs.direction === "bullish"
-    ? confirmationBar.close >= inputs.levelPrice - atr * 0.02
-    : confirmationBar.close <= inputs.levelPrice + atr * 0.02;
+    ? confirmationBar.close >= inputs.levelPrice + atr * 0.02
+    : confirmationBar.close <= inputs.levelPrice - atr * 0.02;
   if (!held) return null;
 
   const rangeAtr = range / atr;
-  if (rangeAtr > 4.5 && closeLocation < 0.78) return null;
+  if (!delayedInternalReclaim && rangeAtr > 4.5 && closeLocation < 0.78) {
+    return null;
+  }
 
   const anchorScore = clamp(inputs.anchorQuality, 0, 100);
-  const wickScore = normalizedLinearScore(
-    wickFraction,
-    minWickFraction,
-    internal ? 0.54 : 0.58,
-  );
+  const wickScore = delayedInternalReclaim
+    ? normalizedLinearScore(wickFraction, 0.08, 0.36)
+    : normalizedLinearScore(
+        wickFraction,
+        minWickFraction,
+        internal ? 0.54 : 0.58,
+      );
   let penetrationScore = normalizedLinearScore(
     penetrationAtr,
     minPenetration,
     0.22,
   );
   if (penetrationAtr > 1.0) penetrationScore *= 0.82;
-  const reclaimScore = normalizedLinearScore(reclaimAtr, minReclaim, 0.20);
-  const closeScore = normalizedLinearScore(closeLocation, minCloseLocation, 0.82);
+  const reclaimScore = delayedInternalReclaim
+    ? normalizedLinearScore(
+        confirmationReclaimAtr,
+        INTERNAL_DELAYED_RECLAIM_TARGET_ATR,
+        0.28,
+      )
+    : normalizedLinearScore(reclaimAtr, minReclaim, 0.20);
+  const closeScore = delayedInternalReclaim
+    ? normalizedLinearScore(confirmationCloseLocation, 0.58, 0.86)
+    : normalizedLinearScore(closeLocation, minCloseLocation, 0.82);
   const confirmationScore = normalizedLinearScore(
     confirmationStrength,
-    internal ? 0.58 : 0.52,
-    0.82,
+    delayedInternalReclaim ? 0.62 : internal ? 0.58 : 0.52,
+    0.84,
   );
   const volumeScore = baselineVolume > 0
     ? normalizedLinearScore(volumeRatio, 0.70, 1.55)
     : 72;
   const touchScore = clamp(72 + Math.max(0, inputs.touches - 1) * 9, 72, 99);
 
-  const confidence = Math.round(
+  let confidence = Math.round(
     clamp(
       anchorScore * 0.18 +
         wickScore * 0.17 +
@@ -720,6 +802,10 @@ function scorePattern(
       100,
     ),
   );
+
+  // A delayed reclaim is valid, but it carries a small uncertainty penalty
+  // versus a classic same-candle SFP. Strong confirmation can still earn A+.
+  if (delayedInternalReclaim) confidence = Math.max(0, confidence - 2);
 
   const minimumConfidence = internal
     ? INTERNAL_MIN_CONFIDENCE
