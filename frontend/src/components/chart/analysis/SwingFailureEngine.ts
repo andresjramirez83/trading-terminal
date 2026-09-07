@@ -66,6 +66,12 @@ const INTERNAL_MIN_SEPARATION_BARS = 4;
 const INTERNAL_ARM_LOOKAHEAD_BARS = 12;
 const INTERNAL_MAX_AGE_BARS = 180;
 const INTERNAL_ACCEPTANCE_CLOSES = 2;
+const INTERNAL_CONFIRMATION_WINDOW_BARS = 2;
+const INTERNAL_MIN_LIFETIME_BARS = 5;
+const INTERNAL_MIN_AWAY_BARS = 2;
+const INTERNAL_MIN_SWEEP_RANGE_ATR = 0.55;
+const INTERNAL_MULTI_TOUCH_MIN_EXCURSION_ATR = 0.62;
+const INTERNAL_SINGLE_TOUCH_MIN_EXCURSION_ATR = 0.92;
 
 interface InternalAnchor {
   id: string;
@@ -202,15 +208,20 @@ function overlapsConfirmedStructure(
   direction: SwingFailureDirection,
   price: number,
   pivotIndex: number,
+  confirmedByIndex: number,
   atr: number,
 ): boolean {
   const wantedType = direction === "bullish" ? "LL" : "HH";
   const tolerance = Math.max(levelTolerance(price, atr), atr * 0.14);
 
+  // Never let a structure point that was confirmed later in the chart erase
+  // an internal level that was genuinely available in real time. This avoids
+  // hindsight/look-ahead suppression of valid SFP anchors.
   return structure.points.some(
     (point) =>
       point.type === wantedType &&
       point.index <= pivotIndex + INTERNAL_PIVOT_STRENGTH &&
+      point.confirmationIndex <= confirmedByIndex &&
       Math.abs(point.price - price) <= tolerance,
   );
 }
@@ -306,7 +317,14 @@ function buildQualifiedInternalAnchors(
     ) {
       lastHighIndex = index;
       const price = bars[index].high;
-      if (!overlapsConfirmedStructure(structure, "bearish", price, index, atr)) {
+      if (!overlapsConfirmedStructure(
+          structure,
+          "bearish",
+          price,
+          index,
+          index + INTERNAL_PIVOT_STRENGTH,
+          atr,
+        )) {
         const armed = findInternalArmedIndex(
           bars,
           index,
@@ -343,7 +361,14 @@ function buildQualifiedInternalAnchors(
     ) {
       lastLowIndex = index;
       const price = bars[index].low;
-      if (!overlapsConfirmedStructure(structure, "bullish", price, index, atr)) {
+      if (!overlapsConfirmedStructure(
+          structure,
+          "bullish",
+          price,
+          index,
+          index + INTERNAL_PIVOT_STRENGTH,
+          atr,
+        )) {
         const armed = findInternalArmedIndex(
           bars,
           index,
@@ -407,6 +432,7 @@ function priorInternalTouches(
     (candidate) =>
       candidate.direction === anchor.direction &&
       candidate.swingIndex <= sweepIndex &&
+      candidate.establishedIndex < sweepIndex &&
       Math.abs(candidate.price - anchor.price) <= tolerance,
   );
 
@@ -471,23 +497,113 @@ function internalSweepCandidate(
   );
 }
 
+interface InternalSweepContext {
+  ageBars: number;
+  maxExcursionAtr: number;
+  awayBars: number;
+  sweepRangeAtr: number;
+}
+
+function internalSweepContext(
+  bars: readonly CleanBar[],
+  anchor: InternalAnchor,
+  sweepIndex: number,
+): InternalSweepContext {
+  const atr = Math.max(
+    averageTrueRange(bars, Math.max(0, sweepIndex - 1), 14),
+    averageTrueRange(bars, sweepIndex, 14),
+    0.000001,
+  );
+  const awayThreshold = atr * 0.35;
+  let maxExcursion = 0;
+  let awayBars = 0;
+
+  for (
+    let index = anchor.establishedIndex;
+    index < sweepIndex;
+    index += 1
+  ) {
+    const bar = bars[index];
+    const distance = anchor.direction === "bullish"
+      ? Math.max(bar.high, bar.close) - anchor.price
+      : anchor.price - Math.min(bar.low, bar.close);
+
+    maxExcursion = Math.max(maxExcursion, distance);
+    if (distance >= awayThreshold) awayBars += 1;
+  }
+
+  const sweepBar = bars[sweepIndex];
+  return {
+    ageBars: Math.max(0, sweepIndex - anchor.establishedIndex),
+    maxExcursionAtr: maxExcursion / atr,
+    awayBars,
+    sweepRangeAtr: Math.max(0, sweepBar.high - sweepBar.low) / atr,
+  };
+}
+
+function internalContextIsMeaningful(
+  context: InternalSweepContext,
+  touches: number,
+): boolean {
+  if (context.ageBars < INTERNAL_MIN_LIFETIME_BARS) return false;
+  if (context.awayBars < INTERNAL_MIN_AWAY_BARS) return false;
+  if (context.sweepRangeAtr < INTERNAL_MIN_SWEEP_RANGE_ATR) return false;
+
+  const requiredExcursion = touches >= 2
+    ? INTERNAL_MULTI_TOUCH_MIN_EXCURSION_ATR
+    : INTERNAL_SINGLE_TOUCH_MIN_EXCURSION_ATR;
+
+  return context.maxExcursionAtr >= requiredExcursion;
+}
+
 function confirmationHeld(
   bars: readonly CleanBar[],
   direction: SwingFailureDirection,
   levelPrice: number,
   sweepIndex: number,
 ): number | undefined {
-  const confirmationIndex = sweepIndex + 1;
-  if (confirmationIndex >= bars.length) return undefined;
+  const sweepBar = bars[sweepIndex];
+  if (!sweepBar) return undefined;
 
-  const atr = Math.max(averageTrueRange(bars, sweepIndex, 14), 0.000001);
+  const atr = Math.max(
+    averageTrueRange(bars, Math.max(0, sweepIndex - 1), 14),
+    averageTrueRange(bars, sweepIndex, 14),
+    0.000001,
+  );
   const tolerance = levelTolerance(levelPrice, atr);
-  const maxDrift = Math.max(tolerance, atr * 0.06);
-  const close = bars[confirmationIndex].close;
+  const invalidationBuffer = Math.max(tolerance, atr * 0.05);
+  const directionalTarget = atr * 0.07;
+  const sweepMidpoint = (sweepBar.high + sweepBar.low) / 2;
 
-  if (direction === "bullish" && close < levelPrice - maxDrift) return undefined;
-  if (direction === "bearish" && close > levelPrice + maxDrift) return undefined;
-  return confirmationIndex;
+  for (
+    let offset = 1;
+    offset <= INTERNAL_CONFIRMATION_WINDOW_BARS;
+    offset += 1
+  ) {
+    const index = sweepIndex + offset;
+    if (index >= bars.length) break;
+    const bar = bars[index];
+
+    // If price accepts back through the swept level before confirmation, the
+    // reclaim failed and this is not an SFP.
+    if (direction === "bullish" && bar.close < levelPrice - invalidationBuffer) {
+      return undefined;
+    }
+    if (direction === "bearish" && bar.close > levelPrice + invalidationBuffer) {
+      return undefined;
+    }
+
+    const directionalClose = direction === "bullish"
+      ? bar.close >= levelPrice + directionalTarget
+      : bar.close <= levelPrice - directionalTarget;
+    const regainedSweepBody = direction === "bullish"
+      ? bar.close >= sweepMidpoint - atr * 0.03
+      : bar.close <= sweepMidpoint + atr * 0.03;
+
+    if (directionalClose && regainedSweepBody) return index;
+  }
+
+  return undefined;
 }
 
 function scorePattern(
@@ -548,10 +664,10 @@ function scorePattern(
   // Hard reliability gates. Internal anchors use slightly stricter gates than
   // confirmed HH/LL because their structural importance is inherently lower.
   const internal = inputs.anchorSource === "internal";
-  const minPenetration = internal ? 0.08 : 0.07;
-  const minWickFraction = internal ? 0.34 : 0.32;
-  const minReclaim = internal ? 0.05 : 0.04;
-  const minCloseLocation = internal ? 0.58 : 0.55;
+  const minPenetration = internal ? 0.07 : 0.07;
+  const minWickFraction = internal ? 0.26 : 0.32;
+  const minReclaim = internal ? 0.02 : 0.04;
+  const minCloseLocation = internal ? 0.46 : 0.55;
 
   if (penetrationAtr < minPenetration) return null;
   if (wickFraction < minWickFraction) return null;
@@ -570,7 +686,7 @@ function scorePattern(
   const wickScore = normalizedLinearScore(
     wickFraction,
     minWickFraction,
-    internal ? 0.60 : 0.58,
+    internal ? 0.54 : 0.58,
   );
   let penetrationScore = normalizedLinearScore(
     penetrationAtr,
@@ -582,7 +698,7 @@ function scorePattern(
   const closeScore = normalizedLinearScore(closeLocation, minCloseLocation, 0.82);
   const confirmationScore = normalizedLinearScore(
     confirmationStrength,
-    internal ? 0.55 : 0.52,
+    internal ? 0.58 : 0.52,
     0.82,
   );
   const volumeScore = baselineVolume > 0
@@ -686,6 +802,11 @@ function buildInternalPatterns(
       if (!internalAnchorStillValid(bars, anchor, barIndex - 1)) break;
       if (!internalSweepCandidate(bars, anchor, barIndex)) continue;
 
+      const atr = Math.max(averageTrueRange(bars, barIndex, 14), 0.000001);
+      const touches = priorInternalTouches(anchors, anchor, barIndex, atr);
+      const context = internalSweepContext(bars, anchor, barIndex);
+      if (!internalContextIsMeaningful(context, touches)) continue;
+
       const confirmationBarIndex = confirmationHeld(
         bars,
         anchor.direction,
@@ -694,8 +815,6 @@ function buildInternalPatterns(
       );
       if (confirmationBarIndex == null) continue;
 
-      const atr = Math.max(averageTrueRange(bars, barIndex, 14), 0.000001);
-      const touches = priorInternalTouches(anchors, anchor, barIndex, atr);
       const touchBonus = Math.min(9, Math.max(0, touches - 1) * 4.5);
       const ageBars = Math.max(0, barIndex - anchor.establishedIndex);
       const freshnessPenalty = Math.min(12, (ageBars / INTERNAL_MAX_AGE_BARS) * 12);
