@@ -51,10 +51,11 @@ export interface SwingFailurePattern {
  *    be confirmed. They exist only inside this engine. Nothing is drawn for
  *    them; the chart still shows only real HH/HL/LH/LL plus qualified SFPs.
  *
- * Reliability is preferred over speed. Internal anchors must be confirmed,
- * show meaningful displacement away, survive acceptance/invalidation checks,
- * and then pass the same wick/reclaim/next-candle quality filter as structure
- * SFPs. Structure always wins a same-candle conflict.
+ * Reliability is preferred over raw signal count. Internal anchors can be
+ * either fully confirmed 2/2 pivots or fast reaction levels proven in real
+ * time by meaningful displacement away. Both survive acceptance/invalidation
+ * checks and then pass the same sweep/reclaim quality filter. Structure always
+ * wins a same-candle conflict.
  */
 
 const STRUCTURE_MIN_CONFIDENCE = 84;
@@ -67,11 +68,26 @@ const INTERNAL_ARM_LOOKAHEAD_BARS = 12;
 const INTERNAL_MAX_AGE_BARS = 180;
 const INTERNAL_ACCEPTANCE_CLOSES = 2;
 const INTERNAL_CONFIRMATION_WINDOW_BARS = 2;
-const INTERNAL_MIN_LIFETIME_BARS = 5;
-const INTERNAL_MIN_AWAY_BARS = 2;
 const INTERNAL_MIN_SWEEP_RANGE_ATR = 0.55;
+const INTERNAL_CONFIRMED_MIN_AWAY_BARS = 1;
 const INTERNAL_MULTI_TOUCH_MIN_EXCURSION_ATR = 0.62;
 const INTERNAL_SINGLE_TOUCH_MIN_EXCURSION_ATR = 0.92;
+
+// Fast reaction anchors solve the real-time timing gap in a 2-left / 2-right
+// pivot. They use ONLY bars that have already printed: a candidate must first
+// stand out versus bars to its left, then price must prove the level with a
+// meaningful directional reaction. Once that reaction prints, the level is
+// armed immediately; it does not wait for two future right-side pivot bars or
+// an arbitrary five-bar lifetime.
+const INTERNAL_FAST_LEFT_STRENGTH = 2;
+const INTERNAL_FAST_MIN_SEPARATION_BARS = 2;
+const INTERNAL_FAST_ARM_WINDOW_BARS = 3;
+const INTERNAL_FAST_MIN_REACTION_ATR = 0.50;
+const INTERNAL_FAST_MIN_CLOSE_AWAY_ATR = 0.26;
+const INTERNAL_FAST_MIN_REACTION_BODY_FRACTION = 0.28;
+const INTERNAL_FAST_MIN_REACTION_CLOSE_LOCATION = 0.62;
+const INTERNAL_FAST_SINGLE_TOUCH_MIN_EXCURSION_ATR = 0.68;
+const INTERNAL_FAST_MULTI_TOUCH_MIN_EXCURSION_ATR = 0.52;
 
 // Internal SFPs support both a classic same-candle reclaim and a controlled
 // failed-breakdown / failed-breakout reclaim on candle 1 or 2. The sweep
@@ -83,8 +99,11 @@ const INTERNAL_DELAYED_RECLAIM_TARGET_ATR = 0.08;
 const INTERNAL_DELAYED_CONFIRM_MIN_RANGE_ATR = 0.45;
 const INTERNAL_DELAYED_CONFIRM_MIN_BODY_FRACTION = 0.34;
 
+type InternalAnchorMode = "confirmed" | "fast-reaction";
+
 interface InternalAnchor {
   id: string;
+  mode: InternalAnchorMode;
   direction: SwingFailureDirection;
   price: number;
   swingIndex: number;
@@ -211,6 +230,180 @@ function isInternalPivotLow(
     if (left.low <= low || right.low < low) return false;
   }
   return true;
+}
+
+function isFastReactionHighCandidate(
+  bars: readonly CleanBar[],
+  index: number,
+): boolean {
+  const bar = bars[index];
+  if (!bar || index < INTERNAL_FAST_LEFT_STRENGTH) return false;
+
+  for (let offset = 1; offset <= INTERNAL_FAST_LEFT_STRENGTH; offset += 1) {
+    const left = bars[index - offset];
+    if (!left || left.high >= bar.high) return false;
+  }
+
+  return true;
+}
+
+function isFastReactionLowCandidate(
+  bars: readonly CleanBar[],
+  index: number,
+): boolean {
+  const bar = bars[index];
+  if (!bar || index < INTERNAL_FAST_LEFT_STRENGTH) return false;
+
+  for (let offset = 1; offset <= INTERNAL_FAST_LEFT_STRENGTH; offset += 1) {
+    const left = bars[index - offset];
+    if (!left || left.low <= bar.low) return false;
+  }
+
+  return true;
+}
+
+interface FastReactionArm {
+  index: number;
+  displacementAtr: number;
+  reactionQuality: number;
+}
+
+function findFastReactionArmedIndex(
+  bars: readonly CleanBar[],
+  candidateIndex: number,
+  direction: SwingFailureDirection,
+  levelPrice: number,
+  atr: number,
+): FastReactionArm | null {
+  const safeAtr = Math.max(atr, 0.000001);
+  const tolerance = Math.max(levelTolerance(levelPrice, safeAtr), safeAtr * 0.05);
+  const end = Math.min(
+    bars.length - 2,
+    candidateIndex + INTERNAL_FAST_ARM_WINDOW_BARS,
+  );
+
+  let bestDistance = 0;
+
+  for (let index = candidateIndex + 1; index <= end; index += 1) {
+    const bar = bars[index];
+
+    // If price makes a genuinely new extreme before proving a reaction, the
+    // old candidate never became an actionable liquidity level. The newer
+    // extreme can become its own candidate instead.
+    const superseded = direction === "bullish"
+      ? bar.low < levelPrice - tolerance
+      : bar.high > levelPrice + tolerance;
+    if (superseded) return null;
+
+    const distance = direction === "bullish"
+      ? Math.max(bar.high, bar.close) - levelPrice
+      : levelPrice - Math.min(bar.low, bar.close);
+    bestDistance = Math.max(bestDistance, distance);
+
+    const closeAwayAtr = direction === "bullish"
+      ? (bar.close - levelPrice) / safeAtr
+      : (levelPrice - bar.close) / safeAtr;
+    const range = Math.max(bar.high - bar.low, 0.000001);
+    const bodyFraction = Math.abs(bar.close - bar.open) / range;
+    const directionalBody = direction === "bullish"
+      ? bar.close > bar.open
+      : bar.close < bar.open;
+    const closeLocation = idealCloseLocation(bar, direction);
+    const displacementAtr = bestDistance / safeAtr;
+
+    const enoughReaction =
+      displacementAtr >= INTERNAL_FAST_MIN_REACTION_ATR &&
+      closeAwayAtr >= INTERNAL_FAST_MIN_CLOSE_AWAY_ATR;
+    const convincingReaction =
+      (directionalBody &&
+        bodyFraction >= INTERNAL_FAST_MIN_REACTION_BODY_FRACTION) ||
+      closeLocation >= INTERNAL_FAST_MIN_REACTION_CLOSE_LOCATION;
+
+    if (enoughReaction && convincingReaction) {
+      const displacementScore = normalizedLinearScore(
+        displacementAtr,
+        INTERNAL_FAST_MIN_REACTION_ATR,
+        1.20,
+      );
+      const closeAwayScore = normalizedLinearScore(
+        closeAwayAtr,
+        INTERNAL_FAST_MIN_CLOSE_AWAY_ATR,
+        0.75,
+      );
+      const reactionBodyScore = normalizedLinearScore(
+        bodyFraction,
+        0.20,
+        0.62,
+      );
+      const reactionQuality = clamp(
+        displacementScore * 0.48 +
+          closeAwayScore * 0.32 +
+          reactionBodyScore * 0.20,
+        0,
+        100,
+      );
+
+      return {
+        index,
+        displacementAtr,
+        reactionQuality,
+      };
+    }
+  }
+
+  return null;
+}
+
+function fastReactionAnchorQuality(
+  bars: readonly CleanBar[],
+  candidateIndex: number,
+  direction: SwingFailureDirection,
+  armed: FastReactionArm,
+  atr: number,
+): number {
+  const safeAtr = Math.max(atr, 0.000001);
+  const levelPrice = direction === "bullish"
+    ? bars[candidateIndex].low
+    : bars[candidateIndex].high;
+  const leftStart = Math.max(0, candidateIndex - 4);
+
+  let leftProminence = 0;
+  if (direction === "bullish") {
+    let nearestPriorLow = Infinity;
+    for (let index = leftStart; index < candidateIndex; index += 1) {
+      nearestPriorLow = Math.min(nearestPriorLow, bars[index].low);
+    }
+    if (Number.isFinite(nearestPriorLow)) {
+      leftProminence = (nearestPriorLow - levelPrice) / safeAtr;
+    }
+  } else {
+    let nearestPriorHigh = -Infinity;
+    for (let index = leftStart; index < candidateIndex; index += 1) {
+      nearestPriorHigh = Math.max(nearestPriorHigh, bars[index].high);
+    }
+    if (Number.isFinite(nearestPriorHigh)) {
+      leftProminence = (levelPrice - nearestPriorHigh) / safeAtr;
+    }
+  }
+
+  const prominenceScore = normalizedLinearScore(leftProminence, 0.02, 0.35);
+  const displacementScore = normalizedLinearScore(
+    armed.displacementAtr,
+    INTERNAL_FAST_MIN_REACTION_ATR,
+    1.20,
+  );
+
+  // Fast anchors deliberately start a little below a fully confirmed 2/2
+  // pivot. They can earn A/A+ only if the eventual sweep/reclaim itself is
+  // excellent, which keeps the chart from filling with micro-chop signals.
+  return clamp(
+    armed.reactionQuality * 0.48 +
+      displacementScore * 0.34 +
+      prominenceScore * 0.18 -
+      3,
+    0,
+    94,
+  );
 }
 
 function overlapsConfirmedStructure(
@@ -353,6 +546,7 @@ function buildQualifiedInternalAnchors(
           if (quality >= 66) {
             anchors.push({
               id: `internal-high:${index}:${price.toFixed(6)}`,
+              mode: "confirmed",
               direction: "bearish",
               price,
               swingIndex: index,
@@ -397,6 +591,7 @@ function buildQualifiedInternalAnchors(
           if (quality >= 66) {
             anchors.push({
               id: `internal-low:${index}:${price.toFixed(6)}`,
+              mode: "confirmed",
               direction: "bullish",
               price,
               swingIndex: index,
@@ -411,6 +606,136 @@ function buildQualifiedInternalAnchors(
   }
 
   return anchors;
+}
+
+function buildFastReactionInternalAnchors(
+  bars: readonly CleanBar[],
+  structure: MarketStructureResult,
+): InternalAnchor[] {
+  if (bars.length < INTERNAL_FAST_LEFT_STRENGTH + 6) return [];
+
+  const anchors: InternalAnchor[] = [];
+  let lastHighCandidateIndex = -Infinity;
+  let lastLowCandidateIndex = -Infinity;
+
+  for (
+    let index = INTERNAL_FAST_LEFT_STRENGTH;
+    index < bars.length - 2;
+    index += 1
+  ) {
+    const atr = Math.max(averageTrueRange(bars, index, 14), 0.000001);
+
+    if (
+      isFastReactionHighCandidate(bars, index) &&
+      index - lastHighCandidateIndex >= INTERNAL_FAST_MIN_SEPARATION_BARS
+    ) {
+      lastHighCandidateIndex = index;
+      const price = bars[index].high;
+      const armed = findFastReactionArmedIndex(
+        bars,
+        index,
+        "bearish",
+        price,
+        atr,
+      );
+
+      if (
+        armed &&
+        !overlapsConfirmedStructure(
+          structure,
+          "bearish",
+          price,
+          index,
+          armed.index,
+          atr,
+        )
+      ) {
+        const quality = fastReactionAnchorQuality(
+          bars,
+          index,
+          "bearish",
+          armed,
+          atr,
+        );
+        if (quality >= 68) {
+          anchors.push({
+            id: `fast-internal-high:${index}:${price.toFixed(6)}`,
+            mode: "fast-reaction",
+            direction: "bearish",
+            price,
+            swingIndex: index,
+            establishedIndex: armed.index,
+            quality,
+            displacementAtr: armed.displacementAtr,
+          });
+        }
+      }
+    }
+
+    if (
+      isFastReactionLowCandidate(bars, index) &&
+      index - lastLowCandidateIndex >= INTERNAL_FAST_MIN_SEPARATION_BARS
+    ) {
+      lastLowCandidateIndex = index;
+      const price = bars[index].low;
+      const armed = findFastReactionArmedIndex(
+        bars,
+        index,
+        "bullish",
+        price,
+        atr,
+      );
+
+      if (
+        armed &&
+        !overlapsConfirmedStructure(
+          structure,
+          "bullish",
+          price,
+          index,
+          armed.index,
+          atr,
+        )
+      ) {
+        const quality = fastReactionAnchorQuality(
+          bars,
+          index,
+          "bullish",
+          armed,
+          atr,
+        );
+        if (quality >= 68) {
+          anchors.push({
+            id: `fast-internal-low:${index}:${price.toFixed(6)}`,
+            mode: "fast-reaction",
+            direction: "bullish",
+            price,
+            swingIndex: index,
+            establishedIndex: armed.index,
+            quality,
+            displacementAtr: armed.displacementAtr,
+          });
+        }
+      }
+    }
+  }
+
+  return anchors;
+}
+
+function buildAllInternalAnchors(
+  bars: readonly CleanBar[],
+  structure: MarketStructureResult,
+): InternalAnchor[] {
+  const confirmed = buildQualifiedInternalAnchors(bars, structure);
+  const fast = buildFastReactionInternalAnchors(bars, structure);
+
+  // Keep both modes when the same swing exists in both lists. The fast anchor
+  // is needed for an early sweep that happens before a 2/2 pivot can be known;
+  // the confirmed anchor may be preferable later. Touch counting already
+  // de-duplicates same/nearby swing indices, and final SFP de-duplication keeps
+  // only the strongest pattern per direction/candle.
+  return [...confirmed, ...fast];
 }
 
 function matchingStructurePoint(
@@ -562,16 +887,33 @@ function internalSweepContext(
 function internalContextIsMeaningful(
   context: InternalSweepContext,
   touches: number,
+  anchor: InternalAnchor,
 ): boolean {
-  if (context.ageBars < INTERNAL_MIN_LIFETIME_BARS) return false;
-  if (context.awayBars < INTERNAL_MIN_AWAY_BARS) return false;
+  // establishedIndex already means price proved a real reaction away from the
+  // level. Do not add an arbitrary five-bar waiting period on top of that; it
+  // was the source of missed fast SFPs. The sweep can occur on the very next
+  // bar, but only after the anchor has earned its way into the active set.
+  if (context.ageBars < 1) return false;
   if (context.sweepRangeAtr < INTERNAL_MIN_SWEEP_RANGE_ATR) return false;
 
+  const provenExcursionAtr = Math.max(
+    context.maxExcursionAtr,
+    anchor.displacementAtr,
+  );
+
+  if (anchor.mode === "fast-reaction") {
+    const requiredExcursion = touches >= 2
+      ? INTERNAL_FAST_MULTI_TOUCH_MIN_EXCURSION_ATR
+      : INTERNAL_FAST_SINGLE_TOUCH_MIN_EXCURSION_ATR;
+    return provenExcursionAtr >= requiredExcursion;
+  }
+
+  if (context.awayBars < INTERNAL_CONFIRMED_MIN_AWAY_BARS) return false;
   const requiredExcursion = touches >= 2
     ? INTERNAL_MULTI_TOUCH_MIN_EXCURSION_ATR
     : INTERNAL_SINGLE_TOUCH_MIN_EXCURSION_ATR;
 
-  return context.maxExcursionAtr >= requiredExcursion;
+  return provenExcursionAtr >= requiredExcursion;
 }
 
 function confirmationHeld(
@@ -870,7 +1212,7 @@ function buildInternalPatterns(
   bars: readonly CleanBar[],
   structure: MarketStructureResult,
 ): SwingFailurePattern[] {
-  const anchors = buildQualifiedInternalAnchors(bars, structure);
+  const anchors = buildAllInternalAnchors(bars, structure);
   const patterns: SwingFailurePattern[] = [];
 
   for (const anchor of anchors) {
@@ -891,7 +1233,7 @@ function buildInternalPatterns(
       const atr = Math.max(averageTrueRange(bars, barIndex, 14), 0.000001);
       const touches = priorInternalTouches(anchors, anchor, barIndex, atr);
       const context = internalSweepContext(bars, anchor, barIndex);
-      if (!internalContextIsMeaningful(context, touches)) continue;
+      if (!internalContextIsMeaningful(context, touches, anchor)) continue;
 
       const confirmationBarIndex = confirmationHeld(
         bars,
@@ -904,7 +1246,12 @@ function buildInternalPatterns(
       const touchBonus = Math.min(9, Math.max(0, touches - 1) * 4.5);
       const ageBars = Math.max(0, barIndex - anchor.establishedIndex);
       const freshnessPenalty = Math.min(12, (ageBars / INTERNAL_MAX_AGE_BARS) * 12);
-      const anchorQuality = clamp(anchor.quality + touchBonus - freshnessPenalty, 0, 100);
+      const fastReactionPenalty = anchor.mode === "fast-reaction" ? 3 : 0;
+      const anchorQuality = clamp(
+        anchor.quality + touchBonus - freshnessPenalty - fastReactionPenalty,
+        0,
+        100,
+      );
 
       const pattern = scorePattern(bars, {
         direction: anchor.direction,
