@@ -352,7 +352,7 @@ function createSwingFailureLabelElement(
 
   element.title = [
     `${bullish ? "Bullish" : "Bearish"} Swing Failure Pattern`,
-    `${pattern.levelType} ${formatSfpPrice(pattern.levelPrice)}`,
+    `${pattern.levelType} ${formatSfpPrice(pattern.levelPrice)} | ${pattern.anchorSource === "structure" ? "confirmed structure" : "internal liquidity"}`,
     `${pattern.grade} / ${pattern.confidence}% confidence`,
     `structure ${pattern.structureConfidence}%`,
     `wick ${(pattern.wickFraction * 100).toFixed(0)}%`,
