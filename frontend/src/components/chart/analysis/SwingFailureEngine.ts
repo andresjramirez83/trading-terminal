@@ -233,7 +233,7 @@ function isInternalPivotHigh(
     const left = bars[index - offset];
     const right = bars[index + offset];
     if (!left || !right) return false;
-    if (left.high >= high || right.high > high) return false;
+    if (left.high >= high || right.high >= high) return false;
   }
   return true;
 }
@@ -250,7 +250,7 @@ function isInternalPivotLow(
     const left = bars[index - offset];
     const right = bars[index + offset];
     if (!left || !right) return false;
-    if (left.low <= low || right.low < low) return false;
+    if (left.low <= low || right.low <= low) return false;
   }
   return true;
 }
@@ -556,11 +556,14 @@ function buildQualifiedInternalAnchors(
   bars: readonly CleanBar[],
   structure: MarketStructureResult,
 ): InternalAnchor[] {
-  if (bars.length < INTERNAL_PIVOT_STRENGTH * 2 + 8) return [];
+  // SFP swing detection is deliberately independent from Market Structure.
+  // HH/HL/LH/LL can overlap these pivots, but they do not create, suppress,
+  // or redefine an SFP swing.
+  void structure;
+
+  if (bars.length < INTERNAL_PIVOT_STRENGTH * 2 + 2) return [];
 
   const anchors: InternalAnchor[] = [];
-  let lastHighIndex = -Infinity;
-  let lastLowIndex = -Infinity;
 
   for (
     let index = INTERNAL_PIVOT_STRENGTH;
@@ -569,93 +572,63 @@ function buildQualifiedInternalAnchors(
   ) {
     const atr = Math.max(averageTrueRange(bars, index, 14), 0.000001);
 
-    if (
-      isInternalPivotHigh(bars, index, INTERNAL_PIVOT_STRENGTH) &&
-      index - lastHighIndex >= INTERNAL_MIN_SEPARATION_BARS
-    ) {
-      lastHighIndex = index;
+    if (isInternalPivotHigh(bars, index, INTERNAL_PIVOT_STRENGTH)) {
       const price = bars[index].high;
-      if (!overlapsConfirmedStructure(
-          structure,
-          "bearish",
+      const armed = findInternalArmedIndex(
+        bars,
+        index,
+        "bearish",
+        price,
+        atr,
+      );
+
+      if (armed) {
+        anchors.push({
+          id: `internal-high:${index}:${price.toFixed(6)}`,
+          mode: "confirmed",
+          direction: "bearish",
           price,
-          index,
-          index + INTERNAL_PIVOT_STRENGTH,
-          atr,
-        )) {
-        const armed = findInternalArmedIndex(
-          bars,
-          index,
-          "bearish",
-          price,
-          atr,
-        );
-        if (armed) {
-          const quality = internalPivotQuality(
+          swingIndex: index,
+          establishedIndex: armed.index,
+          quality: internalPivotQuality(
             bars,
             index,
             "bearish",
             armed.displacementAtr,
             atr,
-          );
-          if (quality >= 66) {
-            anchors.push({
-              id: `internal-high:${index}:${price.toFixed(6)}`,
-              mode: "confirmed",
-              direction: "bearish",
-              price,
-              swingIndex: index,
-              establishedIndex: armed.index,
-              quality,
-              displacementAtr: armed.displacementAtr,
-            });
-          }
-        }
+          ),
+          displacementAtr: armed.displacementAtr,
+        });
       }
     }
 
-    if (
-      isInternalPivotLow(bars, index, INTERNAL_PIVOT_STRENGTH) &&
-      index - lastLowIndex >= INTERNAL_MIN_SEPARATION_BARS
-    ) {
-      lastLowIndex = index;
+    if (isInternalPivotLow(bars, index, INTERNAL_PIVOT_STRENGTH)) {
       const price = bars[index].low;
-      if (!overlapsConfirmedStructure(
-          structure,
-          "bullish",
+      const armed = findInternalArmedIndex(
+        bars,
+        index,
+        "bullish",
+        price,
+        atr,
+      );
+
+      if (armed) {
+        anchors.push({
+          id: `internal-low:${index}:${price.toFixed(6)}`,
+          mode: "confirmed",
+          direction: "bullish",
           price,
-          index,
-          index + INTERNAL_PIVOT_STRENGTH,
-          atr,
-        )) {
-        const armed = findInternalArmedIndex(
-          bars,
-          index,
-          "bullish",
-          price,
-          atr,
-        );
-        if (armed) {
-          const quality = internalPivotQuality(
+          swingIndex: index,
+          establishedIndex: armed.index,
+          quality: internalPivotQuality(
             bars,
             index,
             "bullish",
             armed.displacementAtr,
             atr,
-          );
-          if (quality >= 66) {
-            anchors.push({
-              id: `internal-low:${index}:${price.toFixed(6)}`,
-              mode: "confirmed",
-              direction: "bullish",
-              price,
-              swingIndex: index,
-              establishedIndex: armed.index,
-              quality,
-              displacementAtr: armed.displacementAtr,
-            });
-          }
-        }
+          ),
+          displacementAtr: armed.displacementAtr,
+        });
       }
     }
   }
@@ -845,21 +818,15 @@ function internalAnchorStillValid(
   anchor: InternalAnchor,
   endIndex: number,
 ): boolean {
-  let acceptanceCount = 0;
-
   for (let index = anchor.establishedIndex + 1; index <= endIndex; index += 1) {
-    const atr = Math.max(averageTrueRange(bars, index, 14), 0.000001);
-    const buffer = Math.max(levelTolerance(anchor.price, atr), atr * 0.12);
-    const close = bars[index].close;
-    const acceptedBeyond = anchor.direction === "bullish"
-      ? close <= anchor.price - buffer
-      : close >= anchor.price + buffer;
+    const close = bars[index]?.close;
+    if (!Number.isFinite(close)) continue;
 
-    if (acceptedBeyond) {
-      acceptanceCount += 1;
-      if (acceptanceCount >= INTERNAL_ACCEPTANCE_CLOSES) return false;
-    } else {
-      acceptanceCount = 0;
+    // A real close through the swing is a breakout, not a later SFP.
+    if (anchor.direction === "bullish") {
+      if (close < anchor.price) return false;
+    } else if (close > anchor.price) {
+      return false;
     }
   }
 
@@ -872,25 +839,16 @@ function internalSweepCandidate(
   barIndex: number,
 ): boolean {
   const bar = bars[barIndex];
-  const atr = Math.max(averageTrueRange(bars, barIndex, 14), 0.000001);
-  const tolerance = levelTolerance(anchor.price, atr);
-  const minPenetration = Math.max(tolerance, atr * 0.08);
+  if (!bar) return false;
 
-  // Classic SFP raid:
-  // bullish -> trade below the 3-candle swing low, then CLOSE back above it.
-  // bearish -> trade above the 3-candle swing high, then CLOSE back below it.
-  // The reclaim MUST happen on the raid candle itself.
+  // This is the ONLY SFP trigger:
+  // Bullish SFP: wick below a confirmed 3-candle swing low and CLOSE back above.
+  // Bearish SFP: wick above a confirmed 3-candle swing high and CLOSE back below.
   if (anchor.direction === "bullish") {
-    return (
-      bar.low <= anchor.price - minPenetration &&
-      bar.close > anchor.price
-    );
+    return bar.low < anchor.price && bar.close > anchor.price;
   }
 
-  return (
-    bar.high >= anchor.price + minPenetration &&
-    bar.close < anchor.price
-  );
+  return bar.high > anchor.price && bar.close < anchor.price;
 }
 
 interface InternalSweepContext {
@@ -1135,10 +1093,10 @@ function scorePattern(
     : 1;
 
   const internal = inputs.anchorSource === "internal";
-  const minPenetration = 0.07;
-  const minWickFraction = internal ? 0.26 : 0.32;
+  const minPenetration = internal ? 0.0 : 0.07;
+  const minWickFraction = internal ? 0.0 : 0.32;
   const minReclaim = internal ? 0.0 : 0.04;
-  const minCloseLocation = internal ? 0.46 : 0.55;
+  const minCloseLocation = internal ? 0.0 : 0.55;
   const delayedInternalReclaim = internal && reclaimAtr < minReclaim;
 
   if (penetrationAtr < minPenetration) return null;
@@ -1172,7 +1130,7 @@ function scorePattern(
   if (!held) return null;
 
   const rangeAtr = range / atr;
-  if (!delayedInternalReclaim && rangeAtr > 4.5 && closeLocation < 0.78) {
+  if (!internal && !delayedInternalReclaim && rangeAtr > 4.5 && closeLocation < 0.78) {
     return null;
   }
 
@@ -1240,7 +1198,9 @@ function scorePattern(
   const minimumConfidence = internal
     ? INTERNAL_MIN_CONFIDENCE
     : STRUCTURE_MIN_CONFIDENCE;
-  if (confidence < minimumConfidence) return null;
+  // A three-candle sweep/reclaim is already an SFP by definition. Confidence
+  // grades the setup; it does not decide whether the SFP exists.
+  if (!internal && confidence < minimumConfidence) return null;
 
   return {
     id: `sfp:${inputs.anchorSource}:${inputs.direction}:${inputs.swingIndex}:${inputs.barIndex}`,
@@ -1392,42 +1352,24 @@ export function buildSmartSwingFailures(
   structure: MarketStructureResult,
   liquidityEvents: readonly LiquidityEvent[],
 ): SwingFailurePattern[] {
-  const structurePatterns: SwingFailurePattern[] = [];
-
-  for (const event of liquidityEvents) {
-    const pattern = buildStructurePattern(bars, structure, event);
-    if (pattern) structurePatterns.push(pattern);
-  }
+  // IMPORTANT: liquidityEvents / confirmed HH-LL sweeps do NOT create SFPs.
+  // They remain in the signature so the renderer API does not need to change.
+  // Market structure may still contribute context to A/A+ grading, but the
+  // ONLY trigger is a raided three-candle SFP swing inside buildInternalPatterns.
+  void liquidityEvents;
+  void buildStructurePattern;
 
   const internalPatterns = buildInternalPatterns(bars, structure);
 
-  // One candle may sweep more than one nearby level. Keep exactly one SFP per
-  // direction/candle. Confirmed HH/LL ALWAYS wins over an internal swing. If
-  // two internal anchors qualify, keep the higher-confidence one.
+  // A single raid candle can sweep more than one nearby three-candle pivot.
+  // Draw one SFP label per direction/candle and keep the strongest candidate.
   const deduplicated = new Map<string, SwingFailurePattern>();
-  const allPatterns = [...internalPatterns, ...structurePatterns];
 
-  for (const pattern of allPatterns) {
+  for (const pattern of internalPatterns) {
     const key = `${pattern.direction}:${pattern.barIndex}`;
     const existing = deduplicated.get(key);
 
-    if (!existing) {
-      deduplicated.set(key, pattern);
-      continue;
-    }
-
-    if (
-      pattern.anchorSource === "structure" &&
-      existing.anchorSource !== "structure"
-    ) {
-      deduplicated.set(key, pattern);
-      continue;
-    }
-
-    if (
-      pattern.anchorSource === existing.anchorSource &&
-      pattern.confidence > existing.confidence
-    ) {
+    if (!existing || pattern.confidence > existing.confidence) {
       deduplicated.set(key, pattern);
     }
   }

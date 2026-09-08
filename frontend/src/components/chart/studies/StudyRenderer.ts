@@ -359,7 +359,7 @@ function createSwingFailureLabelElement(
     `penetration ${pattern.penetrationAtr.toFixed(2)} ATR`,
     `reclaim ${pattern.reclaimAtr.toFixed(2)} ATR`,
     `volume ${pattern.volumeRatio.toFixed(2)}x`,
-    "confirmed on next candle",
+    "three-candle swing raided + same-candle close back inside",
   ].join(" | ");
   element.textContent = `SFP ${pattern.grade}`;
   element.style.position = "absolute";
@@ -545,9 +545,8 @@ export class StudyRenderer {
       points: structure.points,
     }).sweepEvents;
 
-    // Confirmed HH/LL sweeps are classified as SFPs when they pass the smart
-    // quality filter. Keep LS labels for major repeated liquidity pools so the
-    // chart never prints duplicate LS + SFP labels on the same structure sweep.
+    // SFP labels come ONLY from a raided three-candle SFP swing. Confirmed
+    // Market Structure HH/HL/LH/LL remains separate and does not create SFPs.
     this.swingFailurePatterns = this.swingFailureVisible
       ? buildSmartSwingFailures(context.bars, structure, liquidityEvents)
       : [];
