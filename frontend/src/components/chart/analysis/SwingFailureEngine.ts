@@ -53,19 +53,20 @@ export interface SwingFailurePattern {
  *    be confirmed. They exist only inside this engine. Nothing is drawn for
  *    them; the chart still shows only real HH/HL/LH/LL plus qualified SFPs.
  *
- * Reliability is preferred over raw signal count. Internal anchors can be
- * either fully confirmed 2/2 pivots or fast reaction levels proven in real
- * time by meaningful displacement away. Both survive acceptance/invalidation
- * checks and then pass the same sweep/reclaim quality filter. Structure always
- * wins a same-candle conflict.
+ * Reliability is preferred over raw signal count. Internal SFP anchors use
+ * the classic THREE-CANDLE pivot only: the middle high must be above the highs
+ * on both sides, or the middle low must be below the lows on both sides. These
+ * pivots exist only for SFP detection and NEVER alter HH/HL/LH/LL market
+ * structure. The raid candle must wick through the pivot and close back inside
+ * that same level. Structure still wins a same-candle conflict.
  */
 
 const STRUCTURE_MIN_CONFIDENCE = 84;
 const INTERNAL_MIN_CONFIDENCE = 86;
 const A_PLUS_CONFIDENCE = 92;
 
-const INTERNAL_PIVOT_STRENGTH = 2;
-const INTERNAL_MIN_SEPARATION_BARS = 4;
+const INTERNAL_PIVOT_STRENGTH = 1;
+const INTERNAL_MIN_SEPARATION_BARS = 2;
 const INTERNAL_ARM_LOOKAHEAD_BARS = 12;
 const INTERNAL_MAX_AGE_BARS = 180;
 const INTERNAL_ACCEPTANCE_CLOSES = 2;
@@ -502,29 +503,18 @@ function findInternalArmedIndex(
   atr: number,
 ): { index: number; displacementAtr: number } | null {
   const confirmationIndex = pivotIndex + INTERNAL_PIVOT_STRENGTH;
-  const end = Math.min(
-    bars.length - 2,
-    confirmationIndex + INTERNAL_ARM_LOOKAHEAD_BARS,
-  );
-  const minDistance = Math.max(atr * 0.34, Math.abs(levelPrice) * 0.0012);
+  const confirmationBar = bars[confirmationIndex];
+  if (!confirmationBar) return null;
 
-  let bestDistance = 0;
-  for (let index = confirmationIndex; index <= end; index += 1) {
-    const bar = bars[index];
-    const distance = direction === "bullish"
-      ? Math.max(bar.high, bar.close) - levelPrice
-      : levelPrice - Math.min(bar.low, bar.close);
-    bestDistance = Math.max(bestDistance, distance);
+  const safeAtr = Math.max(atr, 0.000001);
+  const distance = direction === "bullish"
+    ? Math.max(confirmationBar.high, confirmationBar.close) - levelPrice
+    : levelPrice - Math.min(confirmationBar.low, confirmationBar.close);
 
-    if (distance >= minDistance) {
-      return {
-        index,
-        displacementAtr: bestDistance / Math.max(atr, 0.000001),
-      };
-    }
-  }
-
-  return null;
+  return {
+    index: confirmationIndex,
+    displacementAtr: Math.max(0, distance) / safeAtr,
+  };
 }
 
 function internalPivotQuality(
@@ -793,14 +783,17 @@ function buildAllInternalAnchors(
   structure: MarketStructureResult,
 ): InternalAnchor[] {
   const confirmed = buildQualifiedInternalAnchors(bars, structure);
-  const fast = buildFastReactionInternalAnchors(bars, structure);
 
-  // Keep both modes when the same swing exists in both lists. The fast anchor
-  // is needed for an early sweep that happens before a 2/2 pivot can be known;
-  // the confirmed anchor may be preferable later. Touch counting already
-  // de-duplicates same/nearby swing indices, and final SFP de-duplication keeps
-  // only the strongest pattern per direction/candle.
-  return [...confirmed, ...fast];
+  // Legacy fast-reaction anchors are intentionally disabled. They were based
+  // on left-side context + reaction and therefore were NOT true three-candle
+  // SFP swings. Keep the implementation referenced for easy rollback/history,
+  // but never mix it into live SFP anchors.
+  const useLegacyFastReactionAnchors = false;
+  if (useLegacyFastReactionAnchors) {
+    return [...confirmed, ...buildFastReactionInternalAnchors(bars, structure)];
+  }
+
+  return confirmed;
 }
 
 function matchingStructurePoint(
@@ -882,26 +875,21 @@ function internalSweepCandidate(
   const atr = Math.max(averageTrueRange(bars, barIndex, 14), 0.000001);
   const tolerance = levelTolerance(anchor.price, atr);
   const minPenetration = Math.max(tolerance, atr * 0.08);
-  const maxCloseBeyond = Math.max(
-    tolerance * 1.5,
-    atr * INTERNAL_MAX_SWEEP_CLOSE_BEYOND_ATR,
-  );
 
-  // Do NOT require the sweep candle itself to reclaim the level. A legitimate
-  // failed breakdown / breakout can close slightly through the level and then
-  // reclaim it decisively on candle 1 or 2. We only reject a sweep candle that
-  // already closes too far through the level, which is more consistent with
-  // acceptance than a liquidity grab.
+  // Classic SFP raid:
+  // bullish -> trade below the 3-candle swing low, then CLOSE back above it.
+  // bearish -> trade above the 3-candle swing high, then CLOSE back below it.
+  // The reclaim MUST happen on the raid candle itself.
   if (anchor.direction === "bullish") {
     return (
       bar.low <= anchor.price - minPenetration &&
-      bar.close >= anchor.price - maxCloseBeyond
+      bar.close > anchor.price
     );
   }
 
   return (
     bar.high >= anchor.price + minPenetration &&
-    bar.close <= anchor.price + maxCloseBeyond
+    bar.close < anchor.price
   );
 }
 
@@ -954,31 +942,13 @@ function internalContextIsMeaningful(
   touches: number,
   anchor: InternalAnchor,
 ): boolean {
-  // establishedIndex already means price proved a real reaction away from the
-  // level. Do not add an arbitrary five-bar waiting period on top of that; it
-  // was the source of missed fast SFPs. The sweep can occur on the very next
-  // bar, but only after the anchor has earned its way into the active set.
-  if (context.ageBars < 1) return false;
-  if (context.sweepRangeAtr < INTERNAL_MIN_SWEEP_RANGE_ATR) return false;
-
-  const provenExcursionAtr = Math.max(
-    context.maxExcursionAtr,
-    anchor.displacementAtr,
-  );
-
-  if (anchor.mode === "fast-reaction") {
-    const requiredExcursion = touches >= 2
-      ? INTERNAL_FAST_MULTI_TOUCH_MIN_EXCURSION_ATR
-      : INTERNAL_FAST_SINGLE_TOUCH_MIN_EXCURSION_ATR;
-    return provenExcursionAtr >= requiredExcursion;
-  }
-
-  if (context.awayBars < INTERNAL_CONFIRMED_MIN_AWAY_BARS) return false;
-  const requiredExcursion = touches >= 2
-    ? INTERNAL_MULTI_TOUCH_MIN_EXCURSION_ATR
-    : INTERNAL_SINGLE_TOUCH_MIN_EXCURSION_ATR;
-
-  return provenExcursionAtr >= requiredExcursion;
+  // Three-candle SFP swings are already confirmed by the right-hand candle.
+  // A raid can occur on the very next candle. Reliability is handled by the
+  // existing wick / penetration / reclaim / confidence scoring below, rather
+  // than by redefining the swing with extra reaction bars.
+  void touches;
+  void anchor;
+  return context.ageBars >= 1;
 }
 
 function confirmationHeld(
@@ -1167,7 +1137,7 @@ function scorePattern(
   const internal = inputs.anchorSource === "internal";
   const minPenetration = 0.07;
   const minWickFraction = internal ? 0.26 : 0.32;
-  const minReclaim = internal ? 0.02 : 0.04;
+  const minReclaim = internal ? 0.0 : 0.04;
   const minCloseLocation = internal ? 0.46 : 0.55;
   const delayedInternalReclaim = internal && reclaimAtr < minReclaim;
 
@@ -1192,9 +1162,13 @@ function scorePattern(
     if (closeLocation < minCloseLocation) return null;
   }
 
-  const held = inputs.direction === "bullish"
-    ? confirmationBar.close >= inputs.levelPrice + atr * 0.02
-    : confirmationBar.close <= inputs.levelPrice - atr * 0.02;
+  const held = internal
+    ? inputs.direction === "bullish"
+      ? confirmationBar.close > inputs.levelPrice
+      : confirmationBar.close < inputs.levelPrice
+    : inputs.direction === "bullish"
+      ? confirmationBar.close >= inputs.levelPrice + atr * 0.02
+      : confirmationBar.close <= inputs.levelPrice - atr * 0.02;
   if (!held) return null;
 
   const rangeAtr = range / atr;
@@ -1351,12 +1325,17 @@ function buildInternalPatterns(
       const context = internalSweepContext(bars, anchor, barIndex);
       if (!internalContextIsMeaningful(context, touches, anchor)) continue;
 
-      const confirmationBarIndex = confirmationHeld(
-        bars,
-        anchor.direction,
-        anchor.price,
-        barIndex,
-      );
+      // The raid candle itself confirms a classic SFP because it has
+      // already swept the swing and closed back inside the level.
+      const useLegacyDelayedConfirmation = false;
+      const confirmationBarIndex = useLegacyDelayedConfirmation
+        ? confirmationHeld(
+            bars,
+            anchor.direction,
+            anchor.price,
+            barIndex,
+          )
+        : barIndex;
       if (confirmationBarIndex == null) continue;
 
       const touchBonus = Math.min(9, Math.max(0, touches - 1) * 4.5);
@@ -1380,11 +1359,9 @@ function buildInternalPatterns(
 
       const pattern = scorePattern(bars, {
         direction: anchor.direction,
-        levelType: supportingStructure?.type === "HL" || supportingStructure?.type === "LH"
-          ? supportingStructure.type
-          : anchor.direction === "bullish"
-            ? "Internal Low"
-            : "Internal High",
+        levelType: anchor.direction === "bullish"
+          ? "Internal Low"
+          : "Internal High",
         anchorSource: "internal",
         levelPrice: anchor.price,
         swingIndex: anchor.swingIndex,
