@@ -1,9 +1,12 @@
 // src/components/ChartPanelV2/TimeframeFavorites.ts
 
-import { DEFAULT_TIMEFRAME_FAVORITES, TIMEFRAME_OPTIONS, normalizeTimeframeId } from "./TimeframeRegistry";
+import {
+  DEFAULT_TIMEFRAME_FAVORITES,
+  isSupportedTimeframeId,
+  normalizeTimeframeId,
+} from "./TimeframeRegistry";
 
 const FAVORITES_STORAGE_KEY = "chartv2.timeframe.favorites";
-const validIds = new Set(TIMEFRAME_OPTIONS.map((option) => option.id));
 
 function cleanFavorites(values: unknown): string[] {
   if (!Array.isArray(values)) return DEFAULT_TIMEFRAME_FAVORITES;
@@ -12,7 +15,7 @@ function cleanFavorites(values: unknown): string[] {
   values.forEach((value) => {
     if (typeof value !== "string") return;
     const id = normalizeTimeframeId(value);
-    if (!validIds.has(id)) return;
+    if (!isSupportedTimeframeId(id)) return;
     if (cleaned.includes(id)) return;
     cleaned.push(id);
   });
@@ -40,7 +43,7 @@ export function saveTimeframeFavorites(favorites: string[]): void {
 
 export function toggleTimeframeFavorite(favorites: string[], timeframe: string): string[] {
   const id = normalizeTimeframeId(timeframe);
-  if (!validIds.has(id)) return favorites;
+  if (!isSupportedTimeframeId(id)) return favorites;
 
   if (favorites.includes(id)) {
     const next = favorites.filter((favorite) => favorite !== id);

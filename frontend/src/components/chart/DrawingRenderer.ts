@@ -185,9 +185,8 @@ export class DrawingRenderer {
     this.removeHandles(drawing.id);
 
     if (drawing.type === "rectangle" || drawing.type === "priceRange") {
-      // Rectangle/price-range drawing behavior is unchanged: replace the old
-      // SVG immediately on a normal redraw.
-      this.removeBox(drawing.id);
+      // Keep the last valid box visible until replacement coordinates resolve.
+      // This prevents a one-frame disappear/snap while scales are updating.
       this.renderBox(drawing, selectedDrawingId);
       return;
     }
@@ -458,24 +457,17 @@ export class DrawingRenderer {
     const overlay = this.ensureSvgOverlay();
     if (!overlay) return;
 
-    const p1x =
-      this.chart.timeScale().timeToCoordinate(Number(drawing.p1.time) as Time) ??
-      drawing.p1.x ??
-      null;
-    const p2x =
-      this.chart.timeScale().timeToCoordinate(Number(drawing.p2.time) as Time) ??
-      drawing.p2.x ??
-      null;
-    const p1y =
-      this.priceSeries.priceToCoordinate(Number(drawing.p1.price)) ??
-      drawing.p1.y ??
-      null;
-    const p2y =
-      this.priceSeries.priceToCoordinate(Number(drawing.p2.price)) ??
-      drawing.p2.y ??
-      null;
+    const p1Time = this.snapTimeToSeries(Number(drawing.p1.time), "nearest");
+    const p2Time = this.snapTimeToSeries(Number(drawing.p2.time), "nearest");
+    const p1x = this.chart.timeScale().timeToCoordinate(p1Time as Time);
+    const p2x = this.chart.timeScale().timeToCoordinate(p2Time as Time);
+    const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
+    const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
 
     if (p1x == null || p2x == null || p1y == null || p2y == null) return;
+
+    // Only remove the old SVG after all replacement coordinates are valid.
+    this.removeBox(drawing.id);
 
     const left = Math.min(p1x, p2x);
     const right = Math.max(p1x, p2x);
@@ -634,22 +626,12 @@ export class DrawingRenderer {
     const overlay = this.ensureSvgOverlay();
     if (!overlay) return;
 
-    const p1x =
-      this.chart.timeScale().timeToCoordinate(Number(drawing.p1.time) as Time) ??
-      drawing.p1.x ??
-      null;
-    const p2x =
-      this.chart.timeScale().timeToCoordinate(Number(drawing.p2.time) as Time) ??
-      drawing.p2.x ??
-      null;
-    const p1y =
-      this.priceSeries.priceToCoordinate(Number(drawing.p1.price)) ??
-      drawing.p1.y ??
-      null;
-    const p2y =
-      this.priceSeries.priceToCoordinate(Number(drawing.p2.price)) ??
-      drawing.p2.y ??
-      null;
+    const p1Time = this.snapTimeToSeries(Number(drawing.p1.time), "nearest");
+    const p2Time = this.snapTimeToSeries(Number(drawing.p2.time), "nearest");
+    const p1x = this.chart.timeScale().timeToCoordinate(p1Time as Time);
+    const p2x = this.chart.timeScale().timeToCoordinate(p2Time as Time);
+    const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
+    const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
 
     if (p1x == null || p2x == null || p1y == null || p2y == null) return;
 
@@ -740,30 +722,15 @@ export class DrawingRenderer {
     const overlay = this.ensureSvgOverlay();
     if (!overlay) return;
 
-    const entryX =
-      this.chart.timeScale().timeToCoordinate(Number(drawing.entry.time) as Time) ??
-      drawing.entry.x ??
-      null;
-    const stopX =
-      this.chart.timeScale().timeToCoordinate(Number(drawing.stop.time) as Time) ??
-      drawing.stop.x ??
-      null;
-    const targetX =
-      this.chart.timeScale().timeToCoordinate(Number(drawing.target.time) as Time) ??
-      drawing.target.x ??
-      null;
-    const entryY =
-      this.priceSeries.priceToCoordinate(Number(drawing.entry.price)) ??
-      drawing.entry.y ??
-      null;
-    const stopY =
-      this.priceSeries.priceToCoordinate(Number(drawing.stop.price)) ??
-      drawing.stop.y ??
-      null;
-    const targetY =
-      this.priceSeries.priceToCoordinate(Number(drawing.target.price)) ??
-      drawing.target.y ??
-      null;
+    const entryTime = this.snapTimeToSeries(Number(drawing.entry.time), "nearest");
+    const stopTime = this.snapTimeToSeries(Number(drawing.stop.time), "nearest");
+    const targetTime = this.snapTimeToSeries(Number(drawing.target.time), "nearest");
+    const entryX = this.chart.timeScale().timeToCoordinate(entryTime as Time);
+    const stopX = this.chart.timeScale().timeToCoordinate(stopTime as Time);
+    const targetX = this.chart.timeScale().timeToCoordinate(targetTime as Time);
+    const entryY = this.priceSeries.priceToCoordinate(Number(drawing.entry.price));
+    const stopY = this.priceSeries.priceToCoordinate(Number(drawing.stop.price));
+    const targetY = this.priceSeries.priceToCoordinate(Number(drawing.target.price));
 
     if (
       entryX == null ||

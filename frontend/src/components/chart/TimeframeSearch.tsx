@@ -3,14 +3,20 @@
 type Props = {
   value: string;
   onChange: (value: string) => void;
+  onSubmit?: () => void;
 };
 
-export default function TimeframeSearch({ value, onChange }: Props) {
+export default function TimeframeSearch({ value, onChange, onSubmit }: Props) {
   return (
     <input
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      placeholder="Search timeframe..."
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" || !onSubmit) return;
+        event.preventDefault();
+        onSubmit();
+      }}
+      placeholder="Search or enter custom (e.g. 7m, 3h)..."
       autoFocus
       style={{
         width: "100%",

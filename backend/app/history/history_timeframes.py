@@ -76,8 +76,48 @@ def normalize_timeframe(value: str) -> str:
 def get_timeframe(value: str) -> TimeframeConfig:
     key = normalize_timeframe(value)
     config = TIMEFRAMES.get(key)
+    if config is not None:
+        return config
 
-    if config is None:
-        raise ValueError(f"Unsupported timeframe: {value}")
+    # Custom intraday intervals: e.g. 7m, 90m, 3h, 6h, 12h.
+    # Keep the allowed range bounded so history requests remain responsive.
+    if len(key) >= 2 and key[-1] in {"m", "h"}:
+        try:
+            amount = int(key[:-1])
+        except ValueError:
+            amount = 0
 
-    return config
+        if key.endswith("m") and 1 <= amount <= 720:
+            if amount <= 5:
+                lookback = timedelta(days=10)
+                cache_seconds = 10
+            elif amount <= 30:
+                lookback = timedelta(days=60)
+                cache_seconds = 20
+            elif amount <= 120:
+                lookback = timedelta(days=180)
+                cache_seconds = 45
+            else:
+                lookback = timedelta(days=365)
+                cache_seconds = 60
+
+            return TimeframeConfig(
+                key,
+                amount,
+                "minute",
+                lookback,
+                cache_seconds,
+                "1m" if amount > 1 else None,
+            )
+
+        if key.endswith("h") and 1 <= amount <= 24:
+            return TimeframeConfig(
+                key,
+                amount,
+                "hour",
+                timedelta(days=1460 if amount >= 4 else 730),
+                60,
+                "1h" if amount > 1 else None,
+            )
+
+    raise ValueError(f"Unsupported timeframe: {value}")

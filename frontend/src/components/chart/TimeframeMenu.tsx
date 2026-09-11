@@ -5,6 +5,7 @@ import TimeframeSearch from "./TimeframeSearch";
 import {
   TIMEFRAME_GROUPS,
   TIMEFRAME_OPTIONS,
+  getCustomTimeframeOption,
   getTimeframeOption,
   normalizeTimeframeId,
   type TimeframeOption,
@@ -97,7 +98,20 @@ export default function TimeframeMenu({
     [favorites]
   );
 
+  const customOption = useMemo(() => {
+    const candidate = getCustomTimeframeOption(query);
+    if (!candidate) return undefined;
+    return TIMEFRAME_OPTIONS.some((option) => option.id === candidate.id)
+      ? undefined
+      : candidate;
+  }, [query]);
+
   if (!open) return null;
+
+  const selectOption = (option: TimeframeOption) => {
+    onSelect(option.id);
+    onClose();
+  };
 
   const renderOption = (option: TimeframeOption) => {
     const active = option.id === activeId;
@@ -107,10 +121,7 @@ export default function TimeframeMenu({
       <button
         type="button"
         key={option.id}
-        onClick={() => {
-          onSelect(option.id);
-          onClose();
-        }}
+        onClick={() => selectOption(option)}
         style={{
           width: "100%",
           height: 34,
@@ -207,7 +218,32 @@ export default function TimeframeMenu({
         </button>
       </div>
 
-      <TimeframeSearch value={query} onChange={setQuery} />
+      <TimeframeSearch
+        value={query}
+        onChange={setQuery}
+        onSubmit={() => {
+          if (customOption) selectOption(customOption);
+        }}
+      />
+
+      {customOption && (
+        <Section title="Custom">
+          <div style={{ display: "grid", gap: 3 }}>
+            {renderOption(customOption)}
+          </div>
+          <div
+            style={{
+              marginTop: 6,
+              color: "#64748b",
+              fontSize: 10,
+              lineHeight: 1.35,
+              padding: "0 8px",
+            }}
+          >
+            Custom intraday intervals support minutes and hours (for example 7m, 90m, or 3h).
+          </div>
+        </Section>
+      )}
 
       {!hasQuery && (
         <Section title="Favorites">

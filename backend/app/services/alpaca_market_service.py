@@ -334,10 +334,43 @@ class AlpacaMarketService:
             "1d": ("1Min", timedelta(days=400), "1d", -1),
         }
 
-        if tf not in configs:
-            raise RuntimeError(f"Unsupported timeframe: {timeframe}")
+        if tf in configs:
+            return configs[tf]
 
-        return configs[tf]
+        # Custom intraday intervals are built from 1-minute data so the newest
+        # candle keeps updating just like the standard intraday presets.
+        if len(tf) >= 2 and tf[-1] in {"m", "h"}:
+            try:
+                amount = int(tf[:-1])
+            except ValueError:
+                amount = 0
+
+            if tf.endswith("m") and 1 <= amount <= 720:
+                if amount <= 5:
+                    lookback_days = 10
+                elif amount <= 30:
+                    lookback_days = 45
+                elif amount <= 120:
+                    lookback_days = 120
+                else:
+                    lookback_days = 180
+                return (
+                    "1Min",
+                    timedelta(days=lookback_days),
+                    tf,
+                    None if amount == 1 else amount,
+                )
+
+            if tf.endswith("h") and 1 <= amount <= 24:
+                source = "1Min" if amount <= 4 else "1Hour"
+                return (
+                    source,
+                    timedelta(days=180 if amount <= 4 else 730),
+                    tf,
+                    amount * 60,
+                )
+
+        raise RuntimeError(f"Unsupported timeframe: {timeframe}")
 
     @staticmethod
     def _parse_lookback(value: Optional[str], fallback: timedelta) -> timedelta:
@@ -685,11 +718,22 @@ class AlpacaMarketService:
             return _clone_rows(rows)
 
         buckets: Dict[int, Dict[str, Any]] = {}
-        bucket_ms = bucket_minutes * 60_000
 
         for row in sorted(rows, key=lambda item: int(item["time"])):
             timestamp = int(row["time"])
-            bucket_timestamp = (timestamp // bucket_ms) * bucket_ms
+            dt = datetime.fromtimestamp(timestamp / 1000, ET)
+            total_minutes = dt.hour * 60 + dt.minute
+            bucket_total_minutes = (
+                total_minutes // bucket_minutes
+            ) * bucket_minutes
+            midnight = dt.replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            bucket_dt = midnight + timedelta(minutes=bucket_total_minutes)
+            bucket_timestamp = int(bucket_dt.timestamp() * 1000)
 
             open_price = _safe_float(row["open"])
             high = _safe_float(row["high"])

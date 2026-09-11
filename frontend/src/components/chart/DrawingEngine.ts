@@ -161,6 +161,7 @@ export class DrawingEngine {
   private selectedDrawingId: string | null = null;
   private drawingChangeListeners = new Set<DrawingChangeListener>();
   private dragManager = new DragManager();
+  private transientDragDirty = false;
   private redrawFrame: number | null = null;
   private redrawTimer: number | null = null;
 
@@ -223,6 +224,7 @@ export class DrawingEngine {
     this.pendingTrendPoint = null;
     this.selectedDrawingId = null;
     this.dragManager.endDrag();
+    this.transientDragDirty = false;
     this.store.setWorkspace(symbol, timeframe);
     this.renderAll();
     this.scheduleRenderAll();
@@ -251,6 +253,7 @@ export class DrawingEngine {
     this.pendingTrendPoint = null;
     this.selectedDrawingId = null;
     this.dragManager.endDrag();
+    this.transientDragDirty = false;
     this.setChartNavigationEnabled(true);
     this.drawingChangeListeners.clear();
   }
@@ -721,6 +724,7 @@ export class DrawingEngine {
       this.dragManager.beginDrag(drawing, hit.mode, point);
     }
 
+    this.transientDragDirty = false;
     this.setChartNavigationEnabled(false);
     this.renderAll();
     this.emitDrawingChange("select");
@@ -747,16 +751,26 @@ export class DrawingEngine {
           }
         : updated;
 
-    this.store.update(normalized);
+    this.store.updateTransient(normalized);
+    this.transientDragDirty = true;
     this.renderDrawing(normalized);
     this.emitDrawingChange("update");
     return true;
   }
 
   handlePointerUp(_point?: DrawingPointerEvent): boolean {
+    const drawingId = this.dragManager.getDrawingId();
     const ended = this.dragManager.endDrag();
     if (!ended) return false;
 
+    if (this.transientDragDirty && drawingId) {
+      const finalDrawing = this.store.get(drawingId);
+      if (finalDrawing) {
+        this.store.update(finalDrawing);
+      }
+    }
+
+    this.transientDragDirty = false;
     this.setChartNavigationEnabled(true);
     return true;
   }
@@ -768,6 +782,7 @@ export class DrawingEngine {
     this.pendingTrendPoint = null;
     this.selectedDrawingId = null;
     this.dragManager.endDrag();
+    this.transientDragDirty = false;
     this.setChartNavigationEnabled(true);
   }
 
@@ -1270,8 +1285,10 @@ export class DrawingEngine {
     x: number,
     y: number,
   ): HitResult {
-    const p1x = this.chart.timeScale().timeToCoordinate(Number(drawing.p1.time) as Time);
-    const p2x = this.chart.timeScale().timeToCoordinate(Number(drawing.p2.time) as Time);
+    const p1Time = this.snapTimeToSeries(Number(drawing.p1.time), "nearest");
+    const p2Time = this.snapTimeToSeries(Number(drawing.p2.time), "nearest");
+    const p1x = this.chart.timeScale().timeToCoordinate(p1Time as Time);
+    const p2x = this.chart.timeScale().timeToCoordinate(p2Time as Time);
     const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
     const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
 
@@ -1314,12 +1331,14 @@ export class DrawingEngine {
     x: number,
     y: number,
   ): HitResult {
+    const p1Time = this.snapTimeToSeries(Number(drawing.p1.time), "nearest");
+    const p2Time = this.snapTimeToSeries(Number(drawing.p2.time), "nearest");
     const p1x = this.chart
       .timeScale()
-      .timeToCoordinate(Number(drawing.p1.time) as Time);
+      .timeToCoordinate(p1Time as Time);
     const p2x = this.chart
       .timeScale()
-      .timeToCoordinate(Number(drawing.p2.time) as Time);
+      .timeToCoordinate(p2Time as Time);
     const p1y = this.priceSeries.priceToCoordinate(Number(drawing.p1.price));
     const p2y = this.priceSeries.priceToCoordinate(Number(drawing.p2.price));
 
@@ -1386,15 +1405,12 @@ export class DrawingEngine {
     x: number,
     y: number,
   ): HitResult {
-    const entryX = this.chart
-      .timeScale()
-      .timeToCoordinate(Number(drawing.entry.time) as Time);
-    const stopX = this.chart
-      .timeScale()
-      .timeToCoordinate(Number(drawing.stop.time) as Time);
-    const targetX = this.chart
-      .timeScale()
-      .timeToCoordinate(Number(drawing.target.time) as Time);
+    const entryTime = this.snapTimeToSeries(Number(drawing.entry.time), "nearest");
+    const stopTime = this.snapTimeToSeries(Number(drawing.stop.time), "nearest");
+    const targetTime = this.snapTimeToSeries(Number(drawing.target.time), "nearest");
+    const entryX = this.chart.timeScale().timeToCoordinate(entryTime as Time);
+    const stopX = this.chart.timeScale().timeToCoordinate(stopTime as Time);
+    const targetX = this.chart.timeScale().timeToCoordinate(targetTime as Time);
     const entryY = this.priceSeries.priceToCoordinate(
       Number(drawing.entry.price),
     );

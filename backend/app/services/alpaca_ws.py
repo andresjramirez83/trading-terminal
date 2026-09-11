@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.services.live_bar_aggregator import live_bar_aggregator
+from app.services.live_bar_timeframes import normalize_live_timeframe, register_timeframe
 
 
 # backend/app/services/alpaca_ws.py -> backend/.env
@@ -34,44 +35,7 @@ def _debug(message: str) -> None:
 
 
 def _normalize_timeframe(value: str | None) -> str:
-    tf = str(value or "1m").lower().strip()
-
-    aliases = {
-        "1": "1m",
-        "1min": "1m",
-        "2min": "2m",
-        "3min": "3m",
-        "5min": "5m",
-        "10min": "10m",
-        "15min": "15m",
-        "30min": "30m",
-        "45min": "45m",
-        "60m": "1h",
-        "60min": "1h",
-        "hour": "1h",
-        "120m": "2h",
-        "240m": "4h",
-        "day": "1d",
-        "daily": "1d",
-    }
-    tf = aliases.get(tf, tf)
-
-    allowed = {
-        "1m",
-        "2m",
-        "3m",
-        "5m",
-        "10m",
-        "15m",
-        "30m",
-        "45m",
-        "1h",
-        "2h",
-        "4h",
-        "1d",
-    }
-
-    return tf if tf in allowed else "1m"
+    return normalize_live_timeframe(value)
 
 
 def _normalize_symbol(value: str | None) -> str:
@@ -343,7 +307,7 @@ class AlpacaWSManager:
         timeframe: str = "1m",
     ) -> None:
         normalized_symbol = _normalize_symbol(symbol)
-        normalized_timeframe = _normalize_timeframe(timeframe)
+        normalized_timeframe = register_timeframe(timeframe)
 
         if not normalized_symbol:
             raise RuntimeError("Missing symbol for Alpaca WebSocket subscription")

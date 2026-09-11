@@ -55,7 +55,7 @@ class LiveBarAggregator:
 
         with self._lock:
 
-            for timeframe in TIMEFRAME_SECONDS:
+            for timeframe in tuple(TIMEFRAME_SECONDS):
 
                 start, end = align_timestamp(timestamp, timeframe)
 

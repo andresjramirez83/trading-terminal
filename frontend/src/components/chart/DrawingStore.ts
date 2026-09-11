@@ -10,6 +10,7 @@ import type { ChartDrawing } from "./DrawingTypes";
 const STORAGE_PREFIX = "chart.drawings.v1";
 const MARKET_STRUCTURE_STORAGE_PREFIX = "chart.market-structure.v1";
 const TRENDLINE_SCOPE_MIGRATION_PREFIX = "chart.trendline-shared-migration.v1";
+const ALL_DRAWINGS_SCOPE_MIGRATION_PREFIX = "chart.all-drawings-shared-migration.v1";
 const SHARED_SCOPE = "shared";
 const REMOTE_POLL_MS = 10_000;
 const REMOTE_SAVE_DELAY_MS = 120;
@@ -54,6 +55,10 @@ function makeMarketStructureStorageKey(symbol: string): string {
 
 function makeTrendlineScopeMigrationKey(symbol: string): string {
   return `${TRENDLINE_SCOPE_MIGRATION_PREFIX}.${safeKeyPart(symbol)}`;
+}
+
+function makeAllDrawingsScopeMigrationKey(symbol: string): string {
+  return `${ALL_DRAWINGS_SCOPE_MIGRATION_PREFIX}.${safeKeyPart(symbol)}`;
 }
 
 function cloneDrawing<T extends ChartDrawing>(drawing: T): T {
@@ -104,10 +109,11 @@ function parseStoredDrawings(
   }
 }
 
-function scopeForDrawing(drawing: ChartDrawing): DrawingScope {
-  return drawing.type === "marketStructure" || drawing.type === "trendline"
-    ? "shared"
-    : "timeframe";
+function scopeForDrawing(_drawing: ChartDrawing): DrawingScope {
+  // Manual drawings belong to the symbol, not to one chart interval.
+  // Their anchors are absolute time/price values, so the same drawing should
+  // remain visible when the user moves between 1m, 15m, 1h, etc.
+  return "shared";
 }
 
 function drawingsForScope(
@@ -313,7 +319,7 @@ export class DrawingStore {
     this.marketStructureStorageKey =
       makeMarketStructureStorageKey(this.symbol);
     this.migratedLocalSharedDrawings =
-      this.migrateLegacyLocalTrendlines();
+      this.migrateLegacyLocalDrawings();
 
     this.workspaceGeneration += 1;
     this.remoteInitialized = false;
@@ -393,6 +399,20 @@ export class DrawingStore {
     this.commitMutation({ kind: "upsert", drawing: cloneDrawing(updated) });
   }
 
+  updateTransient(updated: ChartDrawing): void {
+    const existing = this.drawings.find(
+      (drawing) => drawing.id === updated.id,
+    );
+    if (!existing) return;
+
+    // Pointer-drag previews can fire dozens of times per second. Keep those
+    // updates in memory only and persist the final position on pointer-up.
+    this.drawings = applyMutation(this.drawings, {
+      kind: "upsert",
+      drawing: cloneDrawing(updated),
+    });
+  }
+
   remove(id: string): void {
     const drawing = this.drawings.find((item) => item.id === id);
     if (!drawing) return;
@@ -436,10 +456,10 @@ export class DrawingStore {
     }
   }
 
-  private migrateLegacyLocalTrendlines(): ChartDrawing[] {
+  private migrateLegacyLocalDrawings(): ChartDrawing[] {
     if (!canUseLocalStorage()) return [];
 
-    const migrationKey = makeTrendlineScopeMigrationKey(this.symbol);
+    const migrationKey = makeAllDrawingsScopeMigrationKey(this.symbol);
 
     try {
       if (window.localStorage.getItem(migrationKey) === "1") {
@@ -461,7 +481,7 @@ export class DrawingStore {
         let changed = false;
 
         for (const drawing of drawings) {
-          if (drawing.type === "trendline") {
+          if (scopeForDrawing(drawing) === "shared") {
             migratedById.set(drawing.id, cloneDrawing(drawing));
             changed = true;
           } else {
@@ -496,11 +516,18 @@ export class DrawingStore {
         }
       }
 
+      // Keep the old marker intact for backwards compatibility, but use a new
+      // marker so installations that already migrated trendlines still migrate
+      // rectangles, fibs, horizontals, ranges and Long Position drawings.
+      window.localStorage.setItem(
+        makeTrendlineScopeMigrationKey(this.symbol),
+        "1",
+      );
       window.localStorage.setItem(migrationKey, "1");
       return migrated;
     } catch (error) {
       console.warn(
-        "[DrawingStore] failed to migrate trendlines to shared scope",
+        "[DrawingStore] failed to migrate drawings to shared scope",
         { symbol: this.symbol, error },
       );
       return [];

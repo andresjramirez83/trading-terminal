@@ -285,28 +285,44 @@ function getHistoricalRequest(timeframe: string): {
 } {
   const normalized = String(timeframe).trim().toLowerCase();
 
-  // Extended-hours sessions can contain up to 960 one-minute bars per
-  // trading day and 192 five-minute bars per trading day. The larger
-  // lookback gives the backend enough calendar-day room for weekends
-  // and market holidays; ChartEngine trims the result to exact trading days.
+  // Size history requests by the actual interval instead of treating every
+  // non-1m/5m timeframe as a five-day chart. This is also what lets custom
+  // intraday intervals (7m, 90m, 3h, 6h, etc.) open with useful context.
   if (normalized === "1m" || normalized === "1min") {
-    return {
-      lookback: "10d",
-      limit: 4000,
-    };
+    return { lookback: "10d", limit: 4000 };
   }
 
-  if (normalized === "5m" || normalized === "5min") {
-    return {
-      lookback: "10d",
-      limit: 1500,
-    };
+  const match = normalized.match(/^(\d+)(m|h)$/);
+  if (match) {
+    const amount = Number(match[1]);
+    const intervalMinutes = match[2] === "h" ? amount * 60 : amount;
+
+    if (intervalMinutes <= 5) {
+      return { lookback: "10d", limit: 1500 };
+    }
+    if (intervalMinutes <= 15) {
+      return { lookback: "20d", limit: 1400 };
+    }
+    if (intervalMinutes <= 60) {
+      return { lookback: "30d", limit: 1000 };
+    }
+    if (intervalMinutes <= 240) {
+      return { lookback: "45d", limit: 800 };
+    }
+    return { lookback: "180d", limit: 700 };
   }
 
-  return {
-    lookback: "5d",
-    limit: 500,
-  };
+  if (normalized === "1d") {
+    return { lookback: "2y", limit: 650 };
+  }
+  if (normalized === "1w") {
+    return { lookback: "5y", limit: 520 };
+  }
+  if (normalized === "1mo") {
+    return { lookback: "10y", limit: 240 };
+  }
+
+  return { lookback: "20d", limit: 800 };
 }
 
 function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {

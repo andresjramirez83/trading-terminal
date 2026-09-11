@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, List
 from zoneinfo import ZoneInfo
 
@@ -48,11 +48,15 @@ class HistoryAggregation:
         for bar in sorted(bars, key=lambda item: item.time):
             dt = datetime.fromtimestamp(bar.time / 1000, ET)
 
-            bucket = dt.replace(
-                minute=(dt.minute // minutes) * minutes,
+            total_minutes = dt.hour * 60 + dt.minute
+            bucket_minutes = (total_minutes // minutes) * minutes
+            midnight = dt.replace(
+                hour=0,
+                minute=0,
                 second=0,
                 microsecond=0,
             )
+            bucket = midnight + timedelta(minutes=bucket_minutes)
 
             ts = int(bucket.timestamp() * 1000)
             HistoryAggregation._merge_bucket(buckets, ts, bar)

@@ -5067,6 +5067,136 @@ def _mutate_chart_item(
     return {"ok": True, **result}
 
 
+def _is_legacy_timeframe_scope(scope: str) -> bool:
+    """Return True for persisted drawing scopes such as 15M, 1H, 1D, 1W, 1MO."""
+    cleaned = _clean_chart_part(scope)
+    if cleaned.endswith("MO"):
+        amount = cleaned[:-2]
+        unit = "MO"
+    else:
+        amount = cleaned[:-1]
+        unit = cleaned[-1:]
+    return bool(amount) and amount.isdigit() and int(amount) > 0 and unit in {
+        "M",
+        "H",
+        "D",
+        "W",
+        "MO",
+    }
+
+
+def _migrate_legacy_timeframe_drawings_to_shared(symbol: str) -> None:
+    """Move old per-timeframe manual drawings into the symbol-wide shared scope.
+
+    Older frontend builds saved rectangles, horizontal lines, fibs, price ranges,
+    and long-position drawings under the active timeframe. The current chart
+    intentionally treats every manual drawing as symbol-wide, so migrate any
+    existing cloud documents the first time that symbol is synchronized.
+    """
+    safe_symbol = _clean_chart_part(symbol)
+    prefix = f"{safe_symbol}__"
+    suffix = "__drawings.json"
+    scopes: List[str] = []
+
+    for path in CHART_STORAGE_DIR.glob(f"{safe_symbol}__*__drawings.json"):
+        name = path.name
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        scope = name[len(prefix) : -len(suffix)]
+        if scope != "SHARED" and _is_legacy_timeframe_scope(scope):
+            scopes.append(scope)
+
+    if not scopes:
+        return
+
+    shared_path = _chart_storage_file(symbol, "shared", "drawings")
+    with _locked_chart_storage(shared_path):
+        shared = _read_chart_document_unlocked(symbol, "shared", "drawings")
+        shared_items = list(shared.get("items") or [])
+        by_id: Dict[str, Dict[str, Any]] = {
+            str(item.get("id")): item
+            for item in shared_items
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }
+        source_documents: List[tuple[str, Path, Dict[str, Any]]] = []
+        migrated_source_ids: Dict[str, set[str]] = {}
+        changed = False
+
+        for scope in sorted(set(scopes)):
+            source_path = _chart_storage_file(symbol, scope, "drawings")
+            with _locked_chart_storage(source_path):
+                source = _read_chart_document_unlocked(symbol, scope, "drawings")
+                source_documents.append((scope, source_path, source))
+                for item in list(source.get("items") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    item_id = str(item.get("id") or "").strip()
+                    if item_id and item_id not in by_id:
+                        by_id[item_id] = item
+                        migrated_source_ids.setdefault(scope, set()).add(item_id)
+                        changed = True
+
+        # Write shared first so an interruption cannot lose a legacy drawing.
+        if changed:
+            shared_revision = max(0, int(shared.get("revision") or 0)) + 1
+            _write_chart_document_unlocked(
+                symbol,
+                "shared",
+                "drawings",
+                list(by_id.values()),
+                shared_revision,
+            )
+
+        # Once copied, clear the old timeframe documents. Keeping the files with
+        # a bumped revision makes connected clients converge cleanly.
+        for scope, source_path, source in source_documents:
+            if not list(source.get("items") or []):
+                continue
+            with _locked_chart_storage(source_path):
+                latest = _read_chart_document_unlocked(symbol, scope, "drawings")
+                latest_items = list(latest.get("items") or [])
+                if not latest_items:
+                    continue
+
+                # If another client wrote while migration was in progress, merge
+                # those newest records into shared before clearing the source.
+                additional = False
+                for item in latest_items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_id = str(item.get("id") or "").strip()
+                    if not item_id:
+                        continue
+                    source_owns_id = item_id in migrated_source_ids.get(scope, set())
+                    if item_id not in by_id or source_owns_id:
+                        if by_id.get(item_id) != item:
+                            additional = True
+                        by_id[item_id] = item
+                if additional:
+                    current_shared = _read_chart_document_unlocked(
+                        symbol, "shared", "drawings"
+                    )
+                    shared_revision = max(
+                        0, int(current_shared.get("revision") or 0)
+                    ) + 1
+                    _write_chart_document_unlocked(
+                        symbol,
+                        "shared",
+                        "drawings",
+                        list(by_id.values()),
+                        shared_revision,
+                    )
+
+                source_revision = max(0, int(latest.get("revision") or 0)) + 1
+                _write_chart_document_unlocked(
+                    symbol,
+                    scope,
+                    "drawings",
+                    [],
+                    source_revision,
+                )
+
+
 @app.get("/chart/trendlines/{symbol}/{scope}")
 def get_chart_trendlines(symbol: str, scope: str):
     document = _read_chart_document_cached(symbol, scope, "trendlines")
@@ -5143,6 +5273,8 @@ def get_chart_workspace_sync(symbol: str, timeframe: str):
     projections. This endpoint serves all three from the hot document cache in
     one round trip. Existing write endpoints remain unchanged.
     """
+    _migrate_legacy_timeframe_drawings_to_shared(symbol)
+
     timeframe_drawings = _read_chart_document_cached(
         symbol, timeframe, "drawings"
     )

@@ -1,5 +1,3 @@
-// src/components/ChartPanelV2/TimeframeRegistry.ts
-
 export type TimeframeGroup = "Favorites" | "Intraday" | "Hourly" | "Daily";
 
 export type TimeframeOption = {
@@ -8,6 +6,7 @@ export type TimeframeOption = {
   shortLabel: string;
   group: Exclude<TimeframeGroup, "Favorites">;
   search: string;
+  custom?: boolean;
 };
 
 export const DEFAULT_TIMEFRAME_FAVORITES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
@@ -44,17 +43,60 @@ export const TIMEFRAME_GROUPS: Array<Exclude<TimeframeGroup, "Favorites">> = [
 ];
 
 export function normalizeTimeframeId(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.toLowerCase() === "1month" || trimmed.toLowerCase() === "1mon") return "1mo";
+  const trimmed = String(value ?? "").trim();
+  const lower = trimmed.toLowerCase();
+
+  if (lower === "1month" || lower === "1mon" || lower === "month") return "1mo";
   if (trimmed === "1M") return "1mo";
-  return trimmed.toLowerCase();
+
+  const minuteWords = lower.match(/^(\d+)\s*(?:min|mins|minute|minutes)$/);
+  if (minuteWords) return `${Number(minuteWords[1])}m`;
+
+  const hourWords = lower.match(/^(\d+)\s*(?:hr|hrs|hour|hours)$/);
+  if (hourWords) return `${Number(hourWords[1])}h`;
+
+  return lower.replace(/\s+/g, "");
+}
+
+export function getCustomTimeframeOption(value: string): TimeframeOption | undefined {
+  const id = normalizeTimeframeId(value);
+  const match = id.match(/^([1-9]\d*)(m|h)$/);
+  if (!match) return undefined;
+
+  const amount = Number(match[1]);
+  const unit = match[2];
+
+  // Keep custom bars useful without allowing a single request to explode into
+  // extremely large 1-minute aggregation windows.
+  if (unit === "m" && (amount < 1 || amount > 720)) return undefined;
+  if (unit === "h" && (amount < 1 || amount > 24)) return undefined;
+
+  const isMinute = unit === "m";
+  const singular = amount === 1;
+  return {
+    id,
+    label: `${amount} ${isMinute ? (singular ? "Minute" : "Minutes") : (singular ? "Hour" : "Hours")}`,
+    shortLabel: `${amount}${unit.toUpperCase()}`,
+    group: isMinute ? "Intraday" : "Hourly",
+    search: `${id} ${amount} ${isMinute ? "minute min" : "hour hr"}`,
+    custom: true,
+  };
+}
+
+export function isSupportedTimeframeId(value: string): boolean {
+  const id = normalizeTimeframeId(value);
+  if (TIMEFRAME_OPTIONS.some((option) => option.id === id)) return true;
+  return getCustomTimeframeOption(id) != null;
 }
 
 export function getTimeframeOption(value: string): TimeframeOption | undefined {
   const id = normalizeTimeframeId(value);
-  return TIMEFRAME_OPTIONS.find((option) => option.id === id);
+  return (
+    TIMEFRAME_OPTIONS.find((option) => option.id === id) ??
+    getCustomTimeframeOption(id)
+  );
 }
 
 export function getTimeframeShortLabel(value: string): string {
-  return getTimeframeOption(value)?.shortLabel ?? value.toUpperCase();
+  return getTimeframeOption(value)?.shortLabel ?? normalizeTimeframeId(value).toUpperCase();
 }
