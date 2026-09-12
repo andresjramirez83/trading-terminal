@@ -50,6 +50,12 @@ function inputPrice(value: number): string {
   return value.toFixed(value >= 1 ? 2 : 4);
 }
 
+// PROTECTED_ORDER_RISK_REWARD_20260911
+function formatMoney(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "—";
+  return `$${value.toFixed(2)}`;
+}
+
 function phaseLabel(phase: string): string {
   switch (phase) {
     case "entry_submitted":
@@ -160,6 +166,36 @@ export default function AutoTradeWidget({
     : queuedPlan
       ? "Queued for server worker"
       : "Ready";
+
+  const riskRewardPreview = useMemo(() => {
+    const entry = positiveNumber(entryPrice);
+    const stop = positiveNumber(stopPrice);
+    const target = positiveNumber(targetPrice);
+
+    if (!(stop < entry && entry < target)) return null;
+
+    const estimatedQty =
+      sizingMode === "shares"
+        ? Math.floor(positiveNumber(shares))
+        : Math.floor(positiveNumber(dollars) / entry);
+
+    if (estimatedQty <= 0) return null;
+
+    const riskPerShare = entry - stop;
+    const rewardPerShare = target - entry;
+    const totalRisk = riskPerShare * estimatedQty;
+    const totalReward = rewardPerShare * estimatedQty;
+    const rewardToRisk = riskPerShare > 0 ? rewardPerShare / riskPerShare : 0;
+
+    return {
+      estimatedQty,
+      riskPerShare,
+      rewardPerShare,
+      totalRisk,
+      totalReward,
+      rewardToRisk,
+    };
+  }, [dollars, entryPrice, shares, sizingMode, stopPrice, targetPrice]);
 
   const submit = async () => {
     setMessage("");
@@ -356,6 +392,48 @@ export default function AutoTradeWidget({
           />
         </Field>
       )}
+
+      <div style={styles.riskRewardPanel}>
+        <div style={styles.riskRewardHeader}>
+          <span>Risk / Reward</span>
+          <strong>
+            {riskRewardPreview
+              ? `1 : ${riskRewardPreview.rewardToRisk.toFixed(2)}`
+              : "Enter valid prices"}
+          </strong>
+        </div>
+
+        <div style={styles.riskRewardGrid}>
+          <Metric
+            label="Est. Qty"
+            value={riskRewardPreview ? String(riskRewardPreview.estimatedQty) : "—"}
+          />
+          <Metric
+            label="Risk / Share"
+            value={riskRewardPreview ? formatMoney(riskRewardPreview.riskPerShare) : "—"}
+          />
+          <Metric
+            label="Reward / Share"
+            value={riskRewardPreview ? formatMoney(riskRewardPreview.rewardPerShare) : "—"}
+          />
+          <Metric
+            label="Total Risk"
+            value={riskRewardPreview ? formatMoney(riskRewardPreview.totalRisk) : "—"}
+          />
+          <Metric
+            label="Total Reward"
+            value={riskRewardPreview ? formatMoney(riskRewardPreview.totalReward) : "—"}
+          />
+          <Metric
+            label="R Multiple"
+            value={riskRewardPreview ? `${riskRewardPreview.rewardToRisk.toFixed(2)}R` : "—"}
+          />
+        </div>
+
+        <div style={styles.riskRewardNote}>
+          Estimated from the planned entry, stop and target. Dollar sizing uses whole shares.
+        </div>
+      </div>
 
       {runnerState && (
         <div style={styles.protectionGrid}>
@@ -561,6 +639,35 @@ const styles: Record<string, CSSProperties> = {
     borderColor: "rgba(96,165,250,.55)",
     background: "rgba(37,99,235,.20)",
     color: "#dbeafe",
+  },
+  riskRewardPanel: {
+    display: "grid",
+    gap: 7,
+    border: "1px solid rgba(96,165,250,.24)",
+    background: "rgba(15,23,42,.62)",
+    borderRadius: 10,
+    padding: 9,
+  },
+  riskRewardHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    color: "#bfdbfe",
+    fontSize: 10,
+    fontWeight: 900,
+    textTransform: "uppercase",
+    letterSpacing: 0.35,
+  },
+  riskRewardGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: 6,
+  },
+  riskRewardNote: {
+    color: "#64748b",
+    fontSize: 8.5,
+    lineHeight: 1.35,
   },
   protectionGrid: {
     display: "grid",
