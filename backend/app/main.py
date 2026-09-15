@@ -515,6 +515,26 @@ class InstantChartAlertPayload(BaseModel):
     debounce_key: Optional[str] = None
 
 
+class ChartObjectAlertCreatePayload(BaseModel):
+    symbol: str
+    timeframe: str = "15m"
+    source_type: str
+    source_id: Optional[str] = None
+    source_label: Optional[str] = None
+    condition: str = "touches"
+    recurrence: str = "once"
+    notify_phone: bool = True
+    price: Optional[float] = None
+    study: Optional[str] = None
+
+
+class ChartObjectAlertUpdatePayload(BaseModel):
+    active: Optional[bool] = None
+    condition: Optional[str] = None
+    recurrence: Optional[str] = None
+    notify_phone: Optional[bool] = None
+
+
 
 SUPPORTED_ALERT_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h"}
 SUPPORTED_ALERT_SETUPS = {
@@ -624,6 +644,24 @@ backend_alert_last_results: List[Dict[str, Any]] = []
 backend_alert_signal_state: Dict[str, Dict[str, Any]] = {}
 backend_alert_last_alert: Optional[Dict[str, Any]] = None
 
+# === USER-CREATED CHART OBJECT / STUDY ALERTS ===
+# These alerts are deliberately independent of scanner/backend setup alerts.
+# Right-clicking a horizontal line, trendline, or supported study creates a
+# persistent rule here. The background worker resolves moved drawings on every
+# poll, so an alert follows the drawing if the user drags it later.
+CHART_OBJECT_ALERTS_FILE = APP_STATE_DIR / "chart_object_alerts.json"
+CHART_OBJECT_ALERTS_LOCK_FILE = APP_STATE_DIR / "chart_object_alerts.lock"
+CHART_OBJECT_ALERTS_LOCAL_LOCK = threading.RLock()
+CHART_OBJECT_ALERT_POLL_SECONDS = max(10, int(os.getenv("CHART_OBJECT_ALERT_POLL_SECONDS", "15") or "15"))
+CHART_OBJECT_ALERT_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+CHART_OBJECT_ALERT_CONDITIONS = {"touches", "crosses_above", "crosses_below", "closes_above", "closes_below"}
+CHART_OBJECT_ALERT_RECURRENCES = {"once", "once_per_bar"}
+CHART_OBJECT_ALERT_STUDIES = {"vwap", "ema9", "ema20", "ema50"}
+chart_object_alert_task: Optional[asyncio.Task] = None
+chart_object_alert_last_check: Optional[datetime] = None
+chart_object_alert_last_error: Optional[str] = None
+chart_object_alert_last_alert: Optional[Dict[str, Any]] = None
+
 # === DEMAND-ZONE WATCHLIST PUSH ALERTS ===
 # This path is intentionally independent from the manually armed generic alert
 # symbols. The user explicitly wants every Manual Watchlist + Scanner Watchlist
@@ -646,6 +684,491 @@ demand_zone_alert_last_alert: Optional[Dict[str, Any]] = None
 demand_zone_alert_last_symbols: List[str] = []
 demand_zone_alert_last_sources: Dict[str, List[str]] = {}
 demand_zone_alert_last_refresh_signature: str = ""
+
+def _chart_object_alert_phone_configured() -> bool:
+    return bool(
+        os.getenv("PUSHOVER_USER_KEY", "").strip()
+        and os.getenv("PUSHOVER_APP_TOKEN", "").strip()
+    )
+
+
+@contextmanager
+def _locked_chart_object_alerts():
+    with CHART_OBJECT_ALERTS_LOCAL_LOCK:
+        lock_handle = CHART_OBJECT_ALERTS_LOCK_FILE.open("a+")
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            lock_handle.close()
+
+
+def _read_chart_object_alerts_unlocked() -> List[Dict[str, Any]]:
+    if not CHART_OBJECT_ALERTS_FILE.exists():
+        return []
+    try:
+        payload = json.loads(CHART_OBJECT_ALERTS_FILE.read_text(encoding="utf-8"))
+        rows = payload.get("alerts") if isinstance(payload, dict) else payload
+        return [row for row in (rows or []) if isinstance(row, dict)]
+    except Exception as exc:
+        print(f"[chart-object-alert] state load failed: {exc}", flush=True)
+        return []
+
+
+def _write_chart_object_alerts_unlocked(alerts: List[Dict[str, Any]]) -> None:
+    payload = {
+        "alerts": alerts,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    tmp = CHART_OBJECT_ALERTS_FILE.with_name(
+        f"{CHART_OBJECT_ALERTS_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(CHART_OBJECT_ALERTS_FILE)
+
+
+def load_chart_object_alerts() -> List[Dict[str, Any]]:
+    with _locked_chart_object_alerts():
+        return _read_chart_object_alerts_unlocked()
+
+
+def save_chart_object_alerts(alerts: List[Dict[str, Any]]) -> None:
+    with _locked_chart_object_alerts():
+        _write_chart_object_alerts_unlocked(alerts)
+
+
+def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) -> Dict[str, Any]:
+    symbol = "".join(ch for ch in str(payload.symbol or "").upper().strip() if ch.isalpha() or ch == ".")
+    timeframe = str(payload.timeframe or "15m").lower().strip()
+    source_type = str(payload.source_type or "").lower().strip()
+    condition = str(payload.condition or "touches").lower().strip()
+    recurrence = str(payload.recurrence or "once").lower().strip()
+    source_id = str(payload.source_id or "").strip() or None
+    study = str(payload.study or "").lower().strip() or None
+
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if timeframe not in CHART_OBJECT_ALERT_TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
+    if source_type not in {"horizontal", "trendline", "study"}:
+        raise HTTPException(status_code=400, detail="source_type must be horizontal, trendline, or study")
+    if condition not in CHART_OBJECT_ALERT_CONDITIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported condition: {condition}")
+    if recurrence not in CHART_OBJECT_ALERT_RECURRENCES:
+        raise HTTPException(status_code=400, detail=f"Unsupported recurrence: {recurrence}")
+    if source_type in {"horizontal", "trendline"} and not source_id:
+        raise HTTPException(status_code=400, detail="source_id is required for drawing alerts")
+    if source_type == "study" and study not in CHART_OBJECT_ALERT_STUDIES:
+        raise HTTPException(status_code=400, detail=f"Unsupported study: {study}")
+
+    price = None
+    if payload.price is not None:
+        try:
+            price = float(payload.price)
+        except Exception:
+            price = None
+        if price is not None and (price <= 0 or price >= 1_000_000):
+            price = None
+
+    now = datetime.now(timezone.utc).isoformat()
+    alert_id = f"chart_alert_{int(time.time() * 1000)}_{os.getpid()}_{threading.get_ident()}"
+    return {
+        "id": alert_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "source_type": source_type,
+        "source_id": source_id,
+        "source_label": str(payload.source_label or source_type).strip()[:100],
+        "study": study,
+        "price": price,
+        "condition": condition,
+        "recurrence": recurrence,
+        "notify_phone": bool(payload.notify_phone),
+        "active": True,
+        "status": "armed",
+        "created_at": now,
+        "updated_at": now,
+        "last_triggered_at": None,
+        "last_trigger_bar_time": None,
+        "trigger_count": 0,
+        "last_error": None,
+        "resolved_level": price,
+    }
+
+
+def _chart_object_alert_drawings(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for scope in ("shared", timeframe):
+        try:
+            rows = _read_chart_document_cached(symbol, scope, "drawings").get("items") or []
+        except Exception:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            drawing_id = str(row.get("id") or "")
+            if drawing_id:
+                by_id[drawing_id] = row
+    return list(by_id.values())
+
+
+def _current_drawing_for_chart_alert(alert: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    source_id = str(alert.get("source_id") or "")
+    if not source_id:
+        return None
+    for drawing in _chart_object_alert_drawings(str(alert.get("symbol") or ""), str(alert.get("timeframe") or "15m")):
+        if str(drawing.get("id") or "") == source_id:
+            return drawing
+    return None
+
+
+def _drawing_level_at_time(drawing: Dict[str, Any], chart_time_s: int) -> Optional[float]:
+    drawing_type = str(drawing.get("type") or "")
+    if drawing_type == "horizontal":
+        return _safe_price(drawing.get("price")) or None
+    if drawing_type != "trendline":
+        return None
+
+    p1 = drawing.get("p1") if isinstance(drawing.get("p1"), dict) else {}
+    p2 = drawing.get("p2") if isinstance(drawing.get("p2"), dict) else {}
+    try:
+        t1 = float(p1.get("time"))
+        t2 = float(p2.get("time"))
+        price1 = float(p1.get("price"))
+        price2 = float(p2.get("price"))
+    except Exception:
+        return None
+    if not all(value == value for value in (t1, t2, price1, price2)) or price1 <= 0 or price2 <= 0:
+        return None
+    if t1 > 10_000_000_000:
+        t1 /= 1000.0
+    if t2 > 10_000_000_000:
+        t2 /= 1000.0
+    if t1 == t2:
+        return price2
+    start_time = min(t1, t2)
+    end_time = max(t1, t2)
+    style = drawing.get("style") if isinstance(drawing.get("style"), dict) else {}
+    if float(chart_time_s) < start_time:
+        return None
+    if float(chart_time_s) > end_time and not bool(style.get("extendRight", True)):
+        return None
+    return price1 + (price2 - price1) * ((float(chart_time_s) - t1) / (t2 - t1))
+
+
+def _study_levels_for_chart_alert(study: str, bars: List[Dict[str, Any]]) -> tuple[Optional[float], Optional[float]]:
+    if len(bars) < 2:
+        return None, None
+    study = str(study or "").lower().strip()
+
+    if study.startswith("ema"):
+        try:
+            period = int(study[3:])
+        except Exception:
+            return None, None
+        if period <= 0:
+            return None, None
+        multiplier = 2.0 / (period + 1.0)
+        ema: Optional[float] = None
+        values: List[float] = []
+        for bar in bars:
+            close = _safe_price(bar.get("close"))
+            if close <= 0:
+                continue
+            ema = close if ema is None else close * multiplier + ema * (1.0 - multiplier)
+            values.append(ema)
+        if len(values) < 2:
+            return None, None
+        return values[-2], values[-1]
+
+    if study == "vwap":
+        pv = 0.0
+        volume = 0.0
+        values: List[float] = []
+        for bar in bars:
+            high = _safe_price(bar.get("high"))
+            low = _safe_price(bar.get("low"))
+            close = _safe_price(bar.get("close"))
+            try:
+                vol = max(0.0, float(bar.get("volume") or 0.0))
+            except Exception:
+                vol = 0.0
+            if high <= 0 or low <= 0 or close <= 0 or vol <= 0:
+                continue
+            pv += ((high + low + close) / 3.0) * vol
+            volume += vol
+            values.append(pv / volume)
+        if len(values) < 2:
+            return None, None
+        return values[-2], values[-1]
+
+    return None, None
+
+
+def _fetch_chart_object_alert_bars(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+    timeframe = str(timeframe or "15m").lower().strip()
+    if timeframe == "1d":
+        lookback = "2y"
+    elif timeframe == "4h":
+        lookback = "180d"
+    elif timeframe in {"1h", "30m"}:
+        lookback = "60d"
+    else:
+        lookback = "20d"
+
+    bars, _ = fetch_bars_range(symbol, timeframe, lookback=lookback, limit_bars=650, session="extended")
+    return [
+        {
+            "time": bar.time,
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+        }
+        for bar in bars
+    ]
+
+
+def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if len(bars) < 2:
+        return {"triggered": False, "error": "not enough bars"}
+
+    prev = bars[-2]
+    last = bars[-1]
+    prev_close = _safe_price(prev.get("close"))
+    close = _safe_price(last.get("close"))
+    high = _safe_price(last.get("high"))
+    low = _safe_price(last.get("low"))
+    prev_time = _bar_time_seconds(prev)
+    last_time = _bar_time_seconds(last)
+    if min(prev_close, close, high, low) <= 0 or last_time <= 0:
+        return {"triggered": False, "error": "invalid latest bar"}
+
+    source_type = str(alert.get("source_type") or "")
+    prev_level: Optional[float] = None
+    curr_level: Optional[float] = None
+    source_missing = False
+
+    if source_type in {"horizontal", "trendline"}:
+        drawing = _current_drawing_for_chart_alert(alert)
+        if drawing is None:
+            source_missing = True
+        else:
+            prev_level = _drawing_level_at_time(drawing, prev_time)
+            curr_level = _drawing_level_at_time(drawing, last_time)
+    elif source_type == "study":
+        prev_level, curr_level = _study_levels_for_chart_alert(str(alert.get("study") or ""), bars)
+
+    if source_missing:
+        return {"triggered": False, "source_missing": True, "bar_time": last_time}
+    if prev_level is None or curr_level is None or prev_level <= 0 or curr_level <= 0:
+        return {"triggered": False, "error": "alert level unavailable", "bar_time": last_time}
+
+    condition = str(alert.get("condition") or "touches")
+    if condition == "touches":
+        triggered = low <= curr_level <= high
+    elif condition == "crosses_above":
+        triggered = prev_close <= prev_level and close > curr_level
+    elif condition == "crosses_below":
+        triggered = prev_close >= prev_level and close < curr_level
+    elif condition == "closes_above":
+        triggered = close > curr_level
+    elif condition == "closes_below":
+        triggered = close < curr_level
+    else:
+        triggered = False
+
+    return {
+        "triggered": bool(triggered),
+        "bar_time": last_time,
+        "prev_level": prev_level,
+        "level": curr_level,
+        "prev_close": prev_close,
+        "close": close,
+        "high": high,
+        "low": low,
+    }
+
+
+def _chart_object_alert_condition_label(condition: str) -> str:
+    return {
+        "touches": "touched",
+        "crosses_above": "crossed above",
+        "crosses_below": "crossed below",
+        "closes_above": "closed above",
+        "closes_below": "closed below",
+    }.get(condition, condition.replace("_", " "))
+
+
+async def run_chart_object_alert_loop() -> None:
+    global chart_object_alert_last_check, chart_object_alert_last_error, chart_object_alert_last_alert
+    print("[chart-object-alert] started", flush=True)
+
+    while True:
+        try:
+            alerts = load_chart_object_alerts()
+            active = [row for row in alerts if bool(row.get("active", True))]
+            if not active:
+                chart_object_alert_last_check = datetime.now(timezone.utc)
+                chart_object_alert_last_error = None
+                await asyncio.sleep(CHART_OBJECT_ALERT_POLL_SECONDS)
+                continue
+
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for row in active:
+                key = f"{str(row.get('symbol') or '').upper()}::{str(row.get('timeframe') or '15m').lower()}"
+                grouped.setdefault(key, []).append(row)
+
+            changed = False
+            by_id = {str(row.get("id") or ""): row for row in alerts}
+
+            for rows in grouped.values():
+                sample = rows[0]
+                symbol = str(sample.get("symbol") or "").upper()
+                timeframe = str(sample.get("timeframe") or "15m").lower()
+                try:
+                    bars = await asyncio.to_thread(_fetch_chart_object_alert_bars, symbol, timeframe)
+                except Exception as exc:
+                    for row in rows:
+                        target = by_id.get(str(row.get("id") or ""))
+                        if target is not None:
+                            target["last_error"] = str(exc)
+                            target["status"] = "data_error"
+                            target["updated_at"] = datetime.now(timezone.utc).isoformat()
+                            changed = True
+                    continue
+
+                for row in rows:
+                    target = by_id.get(str(row.get("id") or ""))
+                    if target is None or not bool(target.get("active", True)):
+                        continue
+                    result = _evaluate_chart_object_alert(target, bars)
+                    bar_time = int(result.get("bar_time") or 0)
+
+                    if result.get("source_missing"):
+                        target["active"] = False
+                        target["status"] = "source_deleted"
+                        target["last_error"] = "The drawing attached to this alert was deleted."
+                        target["updated_at"] = datetime.now(timezone.utc).isoformat()
+                        changed = True
+                        continue
+
+                    if result.get("error"):
+                        target["status"] = "waiting"
+                        target["last_error"] = str(result.get("error"))
+                        target["updated_at"] = datetime.now(timezone.utc).isoformat()
+                        changed = True
+                        continue
+
+                    target["resolved_level"] = result.get("level")
+                    target["last_error"] = None
+                    target["status"] = "armed"
+
+                    if not bool(result.get("triggered")):
+                        continue
+                    if bar_time and int(target.get("last_trigger_bar_time") or 0) == bar_time:
+                        continue
+
+                    level = float(result.get("level") or 0.0)
+                    close = float(result.get("close") or 0.0)
+                    label = str(target.get("source_label") or target.get("source_type") or "Chart alert")
+                    condition = str(target.get("condition") or "touches")
+                    title = f"{symbol} Chart Alert · {timeframe}"
+                    message = (
+                        f"{symbol} {_chart_object_alert_condition_label(condition)} {label} "
+                        f"at {level:.4f} on {timeframe} | last {close:.4f}"
+                    )
+
+                    if bool(target.get("notify_phone", True)):
+                        try:
+                            await asyncio.to_thread(send_pushover_alert, title, message, 1)
+                        except Exception as exc:
+                            target["status"] = "delivery_error"
+                            target["last_error"] = str(exc)
+                            target["updated_at"] = datetime.now(timezone.utc).isoformat()
+                            changed = True
+                            continue
+
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    target["last_triggered_at"] = now_iso
+                    target["last_trigger_bar_time"] = bar_time
+                    target["trigger_count"] = int(target.get("trigger_count") or 0) + 1
+                    target["status"] = "triggered"
+                    target["updated_at"] = now_iso
+                    if str(target.get("recurrence") or "once") == "once":
+                        target["active"] = False
+                    changed = True
+                    chart_object_alert_last_alert = {
+                        "id": target.get("id"),
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "source_label": label,
+                        "condition": condition,
+                        "level": level,
+                        "close": close,
+                        "sent_at": now_iso,
+                    }
+                    print(
+                        f"[chart-object-alert] sent symbol={symbol} timeframe={timeframe} "
+                        f"condition={condition} level={level:.4f}",
+                        flush=True,
+                    )
+
+            if changed:
+                save_chart_object_alerts(list(by_id.values()))
+            chart_object_alert_last_check = datetime.now(timezone.utc)
+            chart_object_alert_last_error = None
+        except asyncio.CancelledError:
+            print("[chart-object-alert] cancelled", flush=True)
+            raise
+        except Exception as exc:
+            chart_object_alert_last_error = str(exc)
+            print(f"[chart-object-alert] error: {exc}", flush=True)
+            traceback.print_exc()
+
+        await asyncio.sleep(CHART_OBJECT_ALERT_POLL_SECONDS)
+
+
+def start_chart_object_alert_task_if_needed() -> None:
+    global chart_object_alert_task
+    if chart_object_alert_task and not chart_object_alert_task.done():
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+        chart_object_alert_task = loop.create_task(run_chart_object_alert_loop())
+        return
+    except RuntimeError:
+        pass
+
+    loop = BACKGROUND_EVENT_LOOP
+    if loop is not None and loop.is_running():
+        def _start_on_loop() -> None:
+            global chart_object_alert_task
+            if chart_object_alert_task and not chart_object_alert_task.done():
+                return
+            chart_object_alert_task = loop.create_task(run_chart_object_alert_loop())
+        loop.call_soon_threadsafe(_start_on_loop)
+
+
+async def stop_chart_object_alert_task() -> None:
+    global chart_object_alert_task
+    task = chart_object_alert_task
+    chart_object_alert_task = None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
 
 # === BACKGROUND SCANNER CACHE STATE ===
 # Runs scanner in the backend so pages can read cached results without hammering Alpaca.
@@ -3384,6 +3907,7 @@ async def on_startup() -> None:
         except Exception as archive_exc:
             print(f"[startup] daily manual watchlist archive failed: {archive_exc}", flush=True)
         start_backend_alert_task_if_needed()
+        start_chart_object_alert_task_if_needed()
         start_scanner_task_if_needed()
         start_demand_zone_alert_task_if_needed()
         start_alpaca_snapshot_task_if_needed()
@@ -3395,6 +3919,7 @@ async def on_startup() -> None:
 async def on_shutdown() -> None:
     if BACKGROUND_LOCK_HELD:
         await stop_backend_alert_task()
+        await stop_chart_object_alert_task()
         await stop_scanner_task()
         await stop_demand_zone_alert_task()
         await stop_alpaca_snapshot_task()
@@ -3747,6 +4272,16 @@ def health():
             "last_error": backend_alert_last_error,
             "last_alert": backend_alert_last_alert,
         },
+        "chart_object_alerts": {
+            "background_worker_lock_held": BACKGROUND_LOCK_HELD,
+            "running": bool(chart_object_alert_task and not chart_object_alert_task.done()),
+            "active_count": len([row for row in load_chart_object_alerts() if bool(row.get("active", True))]),
+            "phone_configured": _chart_object_alert_phone_configured(),
+            "poll_seconds": CHART_OBJECT_ALERT_POLL_SECONDS,
+            "last_check": chart_object_alert_last_check.isoformat() if chart_object_alert_last_check else None,
+            "last_error": chart_object_alert_last_error,
+            "last_alert": chart_object_alert_last_alert,
+        },
         "demand_zone_watch": {
             "background_worker_lock_held": BACKGROUND_LOCK_HELD,
             "enabled": DEMAND_ZONE_ALERT_ENABLED,
@@ -3862,6 +4397,82 @@ def backend_alerts_toggle_selected_symbol(payload: dict = Body(default={})):
         "symbols": current,
         "count": len(current),
     }
+
+
+@app.get("/chart-alerts")
+def get_chart_object_alerts(symbol: Optional[str] = Query(default=None)):
+    rows = load_chart_object_alerts()
+    if symbol:
+        normalized = "".join(ch for ch in str(symbol).upper().strip() if ch.isalpha() or ch == ".")
+        rows = [row for row in rows if str(row.get("symbol") or "").upper() == normalized]
+    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    return {
+        "alerts": rows,
+        "count": len(rows),
+        "phone_configured": _chart_object_alert_phone_configured(),
+        "poll_seconds": CHART_OBJECT_ALERT_POLL_SECONDS,
+        "last_check": chart_object_alert_last_check.isoformat() if chart_object_alert_last_check else None,
+        "last_error": chart_object_alert_last_error,
+        "last_alert": chart_object_alert_last_alert,
+    }
+
+
+@app.post("/chart-alerts")
+def create_chart_object_alert(payload: ChartObjectAlertCreatePayload):
+    row = _clean_chart_object_alert_payload(payload)
+    with _locked_chart_object_alerts():
+        rows = _read_chart_object_alerts_unlocked()
+        rows.append(row)
+        _write_chart_object_alerts_unlocked(rows)
+    start_chart_object_alert_task_if_needed()
+    return {
+        "ok": True,
+        "alert": row,
+        "phone_configured": _chart_object_alert_phone_configured(),
+    }
+
+
+@app.put("/chart-alerts/{alert_id}")
+def update_chart_object_alert(alert_id: str, payload: ChartObjectAlertUpdatePayload):
+    alert_id = str(alert_id or "").strip()
+    with _locked_chart_object_alerts():
+        rows = _read_chart_object_alerts_unlocked()
+        target = next((row for row in rows if str(row.get("id") or "") == alert_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Chart alert not found")
+        if payload.condition is not None:
+            condition = str(payload.condition).lower().strip()
+            if condition not in CHART_OBJECT_ALERT_CONDITIONS:
+                raise HTTPException(status_code=400, detail=f"Unsupported condition: {condition}")
+            target["condition"] = condition
+        if payload.recurrence is not None:
+            recurrence = str(payload.recurrence).lower().strip()
+            if recurrence not in CHART_OBJECT_ALERT_RECURRENCES:
+                raise HTTPException(status_code=400, detail=f"Unsupported recurrence: {recurrence}")
+            target["recurrence"] = recurrence
+        if payload.notify_phone is not None:
+            target["notify_phone"] = bool(payload.notify_phone)
+        if payload.active is not None:
+            target["active"] = bool(payload.active)
+            target["status"] = "armed" if payload.active else "disabled"
+            if payload.active:
+                target["last_trigger_bar_time"] = None
+        target["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _write_chart_object_alerts_unlocked(rows)
+    start_chart_object_alert_task_if_needed()
+    return {"ok": True, "alert": target, "phone_configured": _chart_object_alert_phone_configured()}
+
+
+@app.delete("/chart-alerts/{alert_id}")
+def delete_chart_object_alert(alert_id: str):
+    alert_id = str(alert_id or "").strip()
+    with _locked_chart_object_alerts():
+        rows = _read_chart_object_alerts_unlocked()
+        next_rows = [row for row in rows if str(row.get("id") or "") != alert_id]
+        if len(next_rows) == len(rows):
+            raise HTTPException(status_code=404, detail="Chart alert not found")
+        _write_chart_object_alerts_unlocked(next_rows)
+    return {"ok": True, "id": alert_id}
 
 
 @app.get("/backend-alerts/status")

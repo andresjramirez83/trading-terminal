@@ -30,6 +30,8 @@ import LeftDrawingBar from "./LeftDrawingBar";
 import RightInfoPanel from "./RightInfoPanel";
 import MobileChartWorkspace from "../mobile/MobileChartWorkspace";
 import { DrawingEngine } from "./DrawingEngine";
+import { ContextMenuManager, type ContextMenuItem } from "./ContextMenuManager";
+import ChartAlertDialog, { type ChartAlertDraft } from "./ChartAlertDialog";
 import { MarketObjectDrawingBridge } from "./analysis/market-objects/MarketObjectDrawingBridge";
 import type { ChartIntelligenceBridge } from "../../trading/intelligence/integration/ChartIntelligenceBridge";
 import { TrendlineTool } from "./interaction/tools/TrendlineTool";
@@ -351,6 +353,8 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const [timeframe, setTimeframe] = useState(
     () => localStorage.getItem(TIMEFRAME_STORAGE_KEY) || initialTimeframe,
   );
+  const symbolRef = useRef(symbol);
+  const timeframeRef = useRef(timeframe);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>("connecting");
   const [crosshairInfo, setCrosshairInfo] = useState<CrosshairInfo | null>(
     null,
@@ -375,6 +379,8 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     useState<MobileChartTradeDestination>("plan");
   const [studyVisibility, setStudyVisibility] =
     useState<StudyVisibility>(loadStudyVisibility);
+  const studyVisibilityRef = useRef<StudyVisibility>(studyVisibility);
+  const [chartAlertDraft, setChartAlertDraft] = useState<ChartAlertDraft | null>(null);
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("cursor");
   const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>(
     () => drawingStyleRef.current,
@@ -853,6 +859,15 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   }, []);
 
   useEffect(() => {
+    studyVisibilityRef.current = studyVisibility;
+  }, [studyVisibility]);
+
+  useEffect(() => {
+    symbolRef.current = symbol;
+    timeframeRef.current = timeframe;
+  }, [symbol, timeframe]);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
@@ -950,6 +965,91 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     drawingEngineRef.current = drawingEngine;
     marketObjectDrawingBridgeRef.current = marketObjectDrawingBridge;
     tradeEngineRef.current = tradeEngine;
+
+    const chartContextMenu = new ContextMenuManager(container);
+    const unsubscribeContextMenu = engine.subscribeContextMenu((point) => {
+      if (drawingToolRef.current !== "cursor" || fxAnalysisToolRef.current !== "none") return;
+
+      const hit = drawingEngine.hitTestAt(point);
+      if (hit) {
+        const drawing = drawingEngine.getDrawings().find((item) => item.id === hit.drawingId);
+        if (!drawing) return;
+
+        point.nativeEvent?.preventDefault();
+        drawingEngine.selectDrawing(drawing.id);
+
+        const items: ContextMenuItem[] = [];
+        if (drawing.type === "horizontal" || drawing.type === "trendline") {
+          items.push({
+            id: "create-alert",
+            label: "🔔 Create Alert",
+            onClick: () => {
+              setChartAlertDraft({
+                symbol: symbolRef.current.trim().toUpperCase(),
+                timeframe: timeframeRef.current,
+                sourceType: drawing.type,
+                sourceId: drawing.id,
+                sourceLabel:
+                  drawing.type === "horizontal"
+                    ? `Horizontal Line $${drawing.price.toFixed(drawing.price < 1 ? 4 : 2)}`
+                    : "Trendline",
+                price: drawing.type === "horizontal" ? drawing.price : point.price,
+              });
+            },
+          });
+        }
+
+        items.push(
+          {
+            id: "duplicate",
+            label: "Duplicate",
+            onClick: () => {
+              drawingEngine.duplicateSelectedDrawing();
+            },
+          },
+          {
+            id: "delete",
+            label: "Delete",
+            danger: true,
+            onClick: () => {
+              drawingEngine.removeSelectedDrawing();
+            },
+          },
+        );
+
+        chartContextMenu.show(
+          point.nativeEvent?.clientX ?? point.x,
+          point.nativeEvent?.clientY ?? point.y,
+          items,
+        );
+        return;
+      }
+
+      const studyHit = engine.hitTestStudyAt(point, studyVisibilityRef.current);
+      if (!studyHit) return;
+
+      point.nativeEvent?.preventDefault();
+      chartContextMenu.show(
+        point.nativeEvent?.clientX ?? point.x,
+        point.nativeEvent?.clientY ?? point.y,
+        [
+          {
+            id: "create-study-alert",
+            label: `🔔 Create Alert on ${studyHit.label}`,
+            onClick: () => {
+              setChartAlertDraft({
+                symbol: symbolRef.current.trim().toUpperCase(),
+                timeframe: timeframeRef.current,
+                sourceType: "study",
+                sourceLabel: studyHit.label,
+                study: studyHit.id,
+                price: studyHit.value,
+              });
+            },
+          },
+        ],
+      );
+    });
 
     const executionService = getSharedExecutionGateway();
     const positionOverlay = new PositionOverlayManager(engine.series.candles, {
@@ -1449,6 +1549,8 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       unsubscribePointerDown();
       unsubscribePointerMove();
       unsubscribePointerUp();
+      unsubscribeContextMenu();
+      chartContextMenu.destroy();
       window.removeEventListener("pointerdown", handleOverlayPointerDown, true);
       window.removeEventListener("pointermove", handleOverlayPointerMove, true);
       window.removeEventListener("pointerup", handleOverlayPointerUp, true);
@@ -2413,6 +2515,11 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         onClearFx={() => engineRef.current?.clearFxAnalysis()}
         onFitFxLevels={() => engineRef.current?.fitFxAnalysisLevels()}
         onClose={() => setSettingsOpen(false)}
+      />
+
+      <ChartAlertDialog
+        draft={chartAlertDraft}
+        onClose={() => setChartAlertDraft(null)}
       />
 
       <div

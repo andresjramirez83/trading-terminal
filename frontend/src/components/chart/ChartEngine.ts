@@ -254,6 +254,13 @@ export type ChartPointerPoint = {
   nativeEvent?: PointerEvent | MouseEvent;
 };
 
+export type ChartStudyHit = {
+  id: "vwap" | "ema9" | "ema20" | "ema50";
+  label: string;
+  value: number;
+  distancePx: number;
+};
+
 function chartTimeToNumber(time: Time): number | null {
   if (typeof time === "number") return time;
 
@@ -930,6 +937,59 @@ export class ChartEngine {
 
   getContainer(): HTMLDivElement {
     return this.container;
+  }
+
+  hitTestStudyAt(
+    point: ChartPointerPoint,
+    visibility: StudyVisibility,
+    tolerancePx = 10,
+  ): ChartStudyHit | null {
+    if (!this.bars.length || !Number.isFinite(point.y)) return null;
+
+    const targetTime = Number(point.time);
+    const findValue = (rows: LineData<Time>[]): number | null => {
+      let best: { delta: number; value: number } | null = null;
+      for (const row of rows) {
+        const rowTime = chartTimeToNumber(row.time);
+        if (rowTime == null || !Number.isFinite(Number(row.value))) continue;
+        const delta = Math.abs(rowTime - targetTime);
+        if (best == null || delta < best.delta) {
+          best = { delta, value: Number(row.value) };
+        }
+      }
+      return best?.value ?? null;
+    };
+
+    const candidates: Array<{
+      id: ChartStudyHit["id"];
+      label: string;
+      enabled: boolean;
+      value: number | null;
+    }> = [
+      { id: "vwap", label: "VWAP", enabled: visibility.vwap, value: findValue(buildVwapBars(this.bars)) },
+      { id: "ema9", label: "EMA 9", enabled: visibility.ema9, value: findValue(buildEmaBars(this.bars, 9)) },
+      { id: "ema20", label: "EMA 20", enabled: visibility.ema20, value: findValue(buildEmaBars(this.bars, 20)) },
+      { id: "ema50", label: "EMA 50", enabled: visibility.ema50, value: findValue(buildEmaBars(this.bars, 50)) },
+    ];
+
+    let best: ChartStudyHit | null = null;
+    for (const candidate of candidates) {
+      if (!candidate.enabled || candidate.value == null || candidate.value <= 0) continue;
+      const y = this.series.candles.priceToCoordinate(candidate.value);
+      if (y == null) continue;
+      const distancePx = Math.abs(Number(point.y) - Number(y));
+      if (distancePx > tolerancePx) continue;
+      if (best == null || distancePx < best.distancePx) {
+        best = {
+          id: candidate.id,
+          label: candidate.label,
+          value: candidate.value,
+          distancePx,
+        };
+      }
+    }
+
+    return best;
   }
 
   private emitCrosshairInfo(info: CrosshairInfo | null): void {

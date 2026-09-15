@@ -744,6 +744,101 @@ export async function sendBackendTestAlert(
   return parseJson(res);
 }
 
+export type ChartAlertSourceType = "horizontal" | "trendline" | "study";
+export type ChartAlertCondition =
+  | "touches"
+  | "crosses_above"
+  | "crosses_below"
+  | "closes_above"
+  | "closes_below";
+export type ChartAlertRecurrence = "once" | "once_per_bar";
+export type ChartAlertStudy = "vwap" | "ema9" | "ema20" | "ema50";
+
+export type ChartObjectAlert = {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  source_type: ChartAlertSourceType;
+  source_id?: string | null;
+  source_label?: string | null;
+  study?: ChartAlertStudy | null;
+  price?: number | null;
+  resolved_level?: number | null;
+  condition: ChartAlertCondition;
+  recurrence: ChartAlertRecurrence;
+  notify_phone: boolean;
+  active: boolean;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  last_triggered_at?: string | null;
+  trigger_count?: number;
+  last_error?: string | null;
+};
+
+export type ChartObjectAlertCreatePayload = {
+  symbol: string;
+  timeframe: string;
+  source_type: ChartAlertSourceType;
+  source_id?: string | null;
+  source_label?: string | null;
+  condition: ChartAlertCondition;
+  recurrence: ChartAlertRecurrence;
+  notify_phone: boolean;
+  price?: number | null;
+  study?: ChartAlertStudy | null;
+};
+
+export type ChartObjectAlertsResponse = {
+  alerts: ChartObjectAlert[];
+  count: number;
+  phone_configured: boolean;
+  poll_seconds?: number;
+  last_check?: string | null;
+  last_error?: string | null;
+  last_alert?: Record<string, any> | null;
+};
+
+export async function fetchChartObjectAlerts(
+  symbol?: string,
+): Promise<ChartObjectAlertsResponse> {
+  const params = new URLSearchParams();
+  if (symbol?.trim()) params.set("symbol", symbol.trim().toUpperCase());
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const res = await fetch(`${API_BASE}/chart-alerts${suffix}`, { cache: "no-store" });
+  return parseJson<ChartObjectAlertsResponse>(res);
+}
+
+export async function createChartObjectAlert(
+  payload: ChartObjectAlertCreatePayload,
+): Promise<{ ok: boolean; alert: ChartObjectAlert; phone_configured: boolean }> {
+  const res = await fetch(`${API_BASE}/chart-alerts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(res);
+}
+
+export async function updateChartObjectAlert(
+  alertId: string,
+  payload: Partial<Pick<ChartObjectAlert, "active" | "condition" | "recurrence" | "notify_phone">>,
+): Promise<{ ok: boolean; alert: ChartObjectAlert; phone_configured: boolean }> {
+  const res = await fetch(`${API_BASE}/chart-alerts/${encodeURIComponent(alertId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(res);
+}
+
+export async function deleteChartObjectAlert(alertId: string): Promise<{ ok: boolean; id: string }> {
+  const res = await fetch(`${API_BASE}/chart-alerts/${encodeURIComponent(alertId)}`, {
+    method: "DELETE",
+  });
+  return parseJson(res);
+}
+
 export type AlpacaMode = "paper" | "live";
 export type AlpacaSide = "buy" | "sell";
 export type AlpacaOrderType = "market" | "limit";
