@@ -58,6 +58,7 @@ const CONDITION_LABELS: Record<ChartAlertCondition, string> = {
   reclaims_above_zone: "Candle reclaims above zone",
 };
 
+const ALERT_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"] as const;
 const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1] as const;
 const FIB_ZONES = FIB_LEVELS.slice(0, -1).map((ratio, index) => ({
   a: ratio,
@@ -96,10 +97,20 @@ function fibZoneOptionLabel(draft: ChartAlertDraft, a: number, b: number): strin
 }
 
 function belongsToDraft(alert: ChartObjectAlert, draft: ChartAlertDraft): boolean {
-  if (alert.symbol !== draft.symbol || alert.timeframe !== draft.timeframe) return false;
+  if (alert.symbol !== draft.symbol) return false;
   if (alert.source_type !== draft.sourceType) return false;
   if (draft.sourceType === "study") return alert.study === draft.study;
   return alert.source_id === draft.sourceId;
+}
+
+function defaultTriggerTimeframe(sourceTimeframe: string): string {
+  return (ALERT_TIMEFRAMES as readonly string[]).includes(sourceTimeframe) ? sourceTimeframe : "5m";
+}
+
+function existingAlertTimeframeLabel(alert: ChartObjectAlert): string {
+  const sourceTimeframe = String(alert.source_timeframe ?? alert.timeframe);
+  if (sourceTimeframe === alert.timeframe) return `${alert.timeframe} trigger`;
+  return `drawn ${sourceTimeframe} → ${alert.timeframe} trigger`;
 }
 
 function nearestZoneIndex(a: number | null | undefined, b: number | null | undefined): number {
@@ -126,6 +137,7 @@ function fibExistingLabel(alert: ChartObjectAlert): string {
 
 export default function ChartAlertDialog({ draft, onClose }: Props) {
   const [condition, setCondition] = useState<ChartAlertCondition>("touches");
+  const [triggerTimeframe, setTriggerTimeframe] = useState("5m");
   const [recurrence, setRecurrence] = useState<ChartAlertRecurrence>("once");
   const [notifyPhone, setNotifyPhone] = useState(true);
   const [fibMode, setFibMode] = useState<ChartAlertFibMode>("zone");
@@ -147,6 +159,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
   useEffect(() => {
     if (!draft) return;
+    setTriggerTimeframe(defaultTriggerTimeframe(draft.timeframe));
     setRecurrence("once");
     setNotifyPhone(true);
     setMessage("");
@@ -167,7 +180,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
   const subtitle = useMemo(() => {
     if (!draft) return "";
     const price = priceText(draft.price);
-    return price ? `${draft.symbol} · ${draft.timeframe} · $${price}` : `${draft.symbol} · ${draft.timeframe}`;
+    return price ? `${draft.symbol} · drawn on ${draft.timeframe} · $${price}` : `${draft.symbol} · drawn on ${draft.timeframe}`;
   }, [draft]);
 
   if (!draft) return null;
@@ -208,7 +221,8 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
       const response = await createChartObjectAlert({
         symbol: draft.symbol,
-        timeframe: draft.timeframe,
+        timeframe: triggerTimeframe,
+        source_timeframe: draft.timeframe,
         source_type: draft.sourceType,
         source_id: draft.sourceId ?? null,
         source_label: sourceLabel,
@@ -226,7 +240,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
       if (notifyPhone && !response.phone_configured) {
         setMessage("Alert saved, but phone push is not configured on the backend.");
       } else {
-        setMessage("Alert created. It will keep working even when this chart is closed.");
+        setMessage(`Alert created on the ${triggerTimeframe} trigger timeframe. It will keep working even when this chart is closed.`);
       }
       await refreshExisting(draft);
     } catch (err) {
@@ -359,8 +373,26 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
           </>
         )}
 
+        <label style={{ display: "block", marginTop: isFib ? 14 : 18, fontSize: 12, color: "#9ca3af" }}>
+          Trigger timeframe
+          <select
+            value={triggerTimeframe}
+            onChange={(event) => setTriggerTimeframe(event.target.value)}
+            style={{ marginTop: 6, width: "100%", borderRadius: 9, border: "1px solid rgba(255,255,255,0.12)", background: "#0f1317", color: "#f3f4f6", padding: "10px 11px" }}
+          >
+            {ALERT_TIMEFRAMES.map((tf) => (
+              <option key={tf} value={tf}>
+                {tf}{tf === draft.timeframe ? " · same as chart" : ""}
+              </option>
+            ))}
+          </select>
+          <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.4, color: "#6b7280" }}>
+            Drawing timeframe: {draft.timeframe}. The alert condition is evaluated using {triggerTimeframe} price candles.
+          </div>
+        </label>
+
         {(!isFib || fibMode !== "reclaim") && (
-          <label style={{ display: "block", marginTop: isFib ? 14 : 18, fontSize: 12, color: "#9ca3af" }}>
+          <label style={{ display: "block", marginTop: 14, fontSize: 12, color: "#9ca3af" }}>
             Condition
             <select
               value={condition}
@@ -376,7 +408,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
         {isFib && fibMode === "reclaim" && (
           <div style={{ marginTop: 14, padding: 10, borderRadius: 9, background: "rgba(250,204,21,0.08)", border: "1px solid rgba(250,204,21,0.16)", color: "#fde68a", fontSize: 12, lineHeight: 1.45 }}>
-            Reclaim alert: price trades into or below the selected Fib zone, then a {draft.timeframe} candle closes back above the zone's upper price boundary.
+            Reclaim alert: price trades into or below the selected Fib zone, then a {triggerTimeframe} candle closes back above the zone's upper price boundary.
           </div>
         )}
 
@@ -421,7 +453,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
                       {fibExistingLabel(alert)}
                     </div>
                     <div style={{ marginTop: 2, fontSize: 10, color: "#6b7280" }}>
-                      {alert.recurrence === "once" ? "Once" : "Once per candle"} · {alert.status ?? (alert.active ? "armed" : "disabled")}
+                      {existingAlertTimeframeLabel(alert)} · {alert.recurrence === "once" ? "Once" : `Once per ${alert.timeframe} candle`} · {alert.status ?? (alert.active ? "armed" : "disabled")}
                     </div>
                   </div>
                   <button type="button" disabled={working} onClick={() => void toggleExisting(alert)} style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 7, background: "transparent", color: "#d1d5db", padding: "6px 8px", fontSize: 11, cursor: "pointer" }}>

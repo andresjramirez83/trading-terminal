@@ -763,6 +763,7 @@ export type ChartObjectAlert = {
   id: string;
   symbol: string;
   timeframe: string;
+  source_timeframe?: string | null;
   source_type: ChartAlertSourceType;
   source_id?: string | null;
   source_label?: string | null;
@@ -790,6 +791,7 @@ export type ChartObjectAlert = {
 export type ChartObjectAlertCreatePayload = {
   symbol: string;
   timeframe: string;
+  source_timeframe?: string | null;
   source_type: ChartAlertSourceType;
   source_id?: string | null;
   source_label?: string | null;

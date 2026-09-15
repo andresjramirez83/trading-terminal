@@ -518,6 +518,7 @@ class InstantChartAlertPayload(BaseModel):
 class ChartObjectAlertCreatePayload(BaseModel):
     symbol: str
     timeframe: str = "15m"
+    source_timeframe: Optional[str] = None
     source_type: str
     source_id: Optional[str] = None
     source_label: Optional[str] = None
@@ -757,6 +758,7 @@ def save_chart_object_alerts(alerts: List[Dict[str, Any]]) -> None:
 def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) -> Dict[str, Any]:
     symbol = "".join(ch for ch in str(payload.symbol or "").upper().strip() if ch.isalpha() or ch == ".")
     timeframe = str(payload.timeframe or "15m").lower().strip()
+    source_timeframe = str(payload.source_timeframe or timeframe).lower().strip() or timeframe
     source_type = str(payload.source_type or "").lower().strip()
     condition = str(payload.condition or "touches").lower().strip()
     recurrence = str(payload.recurrence or "once").lower().strip()
@@ -829,6 +831,7 @@ def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) ->
         "id": alert_id,
         "symbol": symbol,
         "timeframe": timeframe,
+        "source_timeframe": source_timeframe,
         "source_type": source_type,
         "source_id": source_id,
         "source_label": str(payload.source_label or source_type).strip()[:100],
@@ -875,7 +878,8 @@ def _current_drawing_for_chart_alert(alert: Dict[str, Any]) -> Optional[Dict[str
     source_id = str(alert.get("source_id") or "")
     if not source_id:
         return None
-    for drawing in _chart_object_alert_drawings(str(alert.get("symbol") or ""), str(alert.get("timeframe") or "15m")):
+    source_timeframe = str(alert.get("source_timeframe") or alert.get("timeframe") or "15m")
+    for drawing in _chart_object_alert_drawings(str(alert.get("symbol") or ""), source_timeframe):
         if str(drawing.get("id") or "") == source_id:
             return drawing
     return None
@@ -1247,18 +1251,24 @@ async def run_chart_object_alert_loop() -> None:
                     close = float(result.get("close") or 0.0)
                     label = str(target.get("source_label") or target.get("source_type") or "Chart alert")
                     condition = str(target.get("condition") or "touches")
+                    source_timeframe = str(target.get("source_timeframe") or timeframe)
                     title = f"{symbol} Chart Alert · {timeframe}"
+                    timeframe_context = (
+                        f"{timeframe} trigger (drawn {source_timeframe})"
+                        if source_timeframe != timeframe
+                        else timeframe
+                    )
                     zone_low = result.get("zone_low")
                     zone_high = result.get("zone_high")
                     if zone_low is not None and zone_high is not None:
                         message = (
                             f"{symbol} {_chart_object_alert_condition_label(condition)} {label} "
-                            f"${float(zone_low):.4f}-${float(zone_high):.4f} on {timeframe} | last {close:.4f}"
+                            f"${float(zone_low):.4f}-${float(zone_high):.4f} on {timeframe_context} | last {close:.4f}"
                         )
                     else:
                         message = (
                             f"{symbol} {_chart_object_alert_condition_label(condition)} {label} "
-                            f"at {level:.4f} on {timeframe} | last {close:.4f}"
+                            f"at {level:.4f} on {timeframe_context} | last {close:.4f}"
                         )
 
                     if bool(target.get("notify_phone", True)):
@@ -1284,6 +1294,7 @@ async def run_chart_object_alert_loop() -> None:
                         "id": target.get("id"),
                         "symbol": symbol,
                         "timeframe": timeframe,
+                        "source_timeframe": source_timeframe,
                         "source_label": label,
                         "condition": condition,
                         "level": level,
