@@ -5,6 +5,7 @@ import {
   fetchChartObjectAlerts,
   updateChartObjectAlert,
   type ChartAlertCondition,
+  type ChartAlertFibMode,
   type ChartAlertRecurrence,
   type ChartAlertSourceType,
   type ChartAlertStudy,
@@ -19,6 +20,11 @@ export type ChartAlertDraft = {
   sourceLabel: string;
   price?: number | null;
   study?: ChartAlertStudy | null;
+  fibStartPrice?: number | null;
+  fibEndPrice?: number | null;
+  fibDefaultLevel?: number | null;
+  fibDefaultZoneA?: number | null;
+  fibDefaultZoneB?: number | null;
 };
 
 type Props = {
@@ -26,7 +32,7 @@ type Props = {
   onClose: () => void;
 };
 
-const CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string }> = [
+const LINE_CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string }> = [
   { value: "touches", label: "Price touches" },
   { value: "crosses_above", label: "Price crosses above" },
   { value: "crosses_below", label: "Price crosses below" },
@@ -34,13 +40,59 @@ const CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string }> = 
   { value: "closes_below", label: "Candle closes below" },
 ];
 
-const CONDITION_LABELS = Object.fromEntries(
-  CONDITION_OPTIONS.map((option) => [option.value, option.label]),
-) as Record<ChartAlertCondition, string>;
+const ZONE_CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string }> = [
+  { value: "enters_zone", label: "Price enters / touches zone" },
+  { value: "closes_inside_zone", label: "Candle closes inside zone" },
+  { value: "exits_zone", label: "Price closes outside after being inside" },
+];
+
+const CONDITION_LABELS: Record<ChartAlertCondition, string> = {
+  touches: "Price touches",
+  crosses_above: "Price crosses above",
+  crosses_below: "Price crosses below",
+  closes_above: "Candle closes above",
+  closes_below: "Candle closes below",
+  enters_zone: "Price enters zone",
+  exits_zone: "Price exits zone",
+  closes_inside_zone: "Candle closes inside zone",
+  reclaims_above_zone: "Candle reclaims above zone",
+};
+
+const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1] as const;
+const FIB_ZONES = FIB_LEVELS.slice(0, -1).map((ratio, index) => ({
+  a: ratio,
+  b: FIB_LEVELS[index + 1],
+}));
+
+function ratioText(value: number): string {
+  if (value === 0 || value === 1) return value.toFixed(0);
+  return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
 
 function priceText(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "";
   return value < 1 ? value.toFixed(4) : value.toFixed(2);
+}
+
+function fibPrice(draft: ChartAlertDraft, ratio: number): number | null {
+  const start = Number(draft.fibStartPrice);
+  const end = Number(draft.fibEndPrice);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return end - (end - start) * ratio;
+}
+
+function fibLevelOptionLabel(draft: ChartAlertDraft, ratio: number): string {
+  const price = fibPrice(draft, ratio);
+  return price == null ? ratioText(ratio) : `${ratioText(ratio)} · $${priceText(price)}`;
+}
+
+function fibZoneOptionLabel(draft: ChartAlertDraft, a: number, b: number): string {
+  const pa = fibPrice(draft, a);
+  const pb = fibPrice(draft, b);
+  if (pa == null || pb == null) return `${ratioText(a)}–${ratioText(b)}`;
+  const low = Math.min(pa, pb);
+  const high = Math.max(pa, pb);
+  return `${ratioText(a)}–${ratioText(b)} · $${priceText(low)}–$${priceText(high)}`;
 }
 
 function belongsToDraft(alert: ChartObjectAlert, draft: ChartAlertDraft): boolean {
@@ -50,10 +102,35 @@ function belongsToDraft(alert: ChartObjectAlert, draft: ChartAlertDraft): boolea
   return alert.source_id === draft.sourceId;
 }
 
+function nearestZoneIndex(a: number | null | undefined, b: number | null | undefined): number {
+  if (a == null || b == null) return 3; // 0.5–0.618
+  const found = FIB_ZONES.findIndex(
+    (zone) => Math.abs(zone.a - a) < 1e-6 && Math.abs(zone.b - b) < 1e-6,
+  );
+  return found >= 0 ? found : 3;
+}
+
+function fibExistingLabel(alert: ChartObjectAlert): string {
+  if (alert.source_type !== "fibonacci") return CONDITION_LABELS[alert.condition] ?? alert.condition;
+  const mode = alert.fib_mode ?? "level";
+  if (mode === "level") {
+    const ratio = Number(alert.fib_level_ratio ?? 0.5);
+    return `Fib ${ratioText(ratio)} · ${CONDITION_LABELS[alert.condition] ?? alert.condition}`;
+  }
+  const a = Number(alert.fib_zone_ratio_a ?? 0.5);
+  const b = Number(alert.fib_zone_ratio_b ?? 0.618);
+  const zone = `${ratioText(a)}–${ratioText(b)}`;
+  if (mode === "reclaim") return `Fib ${zone} · Reclaim above zone`;
+  return `Fib ${zone} · ${CONDITION_LABELS[alert.condition] ?? alert.condition}`;
+}
+
 export default function ChartAlertDialog({ draft, onClose }: Props) {
   const [condition, setCondition] = useState<ChartAlertCondition>("touches");
   const [recurrence, setRecurrence] = useState<ChartAlertRecurrence>("once");
   const [notifyPhone, setNotifyPhone] = useState(true);
+  const [fibMode, setFibMode] = useState<ChartAlertFibMode>("zone");
+  const [fibLevel, setFibLevel] = useState(0.618);
+  const [fibZoneIndex, setFibZoneIndex] = useState(3);
   const [working, setWorking] = useState(false);
   const [existing, setExisting] = useState<ChartObjectAlert[]>([]);
   const [message, setMessage] = useState("");
@@ -70,11 +147,20 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
   useEffect(() => {
     if (!draft) return;
-    setCondition(draft.sourceType === "study" ? "crosses_above" : "touches");
     setRecurrence("once");
     setNotifyPhone(true);
     setMessage("");
     setError("");
+    if (draft.sourceType === "study") {
+      setCondition("crosses_above");
+    } else if (draft.sourceType === "fibonacci") {
+      setFibMode("zone");
+      setFibLevel(Number(draft.fibDefaultLevel ?? 0.618));
+      setFibZoneIndex(nearestZoneIndex(draft.fibDefaultZoneA, draft.fibDefaultZoneB));
+      setCondition("enters_zone");
+    } else {
+      setCondition("touches");
+    }
     void refreshExisting(draft);
   }, [draft]);
 
@@ -86,20 +172,53 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
   if (!draft) return null;
 
+  const isFib = draft.sourceType === "fibonacci";
+  const activeZone = FIB_ZONES[Math.min(Math.max(fibZoneIndex, 0), FIB_ZONES.length - 1)];
+  const conditionOptions = isFib && fibMode === "zone" ? ZONE_CONDITION_OPTIONS : LINE_CONDITION_OPTIONS;
+
+  const setNextFibMode = (mode: ChartAlertFibMode) => {
+    setFibMode(mode);
+    if (mode === "level") setCondition("touches");
+    else if (mode === "zone") setCondition("enters_zone");
+    else setCondition("reclaims_above_zone");
+  };
+
   const save = async () => {
     setWorking(true);
     setMessage("");
     setError("");
     try {
+      let sourceLabel = draft.sourceLabel;
+      let nextCondition = condition;
+      let fibLevelRatio: number | null = null;
+      let fibZoneRatioA: number | null = null;
+      let fibZoneRatioB: number | null = null;
+
+      if (isFib) {
+        if (fibMode === "level") {
+          fibLevelRatio = fibLevel;
+          sourceLabel = `Fib ${ratioText(fibLevel)}`;
+        } else {
+          fibZoneRatioA = activeZone.a;
+          fibZoneRatioB = activeZone.b;
+          sourceLabel = `Fib ${ratioText(activeZone.a)}–${ratioText(activeZone.b)} Zone`;
+          if (fibMode === "reclaim") nextCondition = "reclaims_above_zone";
+        }
+      }
+
       const response = await createChartObjectAlert({
         symbol: draft.symbol,
         timeframe: draft.timeframe,
         source_type: draft.sourceType,
         source_id: draft.sourceId ?? null,
-        source_label: draft.sourceLabel,
-        price: draft.price ?? null,
+        source_label: sourceLabel,
+        price: isFib ? null : (draft.price ?? null),
         study: draft.study ?? null,
-        condition,
+        fib_mode: isFib ? fibMode : null,
+        fib_level_ratio: fibLevelRatio,
+        fib_zone_ratio_a: fibZoneRatioA,
+        fib_zone_ratio_b: fibZoneRatioB,
+        condition: nextCondition,
         recurrence,
         notify_phone: notifyPhone,
       });
@@ -165,8 +284,8 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
     >
       <div
         style={{
-          width: "min(440px, calc(100vw - 24px))",
-          maxHeight: "min(720px, calc(100vh - 24px))",
+          width: "min(460px, calc(100vw - 24px))",
+          maxHeight: "min(760px, calc(100vh - 24px))",
           overflowY: "auto",
           borderRadius: 14,
           border: "1px solid rgba(255,255,255,0.13)",
@@ -180,7 +299,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
           <div>
             <div style={{ fontSize: 12, color: "#7dd3fc", fontWeight: 700, letterSpacing: 0.5 }}>
-              CREATE ALERT
+              {isFib ? "CREATE FIB ALERT" : "CREATE ALERT"}
             </div>
             <div style={{ marginTop: 4, fontSize: 18, fontWeight: 700 }}>{draft.sourceLabel}</div>
             <div style={{ marginTop: 3, fontSize: 12, color: "#9ca3af" }}>{subtitle}</div>
@@ -195,18 +314,71 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
           </button>
         </div>
 
-        <label style={{ display: "block", marginTop: 18, fontSize: 12, color: "#9ca3af" }}>
-          Condition
-          <select
-            value={condition}
-            onChange={(event) => setCondition(event.target.value as ChartAlertCondition)}
-            style={{ marginTop: 6, width: "100%", borderRadius: 9, border: "1px solid rgba(255,255,255,0.12)", background: "#0f1317", color: "#f3f4f6", padding: "10px 11px" }}
-          >
-            {CONDITION_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
+        {isFib && (
+          <>
+            <label style={{ display: "block", marginTop: 18, fontSize: 12, color: "#9ca3af" }}>
+              Fib alert type
+              <select
+                value={fibMode}
+                onChange={(event) => setNextFibMode(event.target.value as ChartAlertFibMode)}
+                style={{ marginTop: 6, width: "100%", borderRadius: 9, border: "1px solid rgba(255,255,255,0.12)", background: "#0f1317", color: "#f3f4f6", padding: "10px 11px" }}
+              >
+                <option value="level">Level</option>
+                <option value="zone">Zone</option>
+                <option value="reclaim">Zone reclaim</option>
+              </select>
+            </label>
+
+            {fibMode === "level" ? (
+              <label style={{ display: "block", marginTop: 14, fontSize: 12, color: "#9ca3af" }}>
+                Fib level
+                <select
+                  value={String(fibLevel)}
+                  onChange={(event) => setFibLevel(Number(event.target.value))}
+                  style={{ marginTop: 6, width: "100%", borderRadius: 9, border: "1px solid rgba(255,255,255,0.12)", background: "#0f1317", color: "#f3f4f6", padding: "10px 11px" }}
+                >
+                  {FIB_LEVELS.map((ratio) => (
+                    <option key={ratio} value={ratio}>{fibLevelOptionLabel(draft, ratio)}</option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <label style={{ display: "block", marginTop: 14, fontSize: 12, color: "#9ca3af" }}>
+                Fib zone
+                <select
+                  value={String(fibZoneIndex)}
+                  onChange={(event) => setFibZoneIndex(Number(event.target.value))}
+                  style={{ marginTop: 6, width: "100%", borderRadius: 9, border: "1px solid rgba(255,255,255,0.12)", background: "#0f1317", color: "#f3f4f6", padding: "10px 11px" }}
+                >
+                  {FIB_ZONES.map((zone, index) => (
+                    <option key={`${zone.a}-${zone.b}`} value={index}>{fibZoneOptionLabel(draft, zone.a, zone.b)}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </>
+        )}
+
+        {(!isFib || fibMode !== "reclaim") && (
+          <label style={{ display: "block", marginTop: isFib ? 14 : 18, fontSize: 12, color: "#9ca3af" }}>
+            Condition
+            <select
+              value={condition}
+              onChange={(event) => setCondition(event.target.value as ChartAlertCondition)}
+              style={{ marginTop: 6, width: "100%", borderRadius: 9, border: "1px solid rgba(255,255,255,0.12)", background: "#0f1317", color: "#f3f4f6", padding: "10px 11px" }}
+            >
+              {conditionOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {isFib && fibMode === "reclaim" && (
+          <div style={{ marginTop: 14, padding: 10, borderRadius: 9, background: "rgba(250,204,21,0.08)", border: "1px solid rgba(250,204,21,0.16)", color: "#fde68a", fontSize: 12, lineHeight: 1.45 }}>
+            Reclaim alert: price trades into or below the selected Fib zone, then a {draft.timeframe} candle closes back above the zone's upper price boundary.
+          </div>
+        )}
 
         <label style={{ display: "block", marginTop: 14, fontSize: 12, color: "#9ca3af" }}>
           Trigger
@@ -227,7 +399,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
         {draft.sourceType !== "study" && (
           <div style={{ marginTop: 12, fontSize: 11, lineHeight: 1.45, color: "#6b7280" }}>
-            This alert stays attached to the drawing. If you move the line later, the alert follows it. Deleting the drawing disables the alert.
+            This alert stays attached to the drawing. If you move {isFib ? "either Fib anchor" : "the line"} later, the alert follows it and recalculates automatically. Deleting the drawing disables the alert.
           </div>
         )}
 
@@ -246,7 +418,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
                 <div key={alert.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: 9, borderRadius: 9, background: "#101419", border: "1px solid rgba(255,255,255,0.07)" }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div style={{ fontSize: 12, color: alert.active ? "#86efac" : "#9ca3af", fontWeight: 650 }}>
-                      {CONDITION_LABELS[alert.condition] ?? alert.condition}
+                      {fibExistingLabel(alert)}
                     </div>
                     <div style={{ marginTop: 2, fontSize: 10, color: "#6b7280" }}>
                       {alert.recurrence === "once" ? "Once" : "Once per candle"} · {alert.status ?? (alert.active ? "armed" : "disabled")}

@@ -526,6 +526,10 @@ class ChartObjectAlertCreatePayload(BaseModel):
     notify_phone: bool = True
     price: Optional[float] = None
     study: Optional[str] = None
+    fib_mode: Optional[str] = None
+    fib_level_ratio: Optional[float] = None
+    fib_zone_ratio_a: Optional[float] = None
+    fib_zone_ratio_b: Optional[float] = None
 
 
 class ChartObjectAlertUpdatePayload(BaseModel):
@@ -646,17 +650,24 @@ backend_alert_last_alert: Optional[Dict[str, Any]] = None
 
 # === USER-CREATED CHART OBJECT / STUDY ALERTS ===
 # These alerts are deliberately independent of scanner/backend setup alerts.
-# Right-clicking a horizontal line, trendline, or supported study creates a
-# persistent rule here. The background worker resolves moved drawings on every
-# poll, so an alert follows the drawing if the user drags it later.
+# Right-clicking a horizontal line, trendline, Fibonacci retracement, or
+# supported study creates a persistent rule here. The background worker resolves
+# moved drawings on every poll, so an alert follows the drawing if the user drags
+# it later. Fibonacci level/zone prices are recalculated from the saved anchors.
 CHART_OBJECT_ALERTS_FILE = APP_STATE_DIR / "chart_object_alerts.json"
 CHART_OBJECT_ALERTS_LOCK_FILE = APP_STATE_DIR / "chart_object_alerts.lock"
 CHART_OBJECT_ALERTS_LOCAL_LOCK = threading.RLock()
 CHART_OBJECT_ALERT_POLL_SECONDS = max(10, int(os.getenv("CHART_OBJECT_ALERT_POLL_SECONDS", "15") or "15"))
 CHART_OBJECT_ALERT_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
-CHART_OBJECT_ALERT_CONDITIONS = {"touches", "crosses_above", "crosses_below", "closes_above", "closes_below"}
+CHART_OBJECT_ALERT_CONDITIONS = {
+    "touches", "crosses_above", "crosses_below", "closes_above", "closes_below",
+    "enters_zone", "exits_zone", "closes_inside_zone", "reclaims_above_zone",
+}
 CHART_OBJECT_ALERT_RECURRENCES = {"once", "once_per_bar"}
 CHART_OBJECT_ALERT_STUDIES = {"vwap", "ema9", "ema20", "ema50"}
+CHART_OBJECT_ALERT_FIB_MODES = {"level", "zone", "reclaim"}
+CHART_OBJECT_ALERT_FIB_LEVEL_CONDITIONS = {"touches", "crosses_above", "crosses_below", "closes_above", "closes_below"}
+CHART_OBJECT_ALERT_FIB_ZONE_CONDITIONS = {"enters_zone", "exits_zone", "closes_inside_zone"}
 chart_object_alert_task: Optional[asyncio.Task] = None
 chart_object_alert_last_check: Optional[datetime] = None
 chart_object_alert_last_error: Optional[str] = None
@@ -751,21 +762,57 @@ def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) ->
     recurrence = str(payload.recurrence or "once").lower().strip()
     source_id = str(payload.source_id or "").strip() or None
     study = str(payload.study or "").lower().strip() or None
+    fib_mode = str(payload.fib_mode or "").lower().strip() or None
 
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
     if timeframe not in CHART_OBJECT_ALERT_TIMEFRAMES:
         raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
-    if source_type not in {"horizontal", "trendline", "study"}:
-        raise HTTPException(status_code=400, detail="source_type must be horizontal, trendline, or study")
+    if source_type not in {"horizontal", "trendline", "fibonacci", "study"}:
+        raise HTTPException(status_code=400, detail="source_type must be horizontal, trendline, fibonacci, or study")
     if condition not in CHART_OBJECT_ALERT_CONDITIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported condition: {condition}")
     if recurrence not in CHART_OBJECT_ALERT_RECURRENCES:
         raise HTTPException(status_code=400, detail=f"Unsupported recurrence: {recurrence}")
-    if source_type in {"horizontal", "trendline"} and not source_id:
+    if source_type in {"horizontal", "trendline", "fibonacci"} and not source_id:
         raise HTTPException(status_code=400, detail="source_id is required for drawing alerts")
     if source_type == "study" and study not in CHART_OBJECT_ALERT_STUDIES:
         raise HTTPException(status_code=400, detail=f"Unsupported study: {study}")
+
+    fib_level_ratio = None
+    fib_zone_ratio_a = None
+    fib_zone_ratio_b = None
+    if source_type == "fibonacci":
+        if fib_mode not in CHART_OBJECT_ALERT_FIB_MODES:
+            raise HTTPException(status_code=400, detail=f"Unsupported Fibonacci alert mode: {fib_mode}")
+        try:
+            if payload.fib_level_ratio is not None:
+                fib_level_ratio = float(payload.fib_level_ratio)
+            if payload.fib_zone_ratio_a is not None:
+                fib_zone_ratio_a = float(payload.fib_zone_ratio_a)
+            if payload.fib_zone_ratio_b is not None:
+                fib_zone_ratio_b = float(payload.fib_zone_ratio_b)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid Fibonacci ratio")
+
+        if fib_mode == "level":
+            if fib_level_ratio is None or not (0.0 <= fib_level_ratio <= 1.0):
+                raise HTTPException(status_code=400, detail="fib_level_ratio must be between 0 and 1")
+            if condition not in CHART_OBJECT_ALERT_FIB_LEVEL_CONDITIONS:
+                raise HTTPException(status_code=400, detail=f"Unsupported Fibonacci level condition: {condition}")
+        else:
+            if (
+                fib_zone_ratio_a is None
+                or fib_zone_ratio_b is None
+                or not (0.0 <= fib_zone_ratio_a <= 1.0)
+                or not (0.0 <= fib_zone_ratio_b <= 1.0)
+                or abs(fib_zone_ratio_a - fib_zone_ratio_b) < 1e-9
+            ):
+                raise HTTPException(status_code=400, detail="Fibonacci zone requires two different ratios between 0 and 1")
+            if fib_mode == "zone" and condition not in CHART_OBJECT_ALERT_FIB_ZONE_CONDITIONS:
+                raise HTTPException(status_code=400, detail=f"Unsupported Fibonacci zone condition: {condition}")
+            if fib_mode == "reclaim" and condition != "reclaims_above_zone":
+                raise HTTPException(status_code=400, detail="Fibonacci reclaim alerts require reclaims_above_zone")
 
     price = None
     if payload.price is not None:
@@ -787,6 +834,10 @@ def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) ->
         "source_label": str(payload.source_label or source_type).strip()[:100],
         "study": study,
         "price": price,
+        "fib_mode": fib_mode,
+        "fib_level_ratio": fib_level_ratio,
+        "fib_zone_ratio_a": fib_zone_ratio_a,
+        "fib_zone_ratio_b": fib_zone_ratio_b,
         "condition": condition,
         "recurrence": recurrence,
         "notify_phone": bool(payload.notify_phone),
@@ -799,6 +850,8 @@ def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) ->
         "trigger_count": 0,
         "last_error": None,
         "resolved_level": price,
+        "resolved_zone_low": None,
+        "resolved_zone_high": None,
     }
 
 
@@ -860,6 +913,36 @@ def _drawing_level_at_time(drawing: Dict[str, Any], chart_time_s: int) -> Option
     if float(chart_time_s) > end_time and not bool(style.get("extendRight", True)):
         return None
     return price1 + (price2 - price1) * ((float(chart_time_s) - t1) / (t2 - t1))
+
+
+def _fibonacci_level_price(drawing: Dict[str, Any], ratio: float) -> Optional[float]:
+    if str(drawing.get("type") or "") != "fibonacci":
+        return None
+    p1 = drawing.get("p1") if isinstance(drawing.get("p1"), dict) else {}
+    p2 = drawing.get("p2") if isinstance(drawing.get("p2"), dict) else {}
+    try:
+        start_price = float(p1.get("price"))
+        end_price = float(p2.get("price"))
+        ratio = float(ratio)
+    except Exception:
+        return None
+    if start_price <= 0 or end_price <= 0 or not (0.0 <= ratio <= 1.0):
+        return None
+    # Match DrawingRenderer: ratio 0 is p2 and ratio 1 is p1.
+    price = end_price - (end_price - start_price) * ratio
+    return price if price > 0 and price == price else None
+
+
+def _fibonacci_zone_prices(
+    drawing: Dict[str, Any],
+    ratio_a: float,
+    ratio_b: float,
+) -> tuple[Optional[float], Optional[float]]:
+    price_a = _fibonacci_level_price(drawing, ratio_a)
+    price_b = _fibonacci_level_price(drawing, ratio_b)
+    if price_a is None or price_b is None:
+        return None, None
+    return min(price_a, price_b), max(price_a, price_b)
 
 
 def _study_levels_for_chart_alert(study: str, bars: List[Dict[str, Any]]) -> tuple[Optional[float], Optional[float]]:
@@ -943,23 +1026,48 @@ def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any
     prev = bars[-2]
     last = bars[-1]
     prev_close = _safe_price(prev.get("close"))
+    prev_high = _safe_price(prev.get("high"))
+    prev_low = _safe_price(prev.get("low"))
     close = _safe_price(last.get("close"))
     high = _safe_price(last.get("high"))
     low = _safe_price(last.get("low"))
     prev_time = _bar_time_seconds(prev)
     last_time = _bar_time_seconds(last)
-    if min(prev_close, close, high, low) <= 0 or last_time <= 0:
+    if min(prev_close, prev_high, prev_low, close, high, low) <= 0 or last_time <= 0:
         return {"triggered": False, "error": "invalid latest bar"}
 
     source_type = str(alert.get("source_type") or "")
     prev_level: Optional[float] = None
     curr_level: Optional[float] = None
+    zone_low: Optional[float] = None
+    zone_high: Optional[float] = None
     source_missing = False
 
-    if source_type in {"horizontal", "trendline"}:
+    if source_type in {"horizontal", "trendline", "fibonacci"}:
         drawing = _current_drawing_for_chart_alert(alert)
         if drawing is None:
             source_missing = True
+        elif source_type == "fibonacci":
+            fib_mode = str(alert.get("fib_mode") or "level").lower().strip()
+            if fib_mode == "level":
+                ratio = alert.get("fib_level_ratio")
+                try:
+                    ratio_value = float(ratio)
+                except Exception:
+                    ratio_value = -1.0
+                curr_level = _fibonacci_level_price(drawing, ratio_value)
+                prev_level = curr_level
+            else:
+                try:
+                    ratio_a = float(alert.get("fib_zone_ratio_a"))
+                    ratio_b = float(alert.get("fib_zone_ratio_b"))
+                except Exception:
+                    ratio_a = -1.0
+                    ratio_b = -1.0
+                zone_low, zone_high = _fibonacci_zone_prices(drawing, ratio_a, ratio_b)
+                if zone_low is not None and zone_high is not None:
+                    curr_level = zone_high
+                    prev_level = zone_high
         else:
             prev_level = _drawing_level_at_time(drawing, prev_time)
             curr_level = _drawing_level_at_time(drawing, last_time)
@@ -968,10 +1076,51 @@ def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any
 
     if source_missing:
         return {"triggered": False, "source_missing": True, "bar_time": last_time}
+
+    condition = str(alert.get("condition") or "touches")
+    zone_condition = condition in {"enters_zone", "exits_zone", "closes_inside_zone", "reclaims_above_zone"}
+
+    if zone_condition:
+        if zone_low is None or zone_high is None or zone_low <= 0 or zone_high <= 0:
+            return {"triggered": False, "error": "Fibonacci zone unavailable", "bar_time": last_time}
+
+        prev_overlaps = prev_low <= zone_high and prev_high >= zone_low
+        curr_overlaps = low <= zone_high and high >= zone_low
+        prev_inside = zone_low <= prev_close <= zone_high
+        curr_inside = zone_low <= close <= zone_high
+
+        if condition == "enters_zone":
+            triggered = (not prev_overlaps) and curr_overlaps
+        elif condition == "exits_zone":
+            triggered = prev_inside and not curr_inside
+        elif condition == "closes_inside_zone":
+            triggered = curr_inside
+        elif condition == "reclaims_above_zone":
+            # Bullish reclaim: either this candle trades into the zone and closes
+            # back above it, or price was inside/below the zone on the prior bar
+            # and the current candle closes back above the upper boundary.
+            same_bar_reclaim = curr_overlaps and close > zone_high
+            later_reclaim = prev_close <= zone_high and close > zone_high
+            triggered = same_bar_reclaim or later_reclaim
+        else:
+            triggered = False
+
+        return {
+            "triggered": bool(triggered),
+            "bar_time": last_time,
+            "prev_level": zone_high,
+            "level": zone_high,
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "prev_close": prev_close,
+            "close": close,
+            "high": high,
+            "low": low,
+        }
+
     if prev_level is None or curr_level is None or prev_level <= 0 or curr_level <= 0:
         return {"triggered": False, "error": "alert level unavailable", "bar_time": last_time}
 
-    condition = str(alert.get("condition") or "touches")
     if condition == "touches":
         triggered = low <= curr_level <= high
     elif condition == "crosses_above":
@@ -990,6 +1139,8 @@ def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any
         "bar_time": last_time,
         "prev_level": prev_level,
         "level": curr_level,
+        "zone_low": None,
+        "zone_high": None,
         "prev_close": prev_close,
         "close": close,
         "high": high,
@@ -1004,6 +1155,10 @@ def _chart_object_alert_condition_label(condition: str) -> str:
         "crosses_below": "crossed below",
         "closes_above": "closed above",
         "closes_below": "closed below",
+        "enters_zone": "entered",
+        "exits_zone": "exited",
+        "closes_inside_zone": "closed inside",
+        "reclaims_above_zone": "reclaimed above",
     }.get(condition, condition.replace("_", " "))
 
 
@@ -1067,7 +1222,19 @@ async def run_chart_object_alert_loop() -> None:
                         changed = True
                         continue
 
-                    target["resolved_level"] = result.get("level")
+                    resolved_level = result.get("level")
+                    resolved_zone_low = result.get("zone_low")
+                    resolved_zone_high = result.get("zone_high")
+                    if (
+                        target.get("resolved_level") != resolved_level
+                        or target.get("resolved_zone_low") != resolved_zone_low
+                        or target.get("resolved_zone_high") != resolved_zone_high
+                    ):
+                        target["resolved_level"] = resolved_level
+                        target["resolved_zone_low"] = resolved_zone_low
+                        target["resolved_zone_high"] = resolved_zone_high
+                        target["updated_at"] = datetime.now(timezone.utc).isoformat()
+                        changed = True
                     target["last_error"] = None
                     target["status"] = "armed"
 
@@ -1081,10 +1248,18 @@ async def run_chart_object_alert_loop() -> None:
                     label = str(target.get("source_label") or target.get("source_type") or "Chart alert")
                     condition = str(target.get("condition") or "touches")
                     title = f"{symbol} Chart Alert · {timeframe}"
-                    message = (
-                        f"{symbol} {_chart_object_alert_condition_label(condition)} {label} "
-                        f"at {level:.4f} on {timeframe} | last {close:.4f}"
-                    )
+                    zone_low = result.get("zone_low")
+                    zone_high = result.get("zone_high")
+                    if zone_low is not None and zone_high is not None:
+                        message = (
+                            f"{symbol} {_chart_object_alert_condition_label(condition)} {label} "
+                            f"${float(zone_low):.4f}-${float(zone_high):.4f} on {timeframe} | last {close:.4f}"
+                        )
+                    else:
+                        message = (
+                            f"{symbol} {_chart_object_alert_condition_label(condition)} {label} "
+                            f"at {level:.4f} on {timeframe} | last {close:.4f}"
+                        )
 
                     if bool(target.get("notify_phone", True)):
                         try:
@@ -1112,6 +1287,8 @@ async def run_chart_object_alert_loop() -> None:
                         "source_label": label,
                         "condition": condition,
                         "level": level,
+                        "zone_low": result.get("zone_low"),
+                        "zone_high": result.get("zone_high"),
                         "close": close,
                         "sent_at": now_iso,
                     }

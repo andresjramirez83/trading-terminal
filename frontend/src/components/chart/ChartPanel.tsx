@@ -58,7 +58,7 @@ import {
 } from "./PositionOverlayManager";
 import SettingsPanel, { type SettingsMode } from "./SettingsPanel";
 import { DEFAULT_DRAWING_STYLE } from "./DrawingTypes";
-import type { DrawingStyle, DrawingTool } from "./DrawingTypes";
+import type { DrawingStyle, DrawingTool, FibonacciDrawing } from "./DrawingTypes";
 import {
   DEFAULT_FX_ANALYSIS_SETTINGS,
   type FxAnalysisSettings,
@@ -256,6 +256,48 @@ function loadChartSettings(): ChartSettings {
   } catch {
     return DEFAULT_CHART_SETTINGS;
   }
+}
+
+const FIB_ALERT_RATIOS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1] as const;
+
+function fibAlertLevelPrice(drawing: FibonacciDrawing, ratio: number): number {
+  const startPrice = Number(drawing.p1.price);
+  const endPrice = Number(drawing.p2.price);
+  return endPrice - (endPrice - startPrice) * ratio;
+}
+
+function fibAlertDefaults(drawing: FibonacciDrawing, cursorPrice: number): {
+  level: number;
+  zoneA: number;
+  zoneB: number;
+} {
+  const level = FIB_ALERT_RATIOS.reduce((best, ratio) =>
+    Math.abs(fibAlertLevelPrice(drawing, ratio) - cursorPrice) <
+    Math.abs(fibAlertLevelPrice(drawing, best) - cursorPrice)
+      ? ratio
+      : best, FIB_ALERT_RATIOS[0]);
+
+  let bestA: number = FIB_ALERT_RATIOS[0];
+  let bestB: number = FIB_ALERT_RATIOS[1];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < FIB_ALERT_RATIOS.length - 1; i += 1) {
+    const a = FIB_ALERT_RATIOS[i];
+    const b = FIB_ALERT_RATIOS[i + 1];
+    const pa = fibAlertLevelPrice(drawing, a);
+    const pb = fibAlertLevelPrice(drawing, b);
+    const low = Math.min(pa, pb);
+    const high = Math.max(pa, pb);
+    if (cursorPrice >= low && cursorPrice <= high) {
+      return { level, zoneA: a, zoneB: b };
+    }
+    const distance = Math.min(Math.abs(cursorPrice - low), Math.abs(cursorPrice - high));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestA = a;
+      bestB = b;
+    }
+  }
+  return { level, zoneA: bestA, zoneB: bestB };
 }
 
 function getInteractionToolId(tool: DrawingTool): string {
@@ -994,6 +1036,27 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
                     ? `Horizontal Line $${drawing.price.toFixed(drawing.price < 1 ? 4 : 2)}`
                     : "Trendline",
                 price: drawing.type === "horizontal" ? drawing.price : point.price,
+              });
+            },
+          });
+        } else if (drawing.type === "fibonacci") {
+          items.push({
+            id: "create-fib-alert",
+            label: "🔔 Create Fib Alert",
+            onClick: () => {
+              const defaults = fibAlertDefaults(drawing, point.price);
+              setChartAlertDraft({
+                symbol: symbolRef.current.trim().toUpperCase(),
+                timeframe: timeframeRef.current,
+                sourceType: "fibonacci",
+                sourceId: drawing.id,
+                sourceLabel: "Fibonacci Retracement",
+                price: point.price,
+                fibStartPrice: Number(drawing.p1.price),
+                fibEndPrice: Number(drawing.p2.price),
+                fibDefaultLevel: defaults.level,
+                fibDefaultZoneA: defaults.zoneA,
+                fibDefaultZoneB: defaults.zoneB,
               });
             },
           });

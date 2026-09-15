@@ -744,15 +744,20 @@ export async function sendBackendTestAlert(
   return parseJson(res);
 }
 
-export type ChartAlertSourceType = "horizontal" | "trendline" | "study";
+export type ChartAlertSourceType = "horizontal" | "trendline" | "fibonacci" | "study";
 export type ChartAlertCondition =
   | "touches"
   | "crosses_above"
   | "crosses_below"
   | "closes_above"
-  | "closes_below";
+  | "closes_below"
+  | "enters_zone"
+  | "exits_zone"
+  | "closes_inside_zone"
+  | "reclaims_above_zone";
 export type ChartAlertRecurrence = "once" | "once_per_bar";
 export type ChartAlertStudy = "vwap" | "ema9" | "ema20" | "ema50";
+export type ChartAlertFibMode = "level" | "zone" | "reclaim";
 
 export type ChartObjectAlert = {
   id: string;
@@ -764,6 +769,12 @@ export type ChartObjectAlert = {
   study?: ChartAlertStudy | null;
   price?: number | null;
   resolved_level?: number | null;
+  resolved_zone_low?: number | null;
+  resolved_zone_high?: number | null;
+  fib_mode?: ChartAlertFibMode | null;
+  fib_level_ratio?: number | null;
+  fib_zone_ratio_a?: number | null;
+  fib_zone_ratio_b?: number | null;
   condition: ChartAlertCondition;
   recurrence: ChartAlertRecurrence;
   notify_phone: boolean;
@@ -787,6 +798,10 @@ export type ChartObjectAlertCreatePayload = {
   notify_phone: boolean;
   price?: number | null;
   study?: ChartAlertStudy | null;
+  fib_mode?: ChartAlertFibMode | null;
+  fib_level_ratio?: number | null;
+  fib_zone_ratio_a?: number | null;
+  fib_zone_ratio_b?: number | null;
 };
 
 export type ChartObjectAlertsResponse = {

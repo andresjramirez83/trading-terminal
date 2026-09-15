@@ -1308,7 +1308,9 @@ export class DrawingEngine {
     const delta = p2Price - p1Price;
 
     for (const ratio of [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]) {
-      const levelY = this.priceSeries.priceToCoordinate(p1Price + delta * ratio);
+      // Match DrawingRenderer: ratio 0 is p2, ratio 1 is p1.
+      const levelPrice = p2Price - delta * ratio;
+      const levelY = this.priceSeries.priceToCoordinate(levelPrice);
       if (
         levelY != null &&
         Math.abs(y - levelY) <= 7 &&
