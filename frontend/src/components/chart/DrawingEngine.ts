@@ -152,6 +152,7 @@ function marketNodeIndexFromMode(mode: DragMode): number | null {
 export class DrawingEngine {
   private chart: IChartApi;
   private priceSeries: ISeriesApi<"Candlestick">;
+  private container?: HTMLDivElement;
   private activeTool: DrawingTool = "cursor";
   private defaultStyle: DrawingStyle = cloneStyle(DEFAULT_DRAWING_STYLE);
   private store: DrawingStore;
@@ -177,6 +178,7 @@ export class DrawingEngine {
   ) {
     this.chart = chart;
     this.priceSeries = priceSeries;
+    this.container = container;
     this.store = new DrawingStore(
       workspace?.symbol ?? "SPY",
       workspace?.timeframe ?? "5m",
@@ -1347,7 +1349,21 @@ export class DrawingEngine {
     if (p1x == null || p2x == null || p1y == null || p2y == null) return null;
 
     const left = Math.min(p1x, p2x);
-    const right = Math.max(p1x, p2x);
+    const anchorRight = Math.max(p1x, p2x);
+    let renderedRight = anchorRight;
+    if (drawing.type === "rectangle" && drawing.style.extendRight) {
+      const timeScale = this.chart.timeScale() as unknown as {
+        width?: () => number;
+      };
+      const measuredWidth = Number(timeScale.width?.());
+      const fallbackWidth = Number(this.container?.clientWidth ?? anchorRight);
+      const visibleRight =
+        Number.isFinite(measuredWidth) && measuredWidth > 0
+          ? measuredWidth
+          : fallbackWidth;
+      renderedRight = Math.max(anchorRight, visibleRight);
+    }
+    const right = anchorRight;
     const top = Math.min(p1y, p2y);
     const bottom = Math.max(p1y, p2y);
     const midX = (left + right) / 2;
@@ -1383,12 +1399,12 @@ export class DrawingEngine {
     const onTop =
       Math.abs(y - top) <= edgeTolerance &&
       x >= left - edgeTolerance &&
-      x <= right + edgeTolerance;
+      x <= renderedRight + edgeTolerance;
     const onBottom =
       Math.abs(y - bottom) <= edgeTolerance &&
       x >= left - edgeTolerance &&
-      x <= right + edgeTolerance;
-    const inside = x > left && x < right && y > top && y < bottom;
+      x <= renderedRight + edgeTolerance;
+    const inside = x > left && x < renderedRight && y > top && y < bottom;
 
     if (onLeft) return { drawingId: drawing.id, mode: "rectangle-w" };
     if (onRight) return { drawingId: drawing.id, mode: "rectangle-e" };

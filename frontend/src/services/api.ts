@@ -744,7 +744,7 @@ export async function sendBackendTestAlert(
   return parseJson(res);
 }
 
-export type ChartAlertSourceType = "horizontal" | "trendline" | "fibonacci" | "study";
+export type ChartAlertSourceType = "horizontal" | "trendline" | "rectangle" | "fibonacci" | "study";
 export type ChartAlertCondition =
   | "touches"
   | "crosses_above"

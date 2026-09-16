@@ -470,7 +470,25 @@ export class DrawingRenderer {
     this.removeBox(drawing.id);
 
     const left = Math.min(p1x, p2x);
-    const right = Math.max(p1x, p2x);
+    const anchorRight = Math.max(p1x, p2x);
+    let right = anchorRight;
+
+    // Rectangle zones can project forward with the market. Keep the original
+    // second anchor intact for editing, but render the zone through the visible
+    // right edge so new candles remain inside the same support/resistance box.
+    if (drawing.type === "rectangle" && drawing.style.extendRight) {
+      const timeScale = this.chart.timeScale() as unknown as {
+        width?: () => number;
+      };
+      const measuredWidth = Number(timeScale.width?.());
+      const fallbackWidth = Number(this.container?.clientWidth ?? anchorRight);
+      const visibleRight =
+        Number.isFinite(measuredWidth) && measuredWidth > 0
+          ? measuredWidth
+          : fallbackWidth;
+      right = Math.max(anchorRight, visibleRight);
+    }
+
     const top = Math.min(p1y, p2y);
     const bottom = Math.max(p1y, p2y);
     const width = Math.max(1, right - left);
@@ -508,15 +526,16 @@ export class DrawingRenderer {
       overlay.appendChild(outline);
       elements.push(outline);
 
-      const midX = (left + right) / 2;
+      const handleRight = anchorRight;
+      const midX = (left + handleRight) / 2;
       const midY = (top + bottom) / 2;
 
       for (const [cx, cy] of [
         [left, top],
         [midX, top],
-        [right, top],
-        [right, midY],
-        [right, bottom],
+        [handleRight, top],
+        [handleRight, midY],
+        [handleRight, bottom],
         [midX, bottom],
         [left, bottom],
         [left, midY],

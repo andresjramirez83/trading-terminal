@@ -651,7 +651,7 @@ backend_alert_last_alert: Optional[Dict[str, Any]] = None
 
 # === USER-CREATED CHART OBJECT / STUDY ALERTS ===
 # These alerts are deliberately independent of scanner/backend setup alerts.
-# Right-clicking a horizontal line, trendline, Fibonacci retracement, or
+# Right-clicking a horizontal line, trendline, rectangle zone, Fibonacci retracement, or
 # supported study creates a persistent rule here. The background worker resolves
 # moved drawings on every poll, so an alert follows the drawing if the user drags
 # it later. Fibonacci level/zone prices are recalculated from the saved anchors.
@@ -770,13 +770,13 @@ def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) ->
         raise HTTPException(status_code=400, detail="symbol is required")
     if timeframe not in CHART_OBJECT_ALERT_TIMEFRAMES:
         raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
-    if source_type not in {"horizontal", "trendline", "fibonacci", "study"}:
-        raise HTTPException(status_code=400, detail="source_type must be horizontal, trendline, fibonacci, or study")
+    if source_type not in {"horizontal", "trendline", "rectangle", "fibonacci", "study"}:
+        raise HTTPException(status_code=400, detail="source_type must be horizontal, trendline, rectangle, fibonacci, or study")
     if condition not in CHART_OBJECT_ALERT_CONDITIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported condition: {condition}")
     if recurrence not in CHART_OBJECT_ALERT_RECURRENCES:
         raise HTTPException(status_code=400, detail=f"Unsupported recurrence: {recurrence}")
-    if source_type in {"horizontal", "trendline", "fibonacci"} and not source_id:
+    if source_type in {"horizontal", "trendline", "rectangle", "fibonacci"} and not source_id:
         raise HTTPException(status_code=400, detail="source_id is required for drawing alerts")
     if source_type == "study" and study not in CHART_OBJECT_ALERT_STUDIES:
         raise HTTPException(status_code=400, detail=f"Unsupported study: {study}")
@@ -919,6 +919,78 @@ def _drawing_level_at_time(drawing: Dict[str, Any], chart_time_s: int) -> Option
     return price1 + (price2 - price1) * ((float(chart_time_s) - t1) / (t2 - t1))
 
 
+def _rectangle_zone_prices(
+    drawing: Dict[str, Any],
+    chart_time_s: Optional[int] = None,
+) -> tuple[Optional[float], Optional[float]]:
+    if str(drawing.get("type") or "") != "rectangle":
+        return None, None
+
+    p1 = drawing.get("p1") if isinstance(drawing.get("p1"), dict) else {}
+    p2 = drawing.get("p2") if isinstance(drawing.get("p2"), dict) else {}
+    try:
+        price1 = float(p1.get("price"))
+        price2 = float(p2.get("price"))
+        time1 = float(p1.get("time"))
+        time2 = float(p2.get("time"))
+    except Exception:
+        return None, None
+
+    if (
+        price1 <= 0
+        or price2 <= 0
+        or not all(value == value for value in (price1, price2, time1, time2))
+    ):
+        return None, None
+
+    if time1 > 10_000_000_000:
+        time1 /= 1000.0
+    if time2 > 10_000_000_000:
+        time2 /= 1000.0
+
+    if chart_time_s is not None:
+        start_time = min(time1, time2)
+        end_time = max(time1, time2)
+        style = drawing.get("style") if isinstance(drawing.get("style"), dict) else {}
+        if float(chart_time_s) < start_time:
+            return None, None
+        if float(chart_time_s) > end_time and not bool(style.get("extendRight", True)):
+            return None, None
+
+    return min(price1, price2), max(price1, price2)
+
+
+def _chart_alert_timeframe_seconds(timeframe: str) -> int:
+    return {
+        "1m": 60,
+        "5m": 5 * 60,
+        "15m": 15 * 60,
+        "30m": 30 * 60,
+        "1h": 60 * 60,
+        "4h": 4 * 60 * 60,
+        "1d": 24 * 60 * 60,
+    }.get(str(timeframe or "").lower().strip(), 60)
+
+
+def _completed_chart_alert_bars(
+    bars: List[Dict[str, Any]],
+    timeframe: str,
+) -> List[Dict[str, Any]]:
+    if not bars:
+        return bars
+
+    last_time = _bar_time_seconds(bars[-1])
+    if last_time <= 0:
+        return bars
+
+    duration = _chart_alert_timeframe_seconds(timeframe)
+    now_s = time.time()
+    # Give the feed a small grace period after the theoretical candle close.
+    if now_s < last_time + duration + 2:
+        return bars[:-1]
+    return bars
+
+
 def _fibonacci_level_price(drawing: Dict[str, Any], ratio: float) -> Optional[float]:
     if str(drawing.get("type") or "") != "fibonacci":
         return None
@@ -1024,11 +1096,25 @@ def _fetch_chart_object_alert_bars(symbol: str, timeframe: str) -> List[Dict[str
 
 
 def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any]]) -> Dict[str, Any]:
-    if len(bars) < 2:
-        return {"triggered": False, "error": "not enough bars"}
+    condition = str(alert.get("condition") or "touches")
+    requires_closed_bar = condition in {
+        "closes_above",
+        "closes_below",
+        "closes_inside_zone",
+        "exits_zone",
+        "reclaims_above_zone",
+    }
+    evaluation_bars = (
+        _completed_chart_alert_bars(bars, str(alert.get("timeframe") or "1m"))
+        if requires_closed_bar
+        else bars
+    )
 
-    prev = bars[-2]
-    last = bars[-1]
+    if len(evaluation_bars) < 2:
+        return {"triggered": False, "error": "not enough completed bars" if requires_closed_bar else "not enough bars"}
+
+    prev = evaluation_bars[-2]
+    last = evaluation_bars[-1]
     prev_close = _safe_price(prev.get("close"))
     prev_high = _safe_price(prev.get("high"))
     prev_low = _safe_price(prev.get("low"))
@@ -1045,12 +1131,21 @@ def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any
     curr_level: Optional[float] = None
     zone_low: Optional[float] = None
     zone_high: Optional[float] = None
+    prev_zone_low: Optional[float] = None
+    prev_zone_high: Optional[float] = None
     source_missing = False
 
-    if source_type in {"horizontal", "trendline", "fibonacci"}:
+    if source_type in {"horizontal", "trendline", "rectangle", "fibonacci"}:
         drawing = _current_drawing_for_chart_alert(alert)
         if drawing is None:
             source_missing = True
+        elif source_type == "rectangle":
+            prev_zone_low, prev_zone_high = _rectangle_zone_prices(drawing, prev_time)
+            zone_low, zone_high = _rectangle_zone_prices(drawing, last_time)
+            if zone_low is not None and zone_high is not None:
+                curr_level = zone_high
+            if prev_zone_low is not None and prev_zone_high is not None:
+                prev_level = prev_zone_high
         elif source_type == "fibonacci":
             fib_mode = str(alert.get("fib_mode") or "level").lower().strip()
             if fib_mode == "level":
@@ -1069,6 +1164,7 @@ def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any
                     ratio_a = -1.0
                     ratio_b = -1.0
                 zone_low, zone_high = _fibonacci_zone_prices(drawing, ratio_a, ratio_b)
+                prev_zone_low, prev_zone_high = zone_low, zone_high
                 if zone_low is not None and zone_high is not None:
                     curr_level = zone_high
                     prev_level = zone_high
@@ -1081,16 +1177,20 @@ def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any
     if source_missing:
         return {"triggered": False, "source_missing": True, "bar_time": last_time}
 
-    condition = str(alert.get("condition") or "touches")
-    zone_condition = condition in {"enters_zone", "exits_zone", "closes_inside_zone", "reclaims_above_zone"}
+    zone_condition = (
+        source_type == "rectangle"
+        or condition in {"enters_zone", "exits_zone", "closes_inside_zone", "reclaims_above_zone"}
+    )
 
     if zone_condition:
         if zone_low is None or zone_high is None or zone_low <= 0 or zone_high <= 0:
-            return {"triggered": False, "error": "Fibonacci zone unavailable", "bar_time": last_time}
+            return {"triggered": False, "error": "zone unavailable", "bar_time": last_time}
 
-        prev_overlaps = prev_low <= zone_high and prev_high >= zone_low
+        effective_prev_low = prev_zone_low if prev_zone_low is not None else zone_low
+        effective_prev_high = prev_zone_high if prev_zone_high is not None else zone_high
+        prev_overlaps = prev_low <= effective_prev_high and prev_high >= effective_prev_low
         curr_overlaps = low <= zone_high and high >= zone_low
-        prev_inside = zone_low <= prev_close <= zone_high
+        prev_inside = effective_prev_low <= prev_close <= effective_prev_high
         curr_inside = zone_low <= close <= zone_high
 
         if condition == "enters_zone":
@@ -1099,12 +1199,22 @@ def _evaluate_chart_object_alert(alert: Dict[str, Any], bars: List[Dict[str, Any
             triggered = prev_inside and not curr_inside
         elif condition == "closes_inside_zone":
             triggered = curr_inside
+        elif condition == "crosses_above":
+            # Crossing is intrabar: the candle trades through the box's upper edge.
+            triggered = prev_close <= effective_prev_high and high > zone_high
+        elif condition == "crosses_below":
+            # Crossing is intrabar: the candle trades through the box's lower edge.
+            triggered = prev_close >= effective_prev_low and low < zone_low
+        elif condition == "closes_above":
+            triggered = close > zone_high
+        elif condition == "closes_below":
+            triggered = close < zone_low
         elif condition == "reclaims_above_zone":
             # Bullish reclaim: either this candle trades into the zone and closes
             # back above it, or price was inside/below the zone on the prior bar
             # and the current candle closes back above the upper boundary.
             same_bar_reclaim = curr_overlaps and close > zone_high
-            later_reclaim = prev_close <= zone_high and close > zone_high
+            later_reclaim = prev_close <= effective_prev_high and close > zone_high
             triggered = same_bar_reclaim or later_reclaim
         else:
             triggered = False

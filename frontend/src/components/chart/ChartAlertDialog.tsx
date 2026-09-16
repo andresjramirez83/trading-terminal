@@ -25,6 +25,8 @@ export type ChartAlertDraft = {
   fibDefaultLevel?: number | null;
   fibDefaultZoneA?: number | null;
   fibDefaultZoneB?: number | null;
+  zoneLow?: number | null;
+  zoneHigh?: number | null;
 };
 
 type Props = {
@@ -40,10 +42,20 @@ const LINE_CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string 
   { value: "closes_below", label: "Candle closes below" },
 ];
 
-const ZONE_CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string }> = [
+const FIB_ZONE_CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string }> = [
   { value: "enters_zone", label: "Price enters / touches zone" },
   { value: "closes_inside_zone", label: "Candle closes inside zone" },
   { value: "exits_zone", label: "Price closes outside after being inside" },
+];
+
+const RECTANGLE_ZONE_CONDITION_OPTIONS: Array<{ value: ChartAlertCondition; label: string }> = [
+  { value: "enters_zone", label: "Price enters / touches box zone" },
+  { value: "crosses_above", label: "Price crosses above box zone" },
+  { value: "crosses_below", label: "Price crosses below box zone" },
+  { value: "closes_inside_zone", label: "Candle closes inside box zone" },
+  { value: "closes_above", label: "Candle closes above box zone" },
+  { value: "closes_below", label: "Candle closes below box zone" },
+  { value: "exits_zone", label: "Candle closes outside after being inside" },
 ];
 
 const CONDITION_LABELS: Record<ChartAlertCondition, string> = {
@@ -171,6 +183,8 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
       setFibLevel(Number(draft.fibDefaultLevel ?? 0.618));
       setFibZoneIndex(nearestZoneIndex(draft.fibDefaultZoneA, draft.fibDefaultZoneB));
       setCondition("enters_zone");
+    } else if (draft.sourceType === "rectangle") {
+      setCondition("enters_zone");
     } else {
       setCondition("touches");
     }
@@ -179,6 +193,13 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
   const subtitle = useMemo(() => {
     if (!draft) return "";
+    if (draft.sourceType === "rectangle") {
+      const low = Number(draft.zoneLow);
+      const high = Number(draft.zoneHigh);
+      if (Number.isFinite(low) && Number.isFinite(high)) {
+        return `${draft.symbol} · drawn on ${draft.timeframe} · $${priceText(Math.min(low, high))}–$${priceText(Math.max(low, high))}`;
+      }
+    }
     const price = priceText(draft.price);
     return price ? `${draft.symbol} · drawn on ${draft.timeframe} · $${price}` : `${draft.symbol} · drawn on ${draft.timeframe}`;
   }, [draft]);
@@ -186,8 +207,13 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
   if (!draft) return null;
 
   const isFib = draft.sourceType === "fibonacci";
+  const isRectangle = draft.sourceType === "rectangle";
   const activeZone = FIB_ZONES[Math.min(Math.max(fibZoneIndex, 0), FIB_ZONES.length - 1)];
-  const conditionOptions = isFib && fibMode === "zone" ? ZONE_CONDITION_OPTIONS : LINE_CONDITION_OPTIONS;
+  const conditionOptions = isRectangle
+    ? RECTANGLE_ZONE_CONDITION_OPTIONS
+    : isFib && fibMode === "zone"
+      ? FIB_ZONE_CONDITION_OPTIONS
+      : LINE_CONDITION_OPTIONS;
 
   const setNextFibMode = (mode: ChartAlertFibMode) => {
     setFibMode(mode);
@@ -431,7 +457,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
 
         {draft.sourceType !== "study" && (
           <div style={{ marginTop: 12, fontSize: 11, lineHeight: 1.45, color: "#6b7280" }}>
-            This alert stays attached to the drawing. If you move {isFib ? "either Fib anchor" : "the line"} later, the alert follows it and recalculates automatically. Deleting the drawing disables the alert.
+            This alert stays attached to the drawing. If you move {isFib ? "either Fib anchor" : isRectangle ? "the box" : "the line"} later, the alert follows it and recalculates automatically. Deleting the drawing disables the alert.
           </div>
         )}
 

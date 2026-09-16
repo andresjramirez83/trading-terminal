@@ -148,7 +148,7 @@ export default function DrawingSettings({ open, style, onChange, onClose }: Prop
           checked={style.extendRight}
           onChange={() => onChange({ ...style, extendRight: !style.extendRight })}
         />
-        Extend trendline right
+        Extend lines / boxes right
       </label>
 
       <div

@@ -7,26 +7,14 @@ export type ExecutionModeListener = (
   previousMode: ExecutionMode,
 ) => void;
 
-// v2 intentionally resets the old PAPER-first preference once.
-// The new default is LIVE, while later user choices still persist normally.
+// LIVE is intentionally the startup default on every fresh app/page load.
+// A PAPER click still changes the current session, but a reload starts LIVE again.
 const STORAGE_KEY = "trading.executionMode.v2";
 
-function isExecutionMode(value: unknown): value is ExecutionMode {
-  return (
-    value === "paper" ||
-    value === "live" ||
-    value === "practice"
-  );
-}
-
 function loadInitialMode(): ExecutionMode {
-  if (typeof window === "undefined") {
-    return "live";
-  }
-
-  const saved = window.localStorage.getItem(STORAGE_KEY);
-
-  return isExecutionMode(saved) ? saved : "live";
+  // Deliberately ignore a previously saved PAPER/LIVE choice at startup.
+  // Clicking PAPER still changes the current session; reload starts LIVE.
+  return "live";
 }
 
 export class ExecutionModeRuntime {

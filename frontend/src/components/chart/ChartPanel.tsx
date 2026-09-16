@@ -1058,6 +1058,24 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
               });
             },
           });
+        } else if (drawing.type === "rectangle") {
+          const zoneLow = Math.min(Number(drawing.p1.price), Number(drawing.p2.price));
+          const zoneHigh = Math.max(Number(drawing.p1.price), Number(drawing.p2.price));
+          items.push({
+            id: "create-box-alert",
+            label: "🔔 Create Box Alert",
+            onClick: () => {
+              setChartAlertDraft({
+                symbol: symbolRef.current.trim().toUpperCase(),
+                timeframe: timeframeRef.current,
+                sourceType: "rectangle",
+                sourceId: drawing.id,
+                sourceLabel: `Box Zone $${zoneLow.toFixed(zoneLow < 1 ? 4 : 2)}–$${zoneHigh.toFixed(zoneHigh < 1 ? 4 : 2)}`,
+                zoneLow,
+                zoneHigh,
+              });
+            },
+          });
         } else if (drawing.type === "fibonacci") {
           items.push({
             id: "create-fib-alert",
