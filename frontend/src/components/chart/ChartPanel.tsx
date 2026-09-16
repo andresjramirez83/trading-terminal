@@ -2127,10 +2127,13 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       replayIndexRef.current = -1;
     }
 
+    // Replay uses the practice execution provider. Normal market data should
+    // start/return to LIVE execution. PAPER remains a deliberate button choice
+    // for the current session and is not the automatic chart-mode fallback.
     const executionMode =
       marketDataMode === "replay"
         ? "practice"
-        : "paper";
+        : "live";
 
     void switchExecutionMode(executionMode).catch((error) => {
       if (cancelled) return;

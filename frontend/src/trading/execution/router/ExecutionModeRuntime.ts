@@ -8,12 +8,9 @@ export type ExecutionModeListener = (
 ) => void;
 
 // LIVE is intentionally the startup default on every fresh app/page load.
-// A PAPER click still changes the current session, but a reload starts LIVE again.
-const STORAGE_KEY = "trading.executionMode.v2";
+// PAPER is a deliberate current-session choice only.
 
 function loadInitialMode(): ExecutionMode {
-  // Deliberately ignore a previously saved PAPER/LIVE choice at startup.
-  // Clicking PAPER still changes the current session; reload starts LIVE.
   return "live";
 }
 
@@ -52,10 +49,6 @@ export class ExecutionModeRuntime {
 
     const previousMode = this.mode;
     this.mode = nextMode;
-
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, nextMode);
-    }
 
     for (const listener of this.listeners) {
       listener(nextMode, previousMode);
