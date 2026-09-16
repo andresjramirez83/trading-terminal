@@ -586,6 +586,7 @@ export class Vwap3TradeCoachService {
   private studyFetchedAt = 0;
   private lastRequestedAt = new Map<string, number>();
   private batchInflight = false;
+  private pendingTrades: TradeHistoryEntry[] | null = null;
   private deepBarsCache = new Map<string, DeepBarsCacheEntry>();
 
   getReviews(): Record<string, Vwap3TradeCoachReview> {
@@ -673,7 +674,11 @@ export class Vwap3TradeCoachService {
     if (!deep || deep.version < DEEP_ANALYSIS_VERSION) return true;
     if (deep.session_complete) return false;
     if (!trade.entryTimestamp) return false;
-    return !sessionCompleteForTrade(trade.entryTimestamp);
+
+    // Any incomplete deep review still needs a follow-up. Before the extended
+    // session ends this keeps the path current; after session end it guarantees
+    // one final pass that can flip session_complete to true.
+    return true;
   }
 
   private async loadDeepBars(
@@ -1108,7 +1113,13 @@ export class Vwap3TradeCoachService {
   }
 
   syncClosedTrades(trades: TradeHistoryEntry[]): void {
-    if (this.batchInflight) return;
+    if (this.batchInflight) {
+      // Preserve the latest history snapshot instead of dropping this sync.
+      // This is important when a new trade closes while an older Coach batch
+      // is still doing scanner/bar/deep-session analysis.
+      this.pendingTrades = [...trades];
+      return;
+    }
 
     const now = Date.now();
     const candidates: TradeHistoryEntry[] = [];
@@ -1208,6 +1219,17 @@ export class Vwap3TradeCoachService {
           this.inflight.delete(trade.id);
         }
         this.batchInflight = false;
+
+        // Rescan immediately. If another trade closed during this batch,
+        // pendingTrades contains the newest history snapshot. Otherwise using
+        // the current snapshot lets us drain any remaining candidates beyond
+        // the 24-trade batch cap without waiting five minutes.
+        const nextTrades = this.pendingTrades ?? trades;
+        this.pendingTrades = null;
+
+        window.setTimeout(() => {
+          this.syncClosedTrades(nextTrades);
+        }, 0);
       });
   }
 
