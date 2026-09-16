@@ -169,7 +169,23 @@ class AlpacaService:
             params["symbols"] = ",".join(s.upper().strip() for s in symbols if s.strip())
 
         data = self._request("GET", "/v2/orders", params=params)
-        return data if isinstance(data, list) else []
+        orders = data if isinstance(data, list) else []
+
+        # Alpaca can occasionally return a replacement/bracket parent as
+        # status="new" even though its full quantity has already filled.
+        # When the caller asks for OPEN orders, normalize that stale state here
+        # so UI/risk/cancel logic does not treat a fully-filled ghost as working.
+        #
+        # Nested bracket parents are retained when they still contain at least
+        # one genuinely active child leg (for example a live stop or target).
+        if str(status or "").strip().lower() == "open":
+            orders = [
+                order
+                for order in orders
+                if isinstance(order, dict) and self._order_is_active(order)
+            ]
+
+        return orders
 
     def get_order(self, order_id: str, *, nested: bool = False) -> Dict[str, Any]:
         params = {"nested": str(bool(nested)).lower()}
@@ -554,10 +570,22 @@ class AlpacaService:
     def cancel_all_orders(self) -> Any:
         return self._request("DELETE", "/v2/orders")
 
-    @staticmethod
-    def _order_is_active(order: Dict[str, Any]) -> bool:
+    @classmethod
+    def _order_is_active(cls, order: Dict[str, Any]) -> bool:
+        if not isinstance(order, dict):
+            return False
+
+        # A nested bracket parent can be fully filled while its protective
+        # stop/target children remain active. Keep the parent visible in that
+        # case so callers do not lose the live exit orders.
+        legs = order.get("legs")
+        if isinstance(legs, list):
+            for leg in legs:
+                if isinstance(leg, dict) and cls._order_is_active(leg):
+                    return True
+
         status = str(order.get("status") or "").strip().lower()
-        return status not in {
+        if status in {
             "filled",
             "canceled",
             "cancelled",
@@ -565,7 +593,25 @@ class AlpacaService:
             "replaced",
             "rejected",
             "done_for_day",
-        }
+        }:
+            return False
+
+        # Defensive normalization for stale Alpaca replacement records such as:
+        # status="new", qty=450, filled_qty=450, filled_at=<timestamp>.
+        try:
+            qty = abs(float(order.get("qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+
+        try:
+            filled_qty = abs(float(order.get("filled_qty") or 0))
+        except (TypeError, ValueError):
+            filled_qty = 0.0
+
+        if qty > 0 and filled_qty >= qty:
+            return False
+
+        return True
 
     def _cancel_symbol_orders(
         self,
