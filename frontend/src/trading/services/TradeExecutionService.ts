@@ -84,6 +84,28 @@ function rawOrderStatus(order: unknown): string {
   return String(record.status ?? "").trim().toLowerCase();
 }
 
+function rawOrderIsTerminal(order: unknown): boolean {
+  const status = rawOrderStatus(order);
+  if (TERMINAL_ALPACA_STATUSES.has(status)) return true;
+
+  if (!order || typeof order !== "object") return false;
+  const record = order as Record<string, unknown>;
+
+  const qty = Math.abs(Number(record.qty ?? 0));
+  const filledQty = Math.abs(Number(record.filled_qty ?? 0));
+
+  // Alpaca can occasionally return a replacement/bracket record as
+  // status="new" even though the entire quantity has already filled.
+  // Treat zero-remaining-quantity orders as terminal so they cannot remain
+  // in the chart/Open Orders snapshot as ghost working orders.
+  return (
+    Number.isFinite(qty) &&
+    qty > 0 &&
+    Number.isFinite(filledQty) &&
+    filledQty >= qty
+  );
+}
+
 function rawOrderSymbol(order: unknown): string {
   if (!order || typeof order !== "object") return "";
   const record = order as Record<string, unknown>;
@@ -398,10 +420,10 @@ export class TradeExecutionService {
       const rawOrdersArray = Array.isArray(rawOrders) ? rawOrders : [];
 
       const rawTopLevelOpenOrdersArray = rawOrdersArray.filter(
-        (order) => !TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
+        (order) => !rawOrderIsTerminal(order),
       );
       const rawClosedOrdersArray = rawOrdersArray.filter((order) =>
-        TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
+        rawOrderIsTerminal(order),
       );
 
       // With nested=true Alpaca rolls a bracket under its parent. Once the
@@ -413,7 +435,7 @@ export class TradeExecutionService {
       const activeNestedLegsFromClosedParents = flattenRawOrders(
         rawClosedOrdersArray,
       ).filter(
-        (order) => !TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
+        (order) => !rawOrderIsTerminal(order),
       );
 
       const rawOpenOrdersArray = dedupeRawOrders([
@@ -888,7 +910,7 @@ export class TradeExecutionService {
       }
 
       const activeRawOrders = nextRawOpenOrders.filter(
-        (order) => !TERMINAL_ALPACA_STATUSES.has(rawOrderStatus(order)),
+        (order) => !rawOrderIsTerminal(order),
       );
 
       this.setSnapshot({
