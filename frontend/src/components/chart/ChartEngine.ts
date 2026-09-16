@@ -55,6 +55,7 @@ import { PositionOverlayEngine } from "../../trading/overlay/PositionOverlayEngi
 import { PositionOverlayRenderer } from "../../trading/overlay/PositionOverlayRenderer";
 import { marketObjectRegistry } from "./analysis/market-objects/MarketObjectRegistry";
 import type { MarketObject } from "./analysis/market-objects/MarketObjectTypes";
+import type { HistoricalTradeReplayOverlay } from "../../trading/replay/HistoricalTradeOverlayTypes";
 
 
 export type Vwap3ChartSetupOverlay = {
@@ -313,6 +314,15 @@ function buildVwapBars(bars: CleanBar[]): LineData<Time>[] {
 
 const LIVE_STUDY_THROTTLE_MS = 750;
 
+function cleanSymbolForTradeOverlay(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function formatTradeOverlayPrice(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  return value >= 1 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`;
+}
+
 export class ChartEngine {
   readonly chart: IChartApi;
   readonly series: ChartSeriesBundle;
@@ -346,6 +356,9 @@ export class ChartEngine {
   private vwap3TargetPriceLine: IPriceLine | null = null;
   private vwap3ExpansionOverlay: HTMLDivElement;
   private vwap3OverlayRenderFrame: number | null = null;
+  private historicalTradeOverlay: HistoricalTradeReplayOverlay | null = null;
+  private historicalTradeOverlayLayer: HTMLDivElement;
+  private historicalTradeOverlayRenderFrame: number | null = null;
 
   // Live candle updates can arrive many times per second. Keep the expensive
   // study algorithms off the hot path and update EMA/VWAP from cached prefix
@@ -466,6 +479,14 @@ export class ChartEngine {
     this.vwap3ExpansionOverlay.style.overflow = "hidden";
     this.vwap3ExpansionOverlay.style.zIndex = "5";
     this.container.appendChild(this.vwap3ExpansionOverlay);
+
+    this.historicalTradeOverlayLayer = document.createElement("div");
+    this.historicalTradeOverlayLayer.style.position = "absolute";
+    this.historicalTradeOverlayLayer.style.inset = "0";
+    this.historicalTradeOverlayLayer.style.pointerEvents = "none";
+    this.historicalTradeOverlayLayer.style.overflow = "hidden";
+    this.historicalTradeOverlayLayer.style.zIndex = "7";
+    this.container.appendChild(this.historicalTradeOverlayLayer);
 
     this.chart = createChart(container, {
       width: Math.max(1, container.clientWidth),
@@ -679,6 +700,7 @@ export class ChartEngine {
       this.scheduleSessionBandsRender();
       this.studyRenderer.scheduleOverlayRender();
       this.scheduleVwap3OverlayRender();
+      this.scheduleHistoricalTradeOverlayRender();
     };
 
     this.handleCrosshairMove = (param) => {
@@ -837,6 +859,7 @@ export class ChartEngine {
     this.studyRenderer.scheduleOverlayRender();
     this.scheduleSessionBandsRender();
     this.scheduleVwap3OverlayRender();
+    this.scheduleHistoricalTradeOverlayRender();
   }
 
   public setChartTradeCrosshairMode(enabled: boolean): void {
@@ -1533,6 +1556,7 @@ export class ChartEngine {
     this.renderFxAnalysis();
     this.scheduleSessionBandsRender();
     this.scheduleVwap3OverlayRender();
+    this.scheduleHistoricalTradeOverlayRender();
     if (this.isMobileChartViewport() && this.mobileViewNeedsReset) {
       this.mobileViewNeedsReset = false;
       window.requestAnimationFrame(() => this.resetMobileView());
@@ -1588,6 +1612,7 @@ export class ChartEngine {
 
     this.lastCrosshairInfo = buildCrosshairInfoFromBar(nextBar);
     this.positionOverlayEngine.updateMarketPrice(nextBar.close);
+    this.scheduleHistoricalTradeOverlayRender();
 
     this.series.candles.update({
       time: nextBar.time,
@@ -2001,6 +2026,288 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     this.vwap3ExpansionOverlay.appendChild(stem);
   }
 
+  setHistoricalTradeOverlay(
+    overlay: HistoricalTradeReplayOverlay | null,
+  ): void {
+    this.historicalTradeOverlay = overlay;
+    this.scheduleHistoricalTradeOverlayRender();
+  }
+
+  private scheduleHistoricalTradeOverlayRender(): void {
+    if (this.historicalTradeOverlayRenderFrame != null) return;
+
+    this.historicalTradeOverlayRenderFrame =
+      window.requestAnimationFrame(() => {
+        this.historicalTradeOverlayRenderFrame = null;
+        this.renderHistoricalTradeOverlay();
+      });
+  }
+
+  private renderHistoricalTradeOverlay(): void {
+    this.historicalTradeOverlayLayer.replaceChildren();
+
+    const trade = this.historicalTradeOverlay;
+    if (
+      !trade ||
+      !this.bars.length ||
+      cleanSymbolForTradeOverlay(trade.symbol) !==
+        cleanSymbolForTradeOverlay(this.symbol)
+    ) {
+      return;
+    }
+
+    const firstBarSeconds = Number(this.bars[0]?.time);
+    const lastBarSeconds = Number(this.bars[this.bars.length - 1]?.time);
+    if (!Number.isFinite(firstBarSeconds) || !Number.isFinite(lastBarSeconds)) {
+      return;
+    }
+
+    const inferredBarSeconds =
+      this.bars.length > 1
+        ? Math.max(
+            60,
+            Number(this.bars[this.bars.length - 1].time) -
+              Number(this.bars[this.bars.length - 2].time),
+          )
+        : 60;
+
+    const locateTradeTime = (timestamp?: string) => {
+      if (!timestamp) return null;
+
+      const targetMs = Date.parse(timestamp);
+      if (!Number.isFinite(targetMs)) return null;
+      const targetSeconds = Math.floor(targetMs / 1000);
+
+      if (
+        targetSeconds < firstBarSeconds ||
+        targetSeconds >= lastBarSeconds + inferredBarSeconds
+      ) {
+        return null;
+      }
+
+      let markerBar = this.bars[0];
+      for (const bar of this.bars) {
+        const barTime = Number(bar.time);
+        if (!Number.isFinite(barTime)) continue;
+        if (barTime <= targetSeconds) {
+          markerBar = bar;
+          continue;
+        }
+        break;
+      }
+
+      const x = this.chart.timeScale().timeToCoordinate(markerBar.time);
+      if (x == null) return null;
+
+      return {
+        x: Number(x),
+        timeLabel: new Date(targetMs).toLocaleTimeString("en-US", {
+          timeZone: "America/Los_Angeles",
+          hour: "numeric",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: true,
+        }),
+      };
+    };
+
+    const makeBadge = (
+      text: string,
+      x: number,
+      y: number,
+      tone: "entry" | "exit",
+    ) => {
+      const badge = document.createElement("div");
+      badge.textContent = text;
+      badge.style.position = "absolute";
+      badge.style.left = `${Math.round(x)}px`;
+      badge.style.top = `${Math.max(4, Math.round(y) - 34)}px`;
+      badge.style.transform = "translateX(-50%)";
+      badge.style.padding = "4px 7px";
+      badge.style.borderRadius = "6px";
+      badge.style.border =
+        tone === "entry"
+          ? "1px solid rgba(250,204,21,.95)"
+          : "1px solid rgba(34,197,94,.95)";
+      badge.style.background = "rgba(8,15,28,.95)";
+      badge.style.color = tone === "entry" ? "#fde047" : "#86efac";
+      badge.style.fontSize = "10px";
+      badge.style.fontWeight = "900";
+      badge.style.whiteSpace = "nowrap";
+      badge.style.boxShadow = "0 2px 7px rgba(0,0,0,.45)";
+      this.historicalTradeOverlayLayer.appendChild(badge);
+
+      const stem = document.createElement("div");
+      stem.style.position = "absolute";
+      stem.style.left = `${Math.round(x)}px`;
+      stem.style.top = `${Math.max(20, Math.round(y) - 12)}px`;
+      stem.style.height = "14px";
+      stem.style.borderLeft =
+        tone === "entry"
+          ? "2px solid rgba(250,204,21,.9)"
+          : "2px solid rgba(34,197,94,.9)";
+      this.historicalTradeOverlayLayer.appendChild(stem);
+    };
+
+    const makeHorizontalLevel = (
+      label: string,
+      price: number | undefined,
+      x: number,
+      border: string,
+      color: string,
+    ) => {
+      if (!Number.isFinite(price) || Number(price) <= 0) return;
+
+      const y = this.series.candles.priceToCoordinate(Number(price));
+      if (y == null) return;
+
+      const line = document.createElement("div");
+      line.style.position = "absolute";
+      line.style.left = `${Math.max(0, Math.round(x))}px`;
+      line.style.right = "62px";
+      line.style.top = `${Math.round(y)}px`;
+      line.style.borderTop = border;
+      this.historicalTradeOverlayLayer.appendChild(line);
+
+      const tag = document.createElement("div");
+      tag.textContent = `${label} ${formatTradeOverlayPrice(Number(price))}`;
+      tag.style.position = "absolute";
+      tag.style.right = "64px";
+      tag.style.top = `${Math.round(y) - 10}px`;
+      tag.style.padding = "2px 4px";
+      tag.style.borderRadius = "4px";
+      tag.style.background = "rgba(8,15,28,.9)";
+      tag.style.color = color;
+      tag.style.fontSize = "9px";
+      tag.style.fontWeight = "800";
+      this.historicalTradeOverlayLayer.appendChild(tag);
+    };
+
+    const entry = locateTradeTime(trade.entryTimestamp);
+    if (!entry) return;
+
+    const entryY =
+      this.series.candles.priceToCoordinate(trade.entryPrice);
+    if (entryY == null) return;
+
+    makeBadge(
+      `ACTUAL ${trade.side.toUpperCase()} · ${entry.timeLabel} · ${formatTradeOverlayPrice(trade.entryPrice)}`,
+      entry.x,
+      Number(entryY),
+      "entry",
+    );
+
+    makeHorizontalLevel(
+      "ENTRY",
+      trade.entryPrice,
+      entry.x,
+      "2px solid rgba(250,204,21,.8)",
+      "#fde047",
+    );
+    makeHorizontalLevel(
+      "TARGET",
+      trade.targetPrice,
+      entry.x,
+      "1px dashed rgba(34,197,94,.75)",
+      "#86efac",
+    );
+    makeHorizontalLevel(
+      "STOP",
+      trade.stopPrice,
+      entry.x,
+      "1px dashed rgba(248,113,113,.8)",
+      "#fca5a5",
+    );
+
+    const infoCard = document.createElement("div");
+    infoCard.style.position = "absolute";
+    infoCard.style.left = "48px";
+    infoCard.style.top = "12px";
+    infoCard.style.maxWidth = "390px";
+    infoCard.style.padding = "9px 11px";
+    infoCard.style.border = "1px solid rgba(250,204,21,.55)";
+    infoCard.style.borderRadius = "8px";
+    infoCard.style.background = "rgba(8,15,28,.94)";
+    infoCard.style.boxShadow = "0 5px 18px rgba(0,0,0,.4)";
+    infoCard.style.fontFamily =
+      "Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+
+    const title = document.createElement("div");
+    title.textContent = `ACTUAL TRADE ENTRY · ${entry.timeLabel}`;
+    title.style.color = "#fde047";
+    title.style.fontSize = "11px";
+    title.style.fontWeight = "900";
+    title.style.letterSpacing = ".04em";
+    infoCard.appendChild(title);
+
+    const details = document.createElement("div");
+    details.textContent =
+      `${trade.side.toUpperCase()} ${Math.max(0, Math.floor(trade.shares))} @ ` +
+      `${formatTradeOverlayPrice(trade.entryPrice)}`;
+    details.style.marginTop = "3px";
+    details.style.color = "#f8fafc";
+    details.style.fontSize = "12px";
+    details.style.fontWeight = "800";
+    infoCard.appendChild(details);
+
+    const trigger = document.createElement("div");
+    trigger.style.marginTop = "6px";
+    trigger.style.fontSize = "10px";
+    trigger.style.lineHeight = "1.35";
+    trigger.style.color = "#cbd5e1";
+    trigger.textContent = trade.recordedTrigger
+      ? `Recorded trigger: ${trade.recordedTrigger}`
+      : "Recorded trigger: no exact trigger snapshot was saved with this older broker fill.";
+    infoCard.appendChild(trigger);
+
+    if (trade.entrySnapshot?.grade || Number.isFinite(trade.entrySnapshot?.score)) {
+      const snapshot = document.createElement("div");
+      snapshot.style.marginTop = "4px";
+      snapshot.style.fontSize = "10px";
+      snapshot.style.color = "#93c5fd";
+      const grade = trade.entrySnapshot?.grade
+        ? `Grade ${trade.entrySnapshot.grade}`
+        : "Decision snapshot";
+      const score = Number.isFinite(trade.entrySnapshot?.score)
+        ? ` · Score ${Math.round(Number(trade.entrySnapshot?.score))}/100`
+        : "";
+      snapshot.textContent = `${grade}${score}`;
+      infoCard.appendChild(snapshot);
+    }
+
+    if ((trade.coachContext ?? []).length > 0) {
+      const coach = document.createElement("div");
+      coach.style.marginTop = "6px";
+      coach.style.paddingTop = "5px";
+      coach.style.borderTop = "1px solid rgba(148,163,184,.18)";
+      coach.style.fontSize = "9px";
+      coach.style.lineHeight = "1.35";
+      coach.style.color = "#94a3b8";
+      coach.textContent = `Coach entry context: ${(trade.coachContext ?? []).join(" ")}`;
+      infoCard.appendChild(coach);
+    }
+
+    this.historicalTradeOverlayLayer.appendChild(infoCard);
+
+    const exit = locateTradeTime(trade.exitTimestamp);
+    if (
+      exit &&
+      Number.isFinite(trade.exitPrice) &&
+      Number(trade.exitPrice) > 0
+    ) {
+      const exitY =
+        this.series.candles.priceToCoordinate(Number(trade.exitPrice));
+      if (exitY != null) {
+        makeBadge(
+          `ACTUAL EXIT · ${exit.timeLabel} · ${formatTradeOverlayPrice(Number(trade.exitPrice))}`,
+          exit.x,
+          Number(exitY),
+          "exit",
+        );
+      }
+    }
+  }
+
   private buildAutoScalePriceRange(
     baseRange: { minValue: number; maxValue: number } | null,
   ): { minValue: number; maxValue: number } | null {
@@ -2341,6 +2648,13 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     this.clearSessionBands();
     this.setVwap3SetupOverlay(null);
     this.vwap3ExpansionOverlay.replaceChildren();
+    this.historicalTradeOverlay = null;
+    this.historicalTradeOverlayLayer.replaceChildren();
+
+    if (this.historicalTradeOverlayRenderFrame != null) {
+      window.cancelAnimationFrame(this.historicalTradeOverlayRenderFrame);
+      this.historicalTradeOverlayRenderFrame = null;
+    }
 
     if (this.vwap3OverlayRenderFrame != null) {
       window.cancelAnimationFrame(this.vwap3OverlayRenderFrame);
@@ -2354,6 +2668,7 @@ setMarketContext(symbol?: string, timeframe?: string): void {
 
     this.sessionOverlay.remove();
     this.vwap3ExpansionOverlay.remove();
+    this.historicalTradeOverlayLayer.remove();
     this.bars = [];
     this.chart.remove();
   }

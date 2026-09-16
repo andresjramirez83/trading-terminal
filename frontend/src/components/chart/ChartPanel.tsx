@@ -22,6 +22,7 @@ import {
   subscribeToSelectedPracticeTradingDate,
 } from "../../trading/practice/PracticeReplayLauncher";
 import type { ReplayStartMode } from "../../trading/replay/ReplaySessionManager";
+import type { HistoricalTradeReplayOverlay } from "../../trading/replay/HistoricalTradeOverlayTypes";
 import { switchExecutionMode } from "../../trading/execution/router/ExecutionProviderRuntime";
 import { useActiveSymbol } from "./ActiveSymbolContext";
 import ChartToolbarV2 from "./ChartToolbarV2";
@@ -488,6 +489,10 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         ?.customStartTime ?? null
     );
   });
+  const [
+    replayTradeOverlay,
+    setReplayTradeOverlay,
+  ] = useState<HistoricalTradeReplayOverlay | null>(null);
 
   function commitChartState(engine: ChartEngine, reason: string): void {
     const nextState = engine.getState();
@@ -736,6 +741,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           request.customStartTime ??
             null,
         );
+        setReplayTradeOverlay(
+          request.tradeOverlay ?? null,
+        );
 
         setActiveSymbol(
           request.symbol,
@@ -746,6 +754,17 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       },
     );
   }, [setActiveSymbol]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+
+    engine.setHistoricalTradeOverlay(
+      marketDataMode === "replay"
+        ? replayTradeOverlay
+        : null,
+    );
+  }, [marketDataMode, replayTradeOverlay]);
 
   useEffect(() => {
     const handler = (event: Event) => {

@@ -116,6 +116,21 @@ export type TradeLifecycleStatus =
   | "partial"
   | "unknown";
 
+export type HistoricalTradeDecisionSnapshot = {
+  score?: number;
+  grade?: string;
+  trend?: number;
+  momentum?: number;
+  balance?: number;
+  compression?: number;
+  entryQuality?: number;
+  risk?: number;
+  summary?: string;
+  thesis?: string;
+  triggers?: string[];
+  capturedAt?: string;
+};
+
 export type TradeHistoryEntry = {
   id: string;
   symbol: string;
@@ -130,6 +145,10 @@ export type TradeHistoryEntry = {
   exitTime?: string;
   entryTimestamp?: string;
   exitTimestamp?: string;
+  timeframe?: string;
+  source?: string;
+  setup?: string;
+  decisionSnapshot?: HistoricalTradeDecisionSnapshot;
   plannedTarget?: number;
   plannedStop?: number;
   strategy?: string;
@@ -188,4 +207,10 @@ export type JournalTradeState = {
   netPnl: number;
   rMultiple: number;
   notes: string;
+  entryTimestamp?: string;
+  exitTimestamp?: string;
+  timeframe?: string;
+  source?: string;
+  setup?: string;
+  decisionSnapshot?: HistoricalTradeDecisionSnapshot;
 };

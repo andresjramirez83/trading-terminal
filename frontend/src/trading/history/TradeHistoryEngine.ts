@@ -612,6 +612,12 @@ export class TradeHistoryEngine {
         netPnl: trade.netPnl,
         rMultiple: trade.rMultiple,
         notes: trade.notes,
+        entryTimestamp: trade.entryTimestamp,
+        exitTimestamp: trade.exitTimestamp,
+        timeframe: trade.timeframe,
+        source: trade.source,
+        setup: trade.setup,
+        decisionSnapshot: trade.decisionSnapshot,
       };
     });
   }
@@ -836,6 +842,10 @@ export class TradeHistoryEngine {
         : undefined,
       entryTimestamp,
       exitTimestamp,
+      timeframe: trade.timeframe,
+      source: trade.source,
+      setup: trade.setup,
+      decisionSnapshot: trade.decisionSnapshot,
       plannedTarget: getPrimaryTarget(trade),
       plannedStop: safeNumber(trade.stop),
       strategy: trade.strategy ?? trade.setup ?? "",

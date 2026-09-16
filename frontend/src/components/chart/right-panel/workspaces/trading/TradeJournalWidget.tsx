@@ -7,6 +7,7 @@ import type {
   Vwap3DeepTradeAnalysis,
   Vwap3PersonalCoachSummary,
 } from "../../../../../trading/coach/Vwap3TradeCoachService";
+import { launchPracticeReplay } from "../../../../../trading/practice/PracticeReplayLauncher";
 
 type TradeJournalWidgetProps = {
   trades: JournalTradeState[];
@@ -26,6 +27,180 @@ function money(value: number): string {
 
 function pct(value: number | null | undefined): string {
   return Number.isFinite(value) ? `${Number(value).toFixed(1)}%` : "—";
+}
+
+const NEW_YORK_TIME_ZONE = "America/New_York";
+
+function zonedEntryParts(timestamp: string): {
+  tradingDate: string;
+  minutesAfterMidnight: number;
+} | null {
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return null;
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: NEW_YORK_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(parsed));
+
+  const values = new Map(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+
+  const year = values.get("year");
+  const month = values.get("month");
+  const day = values.get("day");
+  const hour = Number(values.get("hour"));
+  const minute = Number(values.get("minute"));
+
+  if (
+    !year ||
+    !month ||
+    !day ||
+    !Number.isFinite(hour) ||
+    !Number.isFinite(minute)
+  ) {
+    return null;
+  }
+
+  return {
+    tradingDate: `${year}-${month}-${day}`,
+    minutesAfterMidnight: hour * 60 + minute,
+  };
+}
+
+function minutesToClock(totalMinutes: number): string {
+  const safe = Math.max(0, Math.min(23 * 60 + 59, Math.floor(totalMinutes)));
+  const hour = Math.floor(safe / 60);
+  const minute = safe % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function meaningfulRecordedTrigger(trade: JournalTradeState): string | undefined {
+  const snapshot = trade.decisionSnapshot;
+  const snapshotTriggers = snapshot?.triggers?.filter(Boolean) ?? [];
+
+  if (snapshotTriggers.length > 0) {
+    return snapshotTriggers.slice(0, 2).join(" · ");
+  }
+
+  const setup = String(trade.setup ?? "").trim();
+  if (setup) return setup;
+
+  const strategy = String(trade.strategy ?? "").trim();
+  if (
+    strategy &&
+    strategy.toLowerCase() !== "alpaca" &&
+    strategy.toLowerCase() !== "trade"
+  ) {
+    return strategy;
+  }
+
+  const notes = String(trade.notes ?? "").trim();
+  if (
+    notes &&
+    !notes.toLowerCase().includes("reconstructed directly from alpaca")
+  ) {
+    return notes;
+  }
+
+  return undefined;
+}
+
+function coachEntryContext(
+  review: Vwap3TradeCoachReview | undefined,
+): string[] {
+  if (!review) return [];
+
+  const deep = (
+    review as Vwap3TradeCoachReview & {
+      deep_analysis?: Vwap3DeepTradeAnalysis;
+    }
+  ).deep_analysis;
+
+  const rows: string[] = [];
+
+  if (review.scanner_match) {
+    const grade = String(review.scanner_grade ?? "").trim();
+    rows.push(
+      grade
+        ? `Coach reconstruction: 3-VWAP ${grade} setup was associated with this trade.`
+        : "Coach reconstruction: a 3-VWAP setup was associated with this trade.",
+    );
+  }
+
+  for (const reason of deep?.grades.entry.reasons ?? review.entry_quality?.score_reasons ?? []) {
+    const clean = String(reason ?? "").trim();
+    if (clean && !rows.includes(clean)) rows.push(clean);
+    if (rows.length >= 3) break;
+  }
+
+  return rows.slice(0, 3);
+}
+
+function launchJournalTradeReplay(
+  trade: JournalTradeState,
+  review?: Vwap3TradeCoachReview,
+): void {
+  if (!trade.entryTimestamp || !Number.isFinite(Date.parse(trade.entryTimestamp))) {
+    window.alert(
+      "This historical trade does not have an exact entry timestamp, so it cannot be placed precisely on replay yet.",
+    );
+    return;
+  }
+
+  const entryParts = zonedEntryParts(trade.entryTimestamp);
+  if (!entryParts) {
+    window.alert("Could not determine the replay date/time for this trade.");
+    return;
+  }
+
+  const customStartTime = minutesToClock(
+    entryParts.minutesAfterMidnight - 15,
+  );
+
+  launchPracticeReplay({
+    symbol: trade.symbol,
+    tradingDate: entryParts.tradingDate,
+    timeframe: "1m",
+    jumpToTime: Date.parse(trade.entryTimestamp),
+    startMode: "custom",
+    customStartTime,
+    source: "journal",
+    tradeOverlay: {
+      tradeId: trade.id,
+      symbol: trade.symbol,
+      side: trade.side,
+      shares: trade.shares,
+      entryPrice: trade.entry,
+      exitPrice: trade.exit > 0 ? trade.exit : undefined,
+      targetPrice: trade.target > 0 ? trade.target : undefined,
+      stopPrice: trade.stop > 0 ? trade.stop : undefined,
+      entryTimestamp: trade.entryTimestamp,
+      exitTimestamp: trade.exitTimestamp,
+      recordedTrigger: meaningfulRecordedTrigger(trade),
+      coachContext: coachEntryContext(review),
+      entrySnapshot: trade.decisionSnapshot
+        ? {
+            score: trade.decisionSnapshot.score,
+            grade: trade.decisionSnapshot.grade,
+            entryQuality: trade.decisionSnapshot.entryQuality,
+            risk: trade.decisionSnapshot.risk,
+            summary: trade.decisionSnapshot.summary,
+            thesis: trade.decisionSnapshot.thesis,
+            triggers: trade.decisionSnapshot.triggers,
+            capturedAt: trade.decisionSnapshot.capturedAt,
+          }
+        : undefined,
+    },
+  });
 }
 
 function reviewColor(review: Vwap3TradeCoachReview): string {
@@ -246,7 +421,12 @@ export default function TradeJournalWidget({
                   )
                 ) : null}
 
-                <button type="button" style={styles.replayButton}>
+                <button
+                  type="button"
+                  style={styles.replayButton}
+                  onClick={() => launchJournalTradeReplay(trade, review)}
+                  title="Replay this trade from 15 minutes before the actual entry"
+                >
                   Replay Trade
                 </button>
               </div>

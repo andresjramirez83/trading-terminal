@@ -45,6 +45,9 @@ export type TradeDecisionSnapshot = {
   compression?: number;
   entryQuality?: number;
   risk?: number;
+  summary?: string;
+  thesis?: string;
+  triggers?: string[];
   raw?: unknown;
   capturedAt: string;
 };

@@ -1,4 +1,5 @@
 import type { ReplayStartMode } from "../replay/ReplaySessionManager";
+import type { HistoricalTradeReplayOverlay } from "../replay/HistoricalTradeOverlayTypes";
 
 export const PRACTICE_REPLAY_REQUEST_EVENT =
   "practice-replay-request";
@@ -31,7 +32,8 @@ export interface PracticeReplayRequest {
   jumpToTime?: number;
   startMode?: ReplayStartMode;
   customStartTime?: string | null;
-  source?: "analysis" | "universe" | "manual";
+  source?: "analysis" | "universe" | "manual" | "journal";
+  tradeOverlay?: HistoricalTradeReplayOverlay;
 }
 
 function normalizeSymbol(value: string): string {
@@ -277,6 +279,7 @@ export function createPracticeReplayRequest(
     startMode,
     customStartTime,
     source: request.source ?? "manual",
+    tradeOverlay: request.tradeOverlay,
   };
 }
 
