@@ -659,6 +659,11 @@ CHART_OBJECT_ALERTS_FILE = APP_STATE_DIR / "chart_object_alerts.json"
 CHART_OBJECT_ALERTS_LOCK_FILE = APP_STATE_DIR / "chart_object_alerts.lock"
 CHART_OBJECT_ALERTS_LOCAL_LOCK = threading.RLock()
 CHART_OBJECT_ALERT_POLL_SECONDS = max(10, int(os.getenv("CHART_OBJECT_ALERT_POLL_SECONDS", "15") or "15"))
+# A drawing save is asynchronous in the browser.  Do not permanently disable a
+# freshly-created alert just because the alert worker wins that race and checks
+# before the drawing upsert reaches the backend.
+CHART_OBJECT_ALERT_SOURCE_SYNC_GRACE_SECONDS = max(30, int(os.getenv("CHART_OBJECT_ALERT_SOURCE_SYNC_GRACE_SECONDS", "120") or "120"))
+CHART_OBJECT_ALERT_SOURCE_SYNC_RETRIES = max(2, int(os.getenv("CHART_OBJECT_ALERT_SOURCE_SYNC_RETRIES", "8") or "8"))
 CHART_OBJECT_ALERT_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
 CHART_OBJECT_ALERT_CONDITIONS = {
     "touches", "crosses_above", "crosses_below", "closes_above", "closes_below",
@@ -852,6 +857,8 @@ def _clean_chart_object_alert_payload(payload: ChartObjectAlertCreatePayload) ->
         "last_trigger_bar_time": None,
         "trigger_count": 0,
         "last_error": None,
+        "source_missing_count": 0,
+        "source_missing_since": None,
         "resolved_level": price,
         "resolved_zone_low": None,
         "resolved_zone_high": None,
@@ -1322,12 +1329,49 @@ async def run_chart_object_alert_loop() -> None:
                     bar_time = int(result.get("bar_time") or 0)
 
                     if result.get("source_missing"):
-                        target["active"] = False
-                        target["status"] = "source_deleted"
-                        target["last_error"] = "The drawing attached to this alert was deleted."
-                        target["updated_at"] = datetime.now(timezone.utc).isoformat()
+                        # The frontend saves drawings asynchronously (normally ~120 ms).
+                        # A chart-alert POST can arrive first, especially when Gunicorn
+                        # routes the two requests to different workers.  The old behavior
+                        # permanently disabled the alert on the very first miss.  Give
+                        # cloud drawing sync a grace window before deciding the source was
+                        # truly deleted.
+                        now_dt = datetime.now(timezone.utc)
+                        now_iso = now_dt.isoformat()
+                        misses = int(target.get("source_missing_count") or 0) + 1
+                        target["source_missing_count"] = misses
+                        if not target.get("source_missing_since"):
+                            target["source_missing_since"] = now_iso
+
+                        created_age_seconds = 0.0
+                        try:
+                            created_at = datetime.fromisoformat(str(target.get("created_at") or "").replace("Z", "+00:00"))
+                            if created_at.tzinfo is None:
+                                created_at = created_at.replace(tzinfo=timezone.utc)
+                            created_age_seconds = max(0.0, (now_dt - created_at).total_seconds())
+                        except Exception:
+                            created_age_seconds = 0.0
+
+                        still_syncing = (
+                            misses < CHART_OBJECT_ALERT_SOURCE_SYNC_RETRIES
+                            or created_age_seconds < CHART_OBJECT_ALERT_SOURCE_SYNC_GRACE_SECONDS
+                        )
+                        if still_syncing:
+                            target["status"] = "waiting_source_sync"
+                            target["last_error"] = (
+                                f"Waiting for drawing sync ({misses}/{CHART_OBJECT_ALERT_SOURCE_SYNC_RETRIES})."
+                            )
+                        else:
+                            target["active"] = False
+                            target["status"] = "source_deleted"
+                            target["last_error"] = "The drawing attached to this alert could not be found after the sync grace period."
+                        target["updated_at"] = now_iso
                         changed = True
                         continue
+
+                    if target.get("source_missing_count") or target.get("source_missing_since"):
+                        target["source_missing_count"] = 0
+                        target["source_missing_since"] = None
+                        changed = True
 
                     if result.get("error"):
                         target["status"] = "waiting"
@@ -1437,6 +1481,13 @@ async def run_chart_object_alert_loop() -> None:
 def start_chart_object_alert_task_if_needed() -> None:
     global chart_object_alert_task
     if chart_object_alert_task and not chart_object_alert_task.done():
+        return
+
+    # On production Linux/Gunicorn only the process holding the background
+    # worker lock should run polling loops.  Previously any API worker that
+    # handled POST /chart-alerts could start its own duplicate loop, which also
+    # made the drawing-save race above much more likely.
+    if fcntl is not None and not BACKGROUND_LOCK_HELD:
         return
 
     try:

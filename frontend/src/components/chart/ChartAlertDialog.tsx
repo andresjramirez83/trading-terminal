@@ -3,6 +3,7 @@ import {
   createChartObjectAlert,
   deleteChartObjectAlert,
   fetchChartObjectAlerts,
+  sendBackendTestAlert,
   updateChartObjectAlert,
   type ChartAlertCondition,
   type ChartAlertFibMode,
@@ -157,6 +158,7 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
   const [fibZoneIndex, setFibZoneIndex] = useState(3);
   const [working, setWorking] = useState(false);
   const [existing, setExisting] = useState<ChartObjectAlert[]>([]);
+  const [phoneConfigured, setPhoneConfigured] = useState<boolean | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -164,8 +166,10 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
     try {
       const response = await fetchChartObjectAlerts(nextDraft.symbol);
       setExisting(response.alerts.filter((alert) => belongsToDraft(alert, nextDraft)));
+      setPhoneConfigured(Boolean(response.phone_configured));
     } catch {
       setExisting([]);
+      setPhoneConfigured(null);
     }
   };
 
@@ -271,6 +275,24 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
       await refreshExisting(draft);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create alert");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const testPhone = async () => {
+    setWorking(true);
+    setMessage("");
+    setError("");
+    try {
+      await sendBackendTestAlert(
+        "Chart Alert Test",
+        `${draft.symbol} line / Fib / box phone alert test from the trading terminal`,
+      );
+      setPhoneConfigured(true);
+      setMessage("Test phone alert sent. Check Pushover on your phone.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send test phone alert");
     } finally {
       setWorking(false);
     }
@@ -450,10 +472,26 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
           </select>
         </label>
 
-        <label style={{ marginTop: 15, display: "flex", alignItems: "center", gap: 9, fontSize: 13, cursor: "pointer" }}>
-          <input type="checkbox" checked={notifyPhone} onChange={(event) => setNotifyPhone(event.target.checked)} />
-          Send phone push notification
-        </label>
+        <div style={{ marginTop: 15, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 13, cursor: "pointer" }}>
+            <input type="checkbox" checked={notifyPhone} onChange={(event) => setNotifyPhone(event.target.checked)} />
+            Send phone push notification
+          </label>
+          <button
+            type="button"
+            disabled={working}
+            onClick={() => void testPhone()}
+            style={{ border: "1px solid rgba(56,189,248,0.34)", borderRadius: 7, background: "rgba(14,165,233,0.08)", color: "#7dd3fc", padding: "6px 9px", fontSize: 11, cursor: working ? "wait" : "pointer" }}
+          >
+            Test Phone
+          </button>
+        </div>
+
+        {phoneConfigured === false && (
+          <div style={{ marginTop: 10, padding: 9, borderRadius: 8, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.18)", color: "#fca5a5", fontSize: 11, lineHeight: 1.45 }}>
+            Pushover is not configured on the backend. Drawing alerts can still be saved, but they cannot reach your phone until PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN are available to the backend service.
+          </div>
+        )}
 
         {draft.sourceType !== "study" && (
           <div style={{ marginTop: 12, fontSize: 11, lineHeight: 1.45, color: "#6b7280" }}>
@@ -479,8 +517,13 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
                       {fibExistingLabel(alert)}
                     </div>
                     <div style={{ marginTop: 2, fontSize: 10, color: "#6b7280" }}>
-                      {existingAlertTimeframeLabel(alert)} · {alert.recurrence === "once" ? "Once" : `Once per ${alert.timeframe} candle`} · {alert.status ?? (alert.active ? "armed" : "disabled")}
+                      {existingAlertTimeframeLabel(alert)} · {alert.recurrence === "once" ? "Once" : `Once per ${alert.timeframe} candle`} · {alert.status ?? (alert.active ? "armed" : "disabled")} · {alert.notify_phone ? "phone on" : "phone off"}
                     </div>
+                    {alert.last_error && (
+                      <div style={{ marginTop: 3, fontSize: 10, color: alert.status === "waiting_source_sync" ? "#fbbf24" : "#f87171", lineHeight: 1.35 }}>
+                        {alert.last_error}
+                      </div>
+                    )}
                   </div>
                   <button type="button" disabled={working} onClick={() => void toggleExisting(alert)} style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 7, background: "transparent", color: "#d1d5db", padding: "6px 8px", fontSize: 11, cursor: "pointer" }}>
                     {alert.active ? "Disable" : "Enable"}
