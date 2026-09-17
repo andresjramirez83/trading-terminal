@@ -3,7 +3,7 @@ import {
   createChartObjectAlert,
   deleteChartObjectAlert,
   fetchChartObjectAlerts,
-  sendBackendTestAlert,
+  sendChartPhoneTestAlert,
   updateChartObjectAlert,
   type ChartAlertCondition,
   type ChartAlertFibMode,
@@ -285,12 +285,9 @@ export default function ChartAlertDialog({ draft, onClose }: Props) {
     setMessage("");
     setError("");
     try {
-      await sendBackendTestAlert(
-        "Chart Alert Test",
-        `${draft.symbol} line / Fib / box phone alert test from the trading terminal`,
-      );
+      await sendChartPhoneTestAlert();
       setPhoneConfigured(true);
-      setMessage("Test phone alert sent. Check Pushover on your phone.");
+      setMessage("Test phone alert delivered through Pushover. Check your phone.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send test phone alert");
     } finally {

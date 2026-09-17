@@ -744,6 +744,32 @@ export async function sendBackendTestAlert(
   return parseJson(res);
 }
 
+export async function sendChartPhoneTestAlert(): Promise<{
+  ok: boolean;
+  delivered: boolean;
+  provider?: string;
+  result?: Record<string, any>;
+}> {
+  const res = await fetch(`${API_BASE}/chart-alerts/test-phone`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  const data = await parseJson<{
+    ok: boolean;
+    delivered: boolean;
+    provider?: string;
+    result?: Record<string, any>;
+  }>(res);
+
+  if (!data.delivered) {
+    throw new Error("Phone test was not delivered.");
+  }
+  return data;
+}
+
 export type ChartAlertSourceType = "horizontal" | "trendline" | "rectangle" | "fibonacci" | "study";
 export type ChartAlertCondition =
   | "touches"

@@ -678,6 +678,9 @@ chart_object_alert_task: Optional[asyncio.Task] = None
 chart_object_alert_last_check: Optional[datetime] = None
 chart_object_alert_last_error: Optional[str] = None
 chart_object_alert_last_alert: Optional[Dict[str, Any]] = None
+CHART_OBJECT_ALERT_PHONE_TEST_COOLDOWN_SECONDS = 30.0
+chart_object_alert_phone_test_lock = threading.Lock()
+chart_object_alert_phone_test_last_sent_monotonic = 0.0
 
 # === DEMAND-ZONE WATCHLIST PUSH ALERTS ===
 # This path is intentionally independent from the manually armed generic alert
@@ -4745,6 +4748,41 @@ def backend_alerts_toggle_selected_symbol(payload: dict = Body(default={})):
         "enabled": target in current,
         "symbols": current,
         "count": len(current),
+    }
+
+
+@app.post("/chart-alerts/test-phone")
+def test_chart_object_alert_phone():
+    global chart_object_alert_phone_test_last_sent_monotonic
+
+    if not _chart_object_alert_phone_configured():
+        raise HTTPException(
+            status_code=500,
+            detail="Pushover is not configured. Set PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN in the backend service environment.",
+        )
+
+    now = time.monotonic()
+    with chart_object_alert_phone_test_lock:
+        elapsed = now - chart_object_alert_phone_test_last_sent_monotonic
+        if chart_object_alert_phone_test_last_sent_monotonic > 0 and elapsed < CHART_OBJECT_ALERT_PHONE_TEST_COOLDOWN_SECONDS:
+            remaining = max(1, int(CHART_OBJECT_ALERT_PHONE_TEST_COOLDOWN_SECONDS - elapsed))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {remaining}s before sending another phone test.",
+            )
+
+        result = send_pushover_alert(
+            title="Chart Alert Test",
+            message="Trading terminal line / Fib / box phone alerts can reach this device.",
+            priority=1,
+        )
+        chart_object_alert_phone_test_last_sent_monotonic = now
+
+    return {
+        "ok": True,
+        "delivered": True,
+        "provider": "pushover",
+        "result": result,
     }
 
 
