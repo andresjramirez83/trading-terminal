@@ -34,6 +34,10 @@ import type { FocusSelection } from "./interaction/ToolContext";
 import { ChartAutoScaleManager } from "./ChartAutoScaleManager";
 import { getCurrentVWAP } from "./studies/VWAPStudy";
 import { getCurrentATR } from "./studies/ATRStudy";
+import {
+  buildPocStdDevLines,
+  shouldResetPocEachSession,
+} from "./studies/PocStdDevStudy";
 import { buildMarketStructure } from "./analysis/MarketStructureEngine";
 import { buildCompression } from "./analysis/CompressionEngine";
 import { buildMomentum } from "./analysis/MomentumEngine";
@@ -373,6 +377,7 @@ export class ChartEngine {
   private currentEma20Value: number | null = null;
   private currentEma50Value: number | null = null;
   private vwap3ExpansionVisible = true;
+  private pocStdDevVisible = true;
   private lastLiveStudyRenderAt = 0;
   private liveStudyRenderTimer: number | null = null;
 
@@ -635,6 +640,69 @@ export class ChartEngine {
       title: "EMA 50",
     });
 
+    const poc = this.chart.addSeries(LineSeries, {
+      color: "#f8fafc",
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      title: "POC",
+    });
+
+    const pocUpper1 = this.chart.addSeries(LineSeries, {
+      color: "rgba(56, 189, 248, 0.82)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: "POC +1σ",
+    });
+
+    const pocLower1 = this.chart.addSeries(LineSeries, {
+      color: "rgba(56, 189, 248, 0.82)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: "POC -1σ",
+    });
+
+    const pocUpper2 = this.chart.addSeries(LineSeries, {
+      color: "rgba(250, 204, 21, 0.84)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: "POC +2σ",
+    });
+
+    const pocLower2 = this.chart.addSeries(LineSeries, {
+      color: "rgba(250, 204, 21, 0.84)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: "POC -2σ",
+    });
+
+    const pocUpper3 = this.chart.addSeries(LineSeries, {
+      color: "rgba(248, 113, 113, 0.90)",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      title: "POC +3σ",
+    });
+
+    const pocLower3 = this.chart.addSeries(LineSeries, {
+      color: "rgba(248, 113, 113, 0.90)",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      title: "POC -3σ",
+    });
+
     this.series = {
       candles,
       volume,
@@ -642,6 +710,13 @@ export class ChartEngine {
       ema9,
       ema20,
       ema50,
+      poc,
+      pocUpper1,
+      pocLower1,
+      pocUpper2,
+      pocLower2,
+      pocUpper3,
+      pocLower3,
     };
 
     this.analysisRenderer = new AnalysisRenderer(this.chart);
@@ -688,6 +763,13 @@ export class ChartEngine {
       this.series.ema9,
       this.series.ema20,
       this.series.ema50,
+      this.series.poc,
+      this.series.pocUpper1,
+      this.series.pocLower1,
+      this.series.pocUpper2,
+      this.series.pocLower2,
+      this.series.pocUpper3,
+      this.series.pocLower3,
     ]) {
       (priceSeries as unknown as {
         applyOptions?: (options: Record<string, unknown>) => void;
@@ -1379,12 +1461,43 @@ export class ChartEngine {
     }));
   }
 
+  private clearPocStdDevBands(): void {
+    this.series.poc.setData([]);
+    this.series.pocUpper1.setData([]);
+    this.series.pocLower1.setData([]);
+    this.series.pocUpper2.setData([]);
+    this.series.pocLower2.setData([]);
+    this.series.pocUpper3.setData([]);
+    this.series.pocLower3.setData([]);
+  }
+
+  private renderPocStdDevBands(): void {
+    if (!this.pocStdDevVisible) return;
+    if (!this.bars.length) {
+      this.clearPocStdDevBands();
+      return;
+    }
+
+    const bands = buildPocStdDevLines(this.bars, {
+      resetEachSession: shouldResetPocEachSession(this.timeframe),
+    });
+
+    this.series.poc.setData(bands.poc);
+    this.series.pocUpper1.setData(bands.upper1);
+    this.series.pocLower1.setData(bands.lower1);
+    this.series.pocUpper2.setData(bands.upper2);
+    this.series.pocLower2.setData(bands.lower2);
+    this.series.pocUpper3.setData(bands.upper3);
+    this.series.pocLower3.setData(bands.lower3);
+  }
+
   private renderStudies(): void {
     this.lastLiveStudyRenderAt = performance.now();
     this.studyRenderer.render({
       bars: this.bars,
       settings: this.chartSettings,
     });
+    this.renderPocStdDevBands();
   }
 
   private scheduleSessionBandsRender(): void {
@@ -1677,6 +1790,24 @@ export class ChartEngine {
     this.series.ema20.applyOptions({ visible: visibility.ema20 });
     this.series.ema50.applyOptions({ visible: visibility.ema50 });
     this.series.volume.applyOptions({ visible: visibility.volume });
+
+    const pocVisibilityChanged = this.pocStdDevVisible !== visibility.pocStdDev;
+    this.pocStdDevVisible = visibility.pocStdDev;
+    for (const pocSeries of [
+      this.series.poc,
+      this.series.pocUpper1,
+      this.series.pocLower1,
+      this.series.pocUpper2,
+      this.series.pocLower2,
+      this.series.pocUpper3,
+      this.series.pocLower3,
+    ]) {
+      pocSeries.applyOptions({ visible: visibility.pocStdDev });
+    }
+    if (pocVisibilityChanged && visibility.pocStdDev) {
+      this.renderPocStdDevBands();
+    }
+
     this.vwap3ExpansionVisible = visibility.vwap3Expansion;
     this.scheduleVwap3OverlayRender();
   }

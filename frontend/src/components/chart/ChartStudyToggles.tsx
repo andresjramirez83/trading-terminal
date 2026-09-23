@@ -12,6 +12,7 @@ const TOGGLES: { key: keyof StudyVisibility; label: string }[] = [
   { key: "ema20", label: "EMA 20" },
   { key: "ema50", label: "EMA 50" },
   { key: "volume", label: "Volume" },
+  { key: "pocStdDev", label: "POC ±1σ / ±2σ / ±3σ" },
   { key: "vwap3Expansion", label: "VWAP3 Expansion" },
   { key: "bullishFvg", label: "Bullish Fair Value Gaps" },
   { key: "bearishFvg", label: "Bearish Fair Value Gaps" },

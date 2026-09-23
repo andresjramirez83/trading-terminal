@@ -149,6 +149,7 @@ const DEFAULT_STUDY_VISIBILITY: StudyVisibility = {
   ema20: true,
   ema50: true,
   volume: true,
+  pocStdDev: true,
   vwap3Expansion: true,
   bullishFvg: false,
   bearishFvg: false,

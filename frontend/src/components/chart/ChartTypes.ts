@@ -36,6 +36,7 @@ export interface StudyVisibility {
   ema20: boolean;
   ema50: boolean;
   volume: boolean;
+  pocStdDev: boolean;
   vwap3Expansion: boolean;
   bullishFvg: boolean;
   bearishFvg: boolean;
@@ -60,6 +61,13 @@ export type ChartSeriesBundle = {
   ema9: ISeriesApi<"Line">;
   ema20: ISeriesApi<"Line">;
   ema50: ISeriesApi<"Line">;
+  poc: ISeriesApi<"Line">;
+  pocUpper1: ISeriesApi<"Line">;
+  pocLower1: ISeriesApi<"Line">;
+  pocUpper2: ISeriesApi<"Line">;
+  pocLower2: ISeriesApi<"Line">;
+  pocUpper3: ISeriesApi<"Line">;
+  pocLower3: ISeriesApi<"Line">;
 };
 
 export type PriceLineKind =
