@@ -5,6 +5,11 @@ import type {
 } from "./AnalysisTypes";
 import { API_BASE } from "../../../services/api";
 import {
+  migrateLegacyChartStorage,
+  readLargeChartDocument,
+  writeLargeChartDocument,
+} from "../LargeChartStorage";
+import {
   fetchChartWorkspaceSync,
   invalidateChartWorkspaceSync,
 } from "../ChartSyncClient";
@@ -138,6 +143,7 @@ export class AnalysisStore {
   private refreshRequested = false;
   private saveInFlight = false;
   private destroyed = false;
+  private localRestorePromise: Promise<void> = Promise.resolve();
 
   private readonly handleFocus = (): void => {
     void this.refreshFromBackend(false);
@@ -220,6 +226,7 @@ export class AnalysisStore {
     }
 
     this.load();
+    this.localRestorePromise = this.restoreLargeCache(this.workspaceGeneration);
     this.notifyListeners();
     void this.refreshFromBackend(true);
   }
@@ -432,14 +439,29 @@ export class AnalysisStore {
     }
   }
 
-  private save(): void {
-    if (!canUseLocalStorage()) return;
-
+  private async restoreLargeCache(generation: number): Promise<void> {
+    await migrateLegacyChartStorage();
+    const raw = await readLargeChartDocument(this.storageKey);
+    if (this.destroyed || generation !== this.workspaceGeneration || this.remoteInitialized || !raw) return;
     try {
-      window.localStorage.setItem(this.storageKey, JSON.stringify(this.savedResults));
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const restored = parsed.filter(isValidResult).map(cloneResult);
+      const byId = new Map(restored.map((item) => [item.id, item]));
+      for (const item of this.savedResults) byId.set(item.id, item);
+      this.savedResults = Array.from(byId.values());
+      this.notifyListeners();
     } catch (error) {
-      console.warn("[AnalysisStore] failed to save FX analysis", error);
+      console.warn("[AnalysisStore] IndexedDB cache parse failed", error);
     }
+  }
+
+  private save(): void {
+    const key = this.storageKey;
+    const value = JSON.stringify(this.savedResults);
+    void writeLargeChartDocument(key, value).catch((error) => {
+      console.warn("[AnalysisStore] IndexedDB FX analysis backup failed; backend sync remains enabled", error);
+    });
   }
 
   private remoteUrl(symbol: string): string {
@@ -530,6 +552,8 @@ export class AnalysisStore {
 
     const generation = this.workspaceGeneration;
     const symbol = this.symbol;
+    await this.localRestorePromise;
+    if (this.destroyed || generation !== this.workspaceGeneration) return;
     const localSnapshot = cloneResults(this.savedResults);
     this.refreshInFlight = true;
 

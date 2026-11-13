@@ -2,6 +2,11 @@
 
 import { API_BASE } from "../../services/api";
 import {
+  migrateLegacyChartStorage,
+  readLargeChartDocument,
+  writeLargeChartDocument,
+} from "./LargeChartStorage";
+import {
   fetchChartWorkspaceSync,
   invalidateChartWorkspaceSync,
 } from "./ChartSyncClient";
@@ -248,6 +253,7 @@ export class DrawingStore {
   private saveInFlight = false;
   private destroyed = false;
   private migratedLocalSharedDrawings: ChartDrawing[] = [];
+  private localRestorePromise: Promise<void> = Promise.resolve();
 
   private readonly handleFocus = (): void => {
     void this.refreshFromBackend(false);
@@ -333,6 +339,7 @@ export class DrawingStore {
     }
 
     this.loadLocal();
+    this.localRestorePromise = this.restoreLargeCache(this.workspaceGeneration);
     void this.refreshFromBackend(true);
   }
 
@@ -503,27 +510,22 @@ export class DrawingStore {
         );
         const mergedShared = mergeScopes(existingShared, migrated);
 
-        window.localStorage.setItem(
+        // Preserve merged legacy drawings and queue the durable IndexedDB copy.
+        // Never rewrite legacy localStorage, which may already be at quota.
+        void writeLargeChartDocument(
           this.marketStructureStorageKey,
           JSON.stringify(mergedShared),
-        );
-
-        for (const item of keysToRewrite) {
-          window.localStorage.setItem(
-            item.key,
-            JSON.stringify(item.drawings),
-          );
-        }
+        ).catch((error) => console.warn("[DrawingStore] migration backup failed", error));
+        void keysToRewrite;
       }
 
       // Keep the old marker intact for backwards compatibility, but use a new
       // marker so installations that already migrated trendlines still migrate
       // rectangles, fibs, horizontals, ranges and Long Position drawings.
-      window.localStorage.setItem(
-        makeTrendlineScopeMigrationKey(this.symbol),
-        "1",
-      );
-      window.localStorage.setItem(migrationKey, "1");
+      try {
+        window.localStorage.setItem(makeTrendlineScopeMigrationKey(this.symbol), "1");
+        window.localStorage.setItem(migrationKey, "1");
+      } catch { /* The cache migrator frees space without deleting data first. */ }
       return migrated;
     } catch (error) {
       console.warn(
@@ -547,25 +549,43 @@ export class DrawingStore {
     this.drawings = mergeScopes(timeframeDrawings, sharedDrawings);
   }
 
-  private saveLocal(): void {
-    if (!canUseLocalStorage()) return;
+  private async restoreLargeCache(generation: number): Promise<void> {
+    // Migrate all symbols, not just the active symbol, to reclaim quota safely.
+    await migrateLegacyChartStorage();
+    const [timeframeRaw, sharedRaw] = await Promise.all([
+      readLargeChartDocument(this.storageKey),
+      readLargeChartDocument(this.marketStructureStorageKey),
+    ]);
+    if (this.destroyed || generation !== this.workspaceGeneration || this.remoteInitialized) return;
+    const parse = (raw: string | null): ChartDrawing[] => {
+      if (!raw) return [];
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.filter(isValidDrawing).map(cloneDrawing) : [];
+      } catch { return []; }
+    };
+    // Don't overwrite drawings the user created while IndexedDB was loading.
+    const restored = mergeScopes(
+      parse(timeframeRaw).filter((item) => scopeForDrawing(item) === "timeframe"),
+      parse(sharedRaw).filter((item) => scopeForDrawing(item) === "shared"),
+    );
+    this.drawings = mergeScopes(restored, this.drawings);
+    this.notifyListeners();
+  }
 
-    try {
-      window.localStorage.setItem(
-        this.storageKey,
-        JSON.stringify(drawingsForScope(this.drawings, "timeframe")),
-      );
-      window.localStorage.setItem(
-        this.marketStructureStorageKey,
-        JSON.stringify(drawingsForScope(this.drawings, "shared")),
-      );
-    } catch (error) {
-      console.warn("[DrawingStore] failed to save local drawings", {
-        storageKey: this.storageKey,
-        marketStructureStorageKey: this.marketStructureStorageKey,
-        error,
-      });
-    }
+  private saveLocal(): void {
+    const timeframeKey = this.storageKey;
+    const sharedKey = this.marketStructureStorageKey;
+    const timeframeData = JSON.stringify(drawingsForScope(this.drawings, "timeframe"));
+    const sharedData = JSON.stringify(drawingsForScope(this.drawings, "shared"));
+    // Put both copies into IndexedDB. Never replace them with large
+    // localStorage writes, which can fail with QuotaExceededError.
+    void Promise.all([
+      writeLargeChartDocument(timeframeKey, timeframeData),
+      writeLargeChartDocument(sharedKey, sharedData),
+    ]).catch((error) => {
+      console.warn("[DrawingStore] IndexedDB drawing backup failed; remote sync remains enabled", error);
+    });
   }
 
   private remoteScopeName(scope: DrawingScope): string {
@@ -706,6 +726,8 @@ export class DrawingStore {
     const generation = this.workspaceGeneration;
     const symbol = this.symbol;
     const timeframe = this.timeframe;
+    await this.localRestorePromise;
+    if (this.destroyed || generation !== this.workspaceGeneration) return;
     const localSnapshot = cloneDrawings(this.drawings);
 
     this.refreshInFlight = true;
