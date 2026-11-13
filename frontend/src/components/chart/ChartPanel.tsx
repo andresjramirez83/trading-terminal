@@ -85,6 +85,21 @@ const STUDY_STORAGE_KEY = "chartv2.studyVisibility";
 const RIGHT_PANEL_COLLAPSED_KEY = "chartv2.rightPanelCollapsed";
 const DRAWING_STYLE_STORAGE_KEY = "chartv2.drawingStyle";
 const FX_ANALYSIS_TOOL_STORAGE_KEY = "chartv2.fxAnalysisTool";
+// Browser storage can reach its quota, especially with saved chart drawings.
+// A failed preference save must NEVER crash the entire React chart.
+const failedChartPreferenceWrites = new Set<string>();
+function persistChartPreference(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+    failedChartPreferenceWrites.delete(key);
+  } catch (error) {
+    if (!failedChartPreferenceWrites.has(key)) {
+      failedChartPreferenceWrites.add(key);
+      console.warn(`[ChartPanel] Preference ${key} was not saved because browser storage is unavailable or full.`, error);
+    }
+  }
+}
+
 const FX_ANALYSIS_SETTINGS_STORAGE_KEY = "chartv2.fxAnalysisSettings";
 const CHART_SETTINGS_STORAGE_KEY = "chartv2.chartSettings";
 const CHART_PREFERENCES_POLL_MS = 15_000;
@@ -2072,7 +2087,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
   useEffect(() => {
     fxAnalysisToolRef.current = fxAnalysisTool;
-    localStorage.setItem(FX_ANALYSIS_TOOL_STORAGE_KEY, fxAnalysisTool);
+    persistChartPreference(FX_ANALYSIS_TOOL_STORAGE_KEY, fxAnalysisTool);
 
     if (fxAnalysisTool !== "none") {
       engineRef.current?.activateInteractionTool("select");
@@ -2083,7 +2098,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
   useEffect(() => {
     engineRef.current?.setFxAnalysisSettings(fxAnalysisSettings);
-    localStorage.setItem(
+    persistChartPreference(
       FX_ANALYSIS_SETTINGS_STORAGE_KEY,
       JSON.stringify(fxAnalysisSettings),
     );
@@ -2091,7 +2106,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
   useEffect(() => {
     engineRef.current?.setChartSettings(chartSettings);
-    localStorage.setItem(
+    persistChartPreference(
       CHART_SETTINGS_STORAGE_KEY,
       JSON.stringify(chartSettings),
     );
@@ -2100,20 +2115,20 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   useEffect(() => {
     drawingStyleRef.current = drawingStyle;
     drawingEngineRef.current?.setDefaultStyle(drawingStyle);
-    localStorage.setItem(
+    persistChartPreference(
       DRAWING_STYLE_STORAGE_KEY,
       JSON.stringify(drawingStyle),
     );
   }, [drawingStyle]);
 
   useEffect(() => {
-    localStorage.setItem(TIMEFRAME_STORAGE_KEY, timeframe);
+    persistChartPreference(TIMEFRAME_STORAGE_KEY, timeframe);
   }, [timeframe]);
 
   useEffect(() => {
     let cancelled = false;
 
-    localStorage.setItem(
+    persistChartPreference(
       MARKET_DATA_MODE_STORAGE_KEY,
       marketDataMode,
     );
@@ -2151,7 +2166,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   }, [marketDataMode, replayRuntime]);
 
   useEffect(() => {
-    localStorage.setItem(STUDY_STORAGE_KEY, JSON.stringify(studyVisibility));
+    persistChartPreference(STUDY_STORAGE_KEY, JSON.stringify(studyVisibility));
   }, [studyVisibility]);
 
   useEffect(() => {
@@ -2242,7 +2257,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   ]);
 
   useEffect(() => {
-    localStorage.setItem(
+    persistChartPreference(
       RIGHT_PANEL_COLLAPSED_KEY,
       String(rightPanelCollapsed),
     );
