@@ -6470,8 +6470,27 @@ async def _refresh_alpaca_snapshot_cache(
             "task": task,
         }
 
+    # Shield the shared task: one browser timeout must not cancel a broker
+    # refresh that other callers or the background loop are awaiting.
+    # A timed-out task remains registered so new polls do not spawn an
+    # unlimited number of broker threads while the original request is stuck.
+    def _release_finished_snapshot_task(done_task: asyncio.Task) -> None:
+        current = ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key)
+        if current is not None and current.get("task") is done_task:
+            ALPACA_SNAPSHOT_IN_FLIGHT.pop(cache_key, None)
+        # Observe errors even if every HTTP waiter has already timed out.
+        if not done_task.cancelled():
+            try:
+                done_task.exception()
+            except Exception:
+                pass
+
+    if not getattr(task, "_snapshot_cleanup_registered", False):
+        task.add_done_callback(_release_finished_snapshot_task)
+        task._snapshot_cleanup_registered = True
+
     try:
-        payload = await task
+        payload = await asyncio.wait_for(asyncio.shield(task), timeout=12.0)
         if ALPACA_SNAPSHOT_GENERATION.get(normalized_mode, 0) == generation:
             ALPACA_SNAPSHOT_CACHE[cache_key] = {
                 "stored_at": time.monotonic(),
@@ -6479,10 +6498,19 @@ async def _refresh_alpaca_snapshot_cache(
             }
             alpaca_snapshot_last_refresh[normalized_mode] = datetime.now(timezone.utc)
         return payload
+    except asyncio.TimeoutError as exc:
+        # Do not return an old position/order snapshot as if it were fresh.
+        raise HTTPException(
+            status_code=503,
+            detail="Live broker snapshot is still pending; account and order data could not be verified as current.",
+        ) from exc
     finally:
-        current = ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key)
-        if current is not None and current.get("task") is task:
-            ALPACA_SNAPSHOT_IN_FLIGHT.pop(cache_key, None)
+        # A still-running task is deliberately kept in IN_FLIGHT. The done
+        # callback releases it once it actually completes.
+        if task.done():
+            current = ALPACA_SNAPSHOT_IN_FLIGHT.get(cache_key)
+            if current is not None and current.get("task") is task:
+                ALPACA_SNAPSHOT_IN_FLIGHT.pop(cache_key, None)
 
 
 async def run_alpaca_snapshot_loop() -> None:
