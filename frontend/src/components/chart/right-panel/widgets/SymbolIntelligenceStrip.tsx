@@ -77,7 +77,9 @@ export default function SymbolIntelligenceStrip({ symbol }: Props) {
   const colors = tone(data);
   const haltText = data?.active_halt
     ? `HALTED ${data.active_halt.reason_code ?? ""}`.trim()
-    : "NO HALT";
+    : data?.halt_status === "unknown" || data?.sources?.nasdaq_halts?.ok === false
+      ? "UNKNOWN"
+      : "NO HALT";
 
   return (
     <section

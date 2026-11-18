@@ -1887,6 +1887,7 @@ export type SymbolIntelligenceResponse = {
   symbol: string;
   as_of: string;
   active_halt?: SymbolIntelligenceHalt | null;
+  halt_status?: "unknown" | "halted" | "no_active_halt_in_feed";
   halts: SymbolIntelligenceHalt[];
   alerts: SymbolIntelligenceAlert[];
   news: SymbolIntelligenceNewsItem[];

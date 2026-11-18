@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 import { useTradeHistoryStore } from "../../../../trading/hooks/useTradeHistoryStore";
 import TradeJournalWidget from "./trading/TradeJournalWidget";
+import PreTradeAIAnalysis from "./PreTradeAIAnalysis";
 
 type CoachWorkspacePanelProps = {
   symbol: string;
@@ -32,6 +33,7 @@ export default function CoachWorkspacePanel({
         </div>
       </section>
 
+      <PreTradeAIAnalysis symbol={safeSymbol} />
       <TradeJournalWidget
         trades={historyStore.journalTrades}
         coachReviews={historyStore.vwap3CoachReviews}

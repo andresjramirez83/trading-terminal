@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import ScannerPanel from "../components/ScannerPanel";
+import AIPatternLab from "../components/AIPatternLab";
 
 const SHARED_SCANNER_WATCHLIST_STORAGE_KEY = "watchlist";
 const SHARED_ACTIVE_SYMBOL_STORAGE_KEY = "activeSymbol";
@@ -155,6 +156,8 @@ export default function ScannerPage() {
           </button>
         </div>
       </div>
+
+      <AIPatternLab selectedSymbol={symbol} onSelectSymbol={handleSelectSymbol} />
 
       <div
         style={{

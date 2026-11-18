@@ -270,8 +270,10 @@ export default function NewsWorkspacePanel({ symbol }: Props) {
               {data.active_halt.halt_date || ""} {data.active_halt.halt_time || ""} ET
             </div>
           </div>
+        ) : data?.halt_status === "unknown" || data?.sources?.nasdaq_halts?.ok === false ? (
+          <div style={{ color: "#fcd34d", fontSize: 11, fontWeight: 800 }}>Nasdaq halt status UNKNOWN — feed unavailable. Verify with Nasdaq Trader before trading.</div>
         ) : (
-          <div style={{ color: "#86efac", fontSize: 11, fontWeight: 800 }}>No active Nasdaq halt found.</div>
+          <div style={{ color: "#86efac", fontSize: 11, fontWeight: 800 }}>No active halt in the available Nasdaq feed.</div>
         )}
       </Card>
 

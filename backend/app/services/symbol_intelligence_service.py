@@ -150,6 +150,12 @@ def _keyword_category(headline: str, summary: str = "") -> str:
             "prices offering",
             "priced offering",
             "424b",
+            "convertible note",
+            "convertible debt",
+            "warrant issuance",
+            "private placement",
+            "securities purchase agreement",
+            "equity line of credit",
         )
     ):
         return "offering"
@@ -269,35 +275,49 @@ def _xml_local_name(tag: str) -> str:
 
 
 def _parse_nasdaq_halts(xml_text: str) -> List[Dict[str, Any]]:
-    # Some Nasdaq RSS responses historically used the ndaq: prefix without
-    # declaring the namespace. Sanitizing the prefix keeps ElementTree robust
-    # across both forms of the feed.
-    sanitized = xml_text.replace("<ndaq:", "<ndaq_").replace("</ndaq:", "</ndaq_")
-    root = ET.fromstring(sanitized)
+    """Parse Nasdaq RSS with or without correctly declared `ndaq` namespaces.
+
+    Reject HTML / blocked feed responses instead of interpreting them as no halts.
+    """
+    data = (xml_text or "").lstrip("\ufeff \t\r\n")
+    if not data.startswith("<") or data[:150].lower().startswith(("<!doctype html", "<html")):
+        raise ValueError("Nasdaq returned non-RSS content (possible block, gateway or HTML)")
+    # Namespace handling is normally provided by ElementTree. The source has
+    # occasionally emitted a namespace prefix with no declaration.
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        if "unbound prefix" not in str(exc):
+            raise ValueError(f"Nasdaq response is not valid RSS XML: {exc}") from exc
+        repaired = data.replace("<ndaq:", "<ndaq_").replace("</ndaq:", "</ndaq_")
+        root = ET.fromstring(repaired)
+    if _xml_local_name(root.tag).lower() != "rss":
+        raise ValueError(f"Expected Nasdaq RSS, received {_xml_local_name(root.tag)[:60]}")
     rows: List[Dict[str, Any]] = []
-    for item in root.findall(".//item"):
+    for item in root.iter():
+        if _xml_local_name(item.tag).lower() != "item":
+            continue
         values: Dict[str, str] = {}
         for child in list(item):
             values[_xml_local_name(child.tag)] = (child.text or "").strip()
-        symbol = (values.get("IssueSymbol") or values.get("title") or "").strip().upper()
-        if not symbol:
+        symbol = values.get("IssueSymbol", "").strip().upper()
+        # Do not treat a headline/title containing a company name as a symbol.
+        if not re.fullmatch(r"[A-Z0-9.\-]{1,20}", symbol):
             continue
         reason_code = values.get("ReasonCode", "")
-        rows.append(
-            {
-                "symbol": symbol,
-                "company": values.get("IssueName") or None,
-                "market": values.get("Market") or None,
-                "halt_date": values.get("HaltDate") or None,
-                "halt_time": values.get("HaltTime") or None,
-                "reason_code": reason_code or None,
-                "reason": HALT_CODE_LABELS.get(reason_code, reason_code or "Trading Halt"),
-                "pause_threshold_price": values.get("PauseThresholdPrice") or None,
-                "resumption_date": values.get("ResumptionDate") or None,
-                "resumption_quote_time": values.get("ResumptionQuoteTime") or None,
-                "resumption_trade_time": values.get("ResumptionTradeTime") or None,
-            }
-        )
+        rows.append({
+            "symbol": symbol,
+            "company": values.get("IssueName") or None,
+            "market": values.get("Market") or None,
+            "halt_date": values.get("HaltDate") or None,
+            "halt_time": values.get("HaltTime") or None,
+            "reason_code": reason_code or None,
+            "reason": HALT_CODE_LABELS.get(reason_code, reason_code or "Trading Halt"),
+            "pause_threshold_price": values.get("PauseThresholdPrice") or None,
+            "resumption_date": values.get("ResumptionDate") or None,
+            "resumption_quote_time": values.get("ResumptionQuoteTime") or None,
+            "resumption_trade_time": values.get("ResumptionTradeTime") or None,
+        })
     return rows
 
 
@@ -306,22 +326,34 @@ def _fetch_nasdaq_halts() -> Dict[str, Any]:
     cached = _cache.get(cache_key)
     if cached is not None:
         return cached
-    try:
-        response = _session.get(
-            NASDAQ_HALTS_URL,
-            headers={"Accept": "application/rss+xml, application/xml, text/xml, */*"},
-            timeout=(4, 10),
-        )
-        response.raise_for_status()
-        rows = _parse_nasdaq_halts(response.text)
-        return _cache.put(cache_key, {"ok": True, "error": None, "items": rows}, HALTS_TTL_SECONDS)
-    except Exception as exc:
-        return _cache.put(
-            cache_key,
-            {"ok": False, "error": f"Nasdaq halt feed unavailable: {exc}", "items": []},
-            HALTS_TTL_SECONDS,
-        )
 
+    # NasdaqTrader documents the RSS endpoint; the alternate host can be useful
+    # when a CDN/network path returns a non-XML page. Never interpret failure as
+    # "no active halts". The client should show status unknown when both fail.
+    candidates = list(dict.fromkeys([
+        NASDAQ_HALTS_URL,
+        "https://nasdaqtrader.com/rss.aspx?feed=tradehalts",
+        "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts",
+    ]))
+    errors = []
+    for url in candidates:
+        try:
+            response = _session.get(
+                url,
+                headers={"Accept": "application/rss+xml, application/xml, text/xml, */*",
+                         "User-Agent": "Mozilla/5.0 TradingTerminal/1.0"},
+                timeout=(4, 10),
+            )
+            response.raise_for_status()
+            rows = _parse_nasdaq_halts(response.text)
+            return _cache.put(cache_key, {"ok": True, "error": None, "items": rows,
+                                          "feed_url": url, "checked_at": datetime.now(timezone.utc).isoformat()},
+                              HALTS_TTL_SECONDS)
+        except (requests.RequestException, ValueError, ET.ParseError) as exc:
+            errors.append(f"{url}: {str(exc)[:140]}")
+    return _cache.put(cache_key,
+                      {"ok": False, "error": "Nasdaq halt feed unavailable; status unknown. " + "; ".join(errors),
+                       "items": []}, HALTS_TTL_SECONDS)
 
 
 def _fetch_nasdaq_earnings_today() -> Dict[str, Any]:
@@ -428,8 +460,10 @@ def _fetch_sec_ticker_map() -> Dict[str, Dict[str, Any]]:
                         "title": row.get("title"),
                     }
         return _cache.put("sec:ticker-map", out, SEC_TICKERS_TTL_SECONDS)
-    except Exception:
-        return {}
+    except requests.RequestException as exc:
+        raise RuntimeError(f"SEC ticker lookup unavailable: {exc}") from exc
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"SEC ticker lookup returned invalid data: {exc}") from exc
 
 
 def _sec_filing_category(form: str) -> str:
@@ -464,7 +498,10 @@ def _fetch_sec_filings(symbol: str, limit: int = 12) -> Dict[str, Any]:
             FILINGS_TTL_SECONDS,
         )
 
-    ticker_map = _fetch_sec_ticker_map()
+    try:
+        ticker_map = _fetch_sec_ticker_map()
+    except RuntimeError as exc:
+        return _cache.put(cache_key, {"ok": False, "error": str(exc), "items": []}, FILINGS_TTL_SECONDS)
     company = ticker_map.get(symbol)
     if not company:
         return _cache.put(
@@ -605,6 +642,7 @@ def get_symbol_intelligence(symbol: str, news_limit: int = 20, filings_limit: in
         "symbol": normalized,
         "as_of": datetime.now(timezone.utc).isoformat(),
         "active_halt": active_halt,
+        "halt_status": "unknown" if not halts_feed.get("ok") else "halted" if active_halt else "no_active_halt_in_feed",
         "halts": halts,
         "alerts": alerts,
         "news": news.get("items", []),
