@@ -22,8 +22,85 @@ export type AIEvidence = {
   strong_bullish_close?: boolean;
 };
 
+export type AIMarkup = {
+  id: string; kind: "level" | "zone" | "marker" | "projection"; tone: "watch" | "confirmed" | "risk" | "context";
+  timeframe: "1m" | "5m" | "all"; label: string; source: "closed_bars";
+  price?: number; low?: number; high?: number; time_ms?: number;
+  scenario?: "base" | "bull" | "bear"; stale?: boolean;
+  points?: { step: number; price: number }[];
+};
+
+export type AIScenarioFrame = {
+  timeframe: "1m" | "5m";
+  anchor_time_ms: number; anchor_price: number; bars_forward: number;
+  stale: boolean; age_minutes: number; bias: "bullish" | "bearish" | "range";
+  evidence_strength: string; evidence_score: number;
+  bull_points: number; bear_points: number; reasons: string[];
+  support: number; resistance: number;
+  upside_trigger: number; downside_trigger: number;
+  bullish_path: { step: number; price: number }[];
+  bearish_path: { step: number; price: number }[];
+  base_path: { step: number; price: number }[];
+};
+
+export type AIProjections = {
+  method: string; note: string; probability_calibrated: false;
+  timeframes: { "1m"?: AIScenarioFrame; "5m"?: AIScenarioFrame };
+};
+
+export type AIFairValueGap = {
+  id: string; timeframe: "1m" | "5m" | "15m" | "30m" | "1h";
+  direction: "bullish" | "bearish";
+  status: "untouched" | "retested" | "partially_filled" | "filled" | "invalidated";
+  formed_time_ms: number;
+  original_low: number; original_high: number;
+  remaining_low: number; remaining_high: number;
+  remaining_fraction: number; rejection_count: number;
+  distance_atr?: number; rank_points?: number; bars_old: number;
+  data_stale?: boolean;
+};
+
+export type AIRespectTimeframe = {
+  timeframe: string; closed_candles: number;
+  positive_reactions: number; broken_zones: number;
+  fvg_rejections: number; swing_rejections: number;
+  quality: "strong" | "moderate" | "mixed" | "insufficient";
+  respect_ratio: number | null; open_fvgs: number;
+  age_minutes: number | null; stale: boolean;
+  evidence: { time_ms: number; type: string; zone: string; price: number }[];
+};
+
+export type AIMultiTimeframe = {
+  method: string;
+  timeframes: Record<string, AIRespectTimeframe>;
+  dominant_timeframe: string | null;
+  dominant_reason: string;
+  ranked_open_gaps: AIFairValueGap[];
+  selected_gap: AIFairValueGap | null;
+  feed_errors?: Record<string, string>;
+  notes?: string[];
+};
+
+export type AILiquiditySweepStage = {
+  stage: "liquidity" | "sweep" | "reclaim" | "hold" | "breakout";
+  time_ms: number; price: number;
+};
+export type AILiquiditySweepMatch = {
+  reference_name: string; timeframe: string;
+  status: "not_found" | "insufficient_data" | "unsupported" | "invalidated" |
+          "reclaimed_waiting_retest" | "retest_held" | "continuation_observed";
+  matched: boolean; historical_only: boolean;
+  zone?: { low: number; high: number; level: number; start_time_ms: number; end_time_ms: number } | null;
+  sweep_low?: number | null; stages: AILiquiditySweepStage[];
+  reasons: string[]; method: string; last_closed_time_ms?: number | null;
+};
+
 export type AIReport = {
   symbol: string;
+  annotations?: AIMarkup[];
+  pattern_match?: AILiquiditySweepMatch;
+  projections?: AIProjections;
+  multi_timeframe?: AIMultiTimeframe;
   as_of?: string;
   phase: string;
   rank_points?: number;
@@ -44,8 +121,23 @@ export type AIReport = {
   advisory?: string;
 };
 
+let temporaryLocalToken = "";
+function isLoopbackBrowser(): boolean {
+  return typeof window !== "undefined" && ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
+}
+
+// Temporary session-only fallback for an explicitly established localhost SSH tunnel.
+// Never store or transmit this token from the public HTTP origin.
+export function setTemporaryLocalAIToken(token: string): void {
+  if (!isLoopbackBrowser()) throw new Error("Temporary AI token is only allowed on localhost through a secure SSH tunnel.");
+  temporaryLocalToken = token.trim();
+}
+export function clearTemporaryLocalAIToken(): void { temporaryLocalToken = ""; }
+export function hasTemporaryLocalAIToken(): boolean { return isLoopbackBrowser() && !!temporaryLocalToken; }
+
 function authHeaders(token: string): Record<string, string> {
-  return token.trim() ? { "X-AI-Analysis-Token": token.trim() } : {};
+  const selected = token.trim() || (isLoopbackBrowser() ? temporaryLocalToken : "");
+  return selected ? { "X-AI-Analysis-Token": selected } : {};
 }
 
 async function parseResponse<T>(response: Response): Promise<T> {
@@ -56,7 +148,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
 
 export async function fetchAIPatterns(token: string): Promise<AIPattern[]> {
   const response = await fetch(`${API_BASE}/ai-analysis/patterns`, {
-    headers: authHeaders(token), cache: "no-store",
+    headers: authHeaders(token), cache: "no-store", credentials: "same-origin",
   });
   const result = await parseResponse<{ patterns: AIPattern[] }>(response);
   return result.patterns;
@@ -67,7 +159,7 @@ export async function saveAIPattern(payload: {
 }, token: string): Promise<AIPattern> {
   const response = await fetch(`${API_BASE}/ai-analysis/patterns`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    headers: { "Content-Type": "application/json", ...authHeaders(token) }, credentials: "same-origin",
     body: JSON.stringify(payload),
   });
   return parseResponse<AIPattern>(response);
@@ -76,8 +168,8 @@ export async function saveAIPattern(payload: {
 export async function analyzeAIChart(symbol: string, referenceId: string, token: string): Promise<AIReport> {
   const response = await fetch(`${API_BASE}/ai-analysis/analyze/${encodeURIComponent(symbol)}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders(token) },
-    body: JSON.stringify({ reference_id: referenceId || null, include_vision: true, include_news: true, include_level2: true }),
+    headers: { "Content-Type": "application/json", ...authHeaders(token) }, credentials: "same-origin",
+    body: JSON.stringify({ reference_id: referenceId || null, include_vision: true, include_news: true, include_level2: true, include_multi_timeframe: true }),
   });
   return parseResponse<AIReport>(response);
 }
@@ -87,16 +179,42 @@ export async function scanAICharts(symbols: string[], referenceId: string, token
 }> {
   const response = await fetch(`${API_BASE}/ai-analysis/scan`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    headers: { "Content-Type": "application/json", ...authHeaders(token) }, credentials: "same-origin",
     body: JSON.stringify({ symbols, reference_id: referenceId || null, visual_top_n: visualTopN }),
   });
-  return parseResponse(response);
+  return parseResponse<{ as_of: string; rank_explanation: string; results: AIReport[] }>(response);
 }
 
 export async function fetchAIPatternImage(patternId: string, token: string): Promise<Blob> {
   const response = await fetch(`${API_BASE}/ai-analysis/patterns/${encodeURIComponent(patternId)}/image`, {
-    headers: authHeaders(token), cache: "no-store",
+    headers: authHeaders(token), cache: "no-store", credentials: "same-origin",
   });
   if (!response.ok) throw new Error(`Could not load pattern screenshot (${response.status})`);
   return response.blob();
+}
+
+
+// The browser receives only a Secure, HttpOnly, SameSite=Strict session cookie.
+// The API token is sent once over HTTPS and is never stored in JavaScript storage.
+export async function getAISession(): Promise<{ authenticated: boolean; requires_token: boolean }> {
+  const response = await fetch(`${API_BASE}/ai-analysis/session`, { credentials: "same-origin", cache: "no-store" });
+  return parseResponse(response);
+}
+
+export async function beginAISession(token: string): Promise<void> {
+  if (typeof window === "undefined" || window.location.protocol !== "https:") {
+    throw new Error("Secure remembered sign-in requires HTTPS. Do not enter the AI token on an HTTP website.");
+  }
+  const response = await fetch(`${API_BASE}/ai-analysis/session`, {
+    method: "POST", credentials: "same-origin", cache: "no-store",
+    headers: { "X-AI-Analysis-Token": token.trim() },
+  });
+  await parseResponse(response);
+}
+
+export async function endAISession(): Promise<void> {
+  const response = await fetch(`${API_BASE}/ai-analysis/session`, {
+    method: "DELETE", credentials: "same-origin", cache: "no-store",
+  });
+  await parseResponse(response);
 }

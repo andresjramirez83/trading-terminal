@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { fetchAIPatternImage, fetchAIPatterns, saveAIPattern, scanAICharts, type AIPattern, type AIReport } from "../services/aiAnalysis";
+import AIAuthPanel from "./AIAuthPanel";
 
 type Props = { selectedSymbol: string; onSelectSymbol: (symbol: string) => void };
 const field: CSSProperties = { border: "1px solid #334155", background: "#071225", color: "#f1f5f9", padding: "8px", borderRadius: 7, maxWidth: "100%" };
@@ -16,13 +17,15 @@ function fileAsDataUrl(file: File): Promise<string> {
 
 export default function AIPatternLab({ selectedSymbol, onSelectSymbol }: Props) {
   const [patterns, setPatterns] = useState<AIPattern[]>([]);
-  const [token, setToken] = useState("");
   const [name, setName] = useState("Bullish pullback");
   const [label, setLabel] = useState("interesting");
   const [timeframe, setTimeframe] = useState("1m");
   const [note, setNote] = useState("Rally, 60–78% pullback, potential reversal; mark the alert candle and ignore future price action.");
   const [file, setFile] = useState<File | null>(null);
-  const [referenceId, setReferenceId] = useState("");
+  const [referenceId, setReferenceId] = useState(() => {
+    try { return window.sessionStorage.getItem("tt_selected_ai_reference") || ""; }
+    catch { return ""; }
+  });
   const [previewUrl, setPreviewUrl] = useState("");
   const [scanSymbols, setScanSymbols] = useState("");
   const [visualTop, setVisualTop] = useState(false);
@@ -31,17 +34,20 @@ export default function AIPatternLab({ selectedSymbol, onSelectSymbol }: Props) 
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    try { setPatterns(await fetchAIPatterns(token)); }
+    try { setPatterns(await fetchAIPatterns("")); }
     catch (e) { setNotice(e instanceof Error ? e.message : "Could not load pattern library"); }
-  }, [token]);
+  }, []);
   useEffect(() => { void fetchAIPatterns("").then(setPatterns).catch(() => {}); }, []);
+  useEffect(() => {
+    try { window.sessionStorage.setItem("tt_selected_ai_reference", referenceId); } catch { /* optional UI state */ }
+  }, [referenceId]);
 
   async function save() {
     if (!file) { setNotice("Select a chart screenshot first."); return; }
     if (file.size > 5 * 1024 * 1024) { setNotice("Screenshot must be smaller than 5 MB."); return; }
     setBusy(true); setNotice("");
     try {
-      const saved = await saveAIPattern({ name, label, timeframe, note, image_data: await fileAsDataUrl(file) }, token);
+      const saved = await saveAIPattern({ name, label, timeframe, note, image_data: await fileAsDataUrl(file) }, "");
       setReferenceId(saved.id);
       setNotice(`Saved ${saved.name}. Example saved for future comparison; it has not trained a model.`);
       await refresh();
@@ -53,7 +59,7 @@ export default function AIPatternLab({ selectedSymbol, onSelectSymbol }: Props) 
     if (!referenceId) return;
     setNotice("");
     try {
-      const url = URL.createObjectURL(await fetchAIPatternImage(referenceId, token));
+      const url = URL.createObjectURL(await fetchAIPatternImage(referenceId, ""));
       setPreviewUrl((previous) => { if (previous) URL.revokeObjectURL(previous); return url; });
     } catch (e) { setNotice(e instanceof Error ? e.message : "Preview unavailable"); }
   }
@@ -69,7 +75,7 @@ export default function AIPatternLab({ selectedSymbol, onSelectSymbol }: Props) 
       const sources = scanSymbols.trim() ? scanSymbols.split(/[\s,;]+/) : [...watchlist, selectedSymbol];
       const symbols = Array.from(new Set(sources.map((s) => s.trim().toUpperCase()).filter((s) => /^[A-Z0-9.\-]{1,15}$/.test(s)))).slice(0, 30);
       if (!symbols.length) throw new Error("Add at least one ticker to scan.");
-      const data = await scanAICharts(symbols, referenceId, token, visualTop ? 1 : 0);
+      const data = await scanAICharts(symbols, referenceId, "", visualTop ? 1 : 0);
       setResult(data.results);
       setNotice(`Scanned ${data.results.length} symbols on demand. Ranking is rule-based, NOT an AI probability.`);
     } catch (e) { setNotice(e instanceof Error ? e.message : "Scan failed"); }
@@ -104,14 +110,17 @@ export default function AIPatternLab({ selectedSymbol, onSelectSymbol }: Props) 
           {previewUrl && <img src={previewUrl} alt="Saved pattern reference" style={{ width: "min(100%, 700px)", borderRadius: 8 }} />}
         </div>
         <label style={{ fontSize: 12, display: "flex", gap: 8 }}><input type="checkbox" checked={visualTop} onChange={(e) => setVisualTop(e.target.checked)} />Visually review top-ranked result (requires OPENAI_API_KEY; may incur API costs)</label>
-        <details><summary style={{ cursor: "pointer", fontSize: 12 }}>API access token (if required)</summary><input style={{ ...field, marginTop: 6 }} type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Not stored" /><button type="button" style={{ ...button, marginLeft: 8 }} onClick={() => void refresh()}>Reload Pattern Library</button></details>
+        <AIAuthPanel onSignedIn={() => void refresh()} />
+        <button type="button" style={{ ...button, background: "#17223a", width: "fit-content" }} onClick={() => void refresh()}>Reload Pattern Library</button>
         <div><button style={button} type="button" disabled={busy} onClick={() => void runScan()}>{busy ? "Working…" : "Scan For Developing Patterns"}</button></div>
       </div>
       {notice && <div role="status" style={{ margin: "10px 0", color: "#fde68a", fontSize: 12 }}>{notice}</div>}
       {result.length > 0 && <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
         {result.map((r) => <button key={r.symbol} type="button" onClick={() => { onSelectSymbol(r.symbol); window.location.assign("/chart"); }} style={{ ...field, cursor: "pointer", textAlign: "left", display: "flex", gap: 12, justifyContent: "space-between" }}>
           <span><strong>{r.symbol}</strong> · {r.phase?.replace(/_/g, " ")}</span>
-          <span>Points {r.rank_points ?? 0}/6 · Retrace {r.structure?.retracement_pct ?? "—"}% · {r.vision?.ok ? "Visual review available" : "Open chart"}</span>
+          <span>Points {r.rank_points ?? 0}/6 · Retrace {r.structure?.retracement_pct ?? "—"}%
+          {r.pattern_match ? ` · Saved pattern: ${r.pattern_match.status.replaceAll("_", " ")}` : ""}
+          {r.vision?.ok ? " · Visual review available" : " · Open chart"}</span>
         </button>)}
       </div>}
     </details>
