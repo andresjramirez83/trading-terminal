@@ -11,10 +11,12 @@ from .market_cache import count_scanner_picks, init_db, save_scanner_picks
 from .alpaca_history_loader import (
     load_alpaca_history,
     load_alpaca_history_for_ranges,
+    load_alpaca_history_bulk,
 )
 from .sweep_backtest import run_scanner_sweep_backtest, run_sweep_backtest
 from .vwap_std_backtest import run_vwap3_backtest
 from .fib_continuation_backtest import run_fib_continuation_backtest
+from .resistance_breakout_backtest import run_resistance_breakout_backtest
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 daily_watchlists = DailyWatchlistStore()
@@ -104,6 +106,30 @@ class FibContinuationBacktestRequest(BaseModel):
     target_sessions: int = Field(default=5, ge=1, le=30)
     cooldown_bars: int = Field(default=12, ge=1, le=1000)
     fib_lookback_bars: int = Field(default=6, ge=0, le=100)
+    example_limit: int = Field(default=100, ge=1, le=500)
+
+
+class ResistanceBreakoutBacktestRequest(BaseModel):
+    symbols: Optional[List[str]] = None
+    include_archived_watchlists: bool = True
+    include_scanner: bool = True
+    include_manual: bool = True
+    scanner_ids: Optional[List[str]] = None
+
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    timeframe: str = "4h"
+    months: int = Field(default=12, ge=1, le=24)
+    auto_load_alpaca: bool = True
+    max_symbols: int = Field(default=50, ge=1, le=500)
+
+    atr_length: int = Field(default=14, ge=2, le=100)
+    expansion_range_atr: float = Field(default=1.50, ge=0)
+    expansion_min_body_fraction: float = Field(default=0.50, ge=0, le=1)
+    expansion_min_close_location: float = Field(default=0.65, ge=0, le=1)
+    max_trigger_bars: int = Field(default=20, ge=1, le=500)
+    max_outcome_bars: int = Field(default=60, ge=1, le=1000)
+    dedupe_breakout_bar: bool = True
     example_limit: int = Field(default=100, ge=1, le=500)
 
 
@@ -436,6 +462,110 @@ async def run_fib_continuation(req: FibContinuationBacktestRequest):
         "max_symbols": req.max_symbols,
         "truncated": available_symbol_count > len(symbols),
     }
+    result["alpaca_load"] = alpaca_load
+    return result
+
+
+@router.post("/resistance-breakout/run")
+async def run_resistance_breakout(req: ResistanceBreakoutBacktestRequest):
+    init_db()
+
+    timeframe = str(req.timeframe or "").lower().strip()
+    if timeframe not in {"15m", "30m", "1h", "4h", "1d"}:
+        raise HTTPException(
+            status_code=400,
+            detail="timeframe must be one of: 15m, 30m, 1h, 4h, 1d",
+        )
+
+    if bool(req.start_date) != bool(req.end_date):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide both start_date and end_date or neither.",
+        )
+
+    explicit_symbols: List[str] = []
+    for raw in req.symbols or []:
+        symbol = "".join(ch for ch in str(raw).upper().strip() if ch.isalpha() or ch == ".")
+        if symbol and symbol not in explicit_symbols:
+            explicit_symbols.append(symbol)
+
+    archive_counts: Dict[str, int] = defaultdict(int)
+    if req.include_archived_watchlists:
+        candidate_by_date = _candidate_map(
+            start_date=req.start_date,
+            end_date=req.end_date,
+            include_scanner=req.include_scanner,
+            include_manual=req.include_manual,
+            scanner_ids=req.scanner_ids,
+        )
+        for day_symbols in candidate_by_date.values():
+            for symbol in day_symbols or []:
+                archive_counts[symbol] += 1
+
+    ranked_archive_symbols = [
+        symbol
+        for symbol, _count in sorted(
+            archive_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+    symbols: List[str] = list(explicit_symbols)
+    for symbol in ranked_archive_symbols:
+        if symbol not in symbols:
+            symbols.append(symbol)
+
+    available_symbol_count = len(symbols)
+    symbols = symbols[: req.max_symbols]
+    if not symbols:
+        return {
+            "ok": False,
+            "error": "No symbols supplied and no archived watchlist symbols were found.",
+            "hint": "Supply symbols explicitly or archive scanner/manual watchlists first.",
+        }
+
+    alpaca_load: Optional[Dict[str, Any]] = None
+    if req.auto_load_alpaca:
+        buffer_by_timeframe = {
+            "15m": (3, 7),
+            "30m": (5, 10),
+            "1h": (7, 14),
+            "4h": (21, 45),
+            "1d": (45, 150),
+        }
+        warmup_days, future_days = buffer_by_timeframe[timeframe]
+        alpaca_load = await load_alpaca_history_bulk(
+            symbols,
+            timeframe,
+            months=req.months,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            warmup_calendar_days=warmup_days,
+            future_calendar_days=future_days,
+        )
+
+    result = run_resistance_breakout_backtest(
+        symbols,
+        timeframe=timeframe,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        atr_length=req.atr_length,
+        expansion_range_atr=req.expansion_range_atr,
+        expansion_min_body_fraction=req.expansion_min_body_fraction,
+        expansion_min_close_location=req.expansion_min_close_location,
+        max_trigger_bars=req.max_trigger_bars,
+        max_outcome_bars=req.max_outcome_bars,
+        dedupe_breakout_bar=req.dedupe_breakout_bar,
+        example_limit=req.example_limit,
+    )
+    result["universe"].update({
+        "explicit_symbols": explicit_symbols,
+        "archived_symbol_count": len(ranked_archive_symbols),
+        "available_symbol_count": available_symbol_count,
+        "tested_symbol_count": len(symbols),
+        "max_symbols": req.max_symbols,
+        "truncated": available_symbol_count > len(symbols),
+    })
     result["alpaca_load"] = alpaca_load
     return result
 

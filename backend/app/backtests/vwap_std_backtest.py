@@ -234,6 +234,9 @@ def _find_projection_peak(
     previous_target: Optional[float] = None
     consecutive_lower = 0
     examined = 0
+    freeze_idx: Optional[int] = None
+    freeze_reason = "window_end"
+    last_examined_idx: Optional[int] = None
 
     for idx in range(event_idx, stop_idx + 1):
         deviation = _rolling_std(tps, idx, std_length)
@@ -242,6 +245,7 @@ def _find_projection_peak(
         vwap = vwap_values[idx]
         target = vwap + float(multiplier) * deviation
         examined += 1
+        last_examined_idx = idx
 
         if target > peak_target:
             peak_target = target
@@ -256,20 +260,38 @@ def _find_projection_peak(
         previous_target = target
 
         if peak_idx is not None and idx > peak_idx and consecutive_lower >= max(1, contraction_bars):
+            freeze_idx = idx
+            freeze_reason = "contraction"
             break
 
     if peak_idx is None or not math.isfinite(peak_target):
         return None
 
+    # The peak is not knowable in real time until either:
+    # 1) the required contraction bars confirm it, or
+    # 2) the defined projection window/session ends.
+    if freeze_idx is None:
+        freeze_idx = last_examined_idx
+        freeze_reason = "window_end"
+
+    if freeze_idx is None:
+        return None
+
+    # Include the confirmation bars. If price already touched the
+    # eventual target before it became knowable, it is not a tradable hit.
     max_high_before_freeze = max(
-        _safe_float(rows[idx].get("high")) for idx in range(event_idx, peak_idx + 1)
+        _safe_float(rows[idx].get("high"))
+        for idx in range(event_idx, freeze_idx + 1)
     )
     return {
         "peak_idx": peak_idx,
+        "freeze_idx": freeze_idx,
+        "freeze_reason": freeze_reason,
         "target": peak_target,
         "vwap": peak_vwap,
         "std": peak_std,
         "bars_from_displacement": peak_idx - event_idx,
+        "bars_to_freeze": freeze_idx - event_idx,
         "examined_bars": examined,
         "already_reached_before_freeze": max_high_before_freeze >= peak_target,
         "max_high_before_freeze": max_high_before_freeze,
@@ -632,9 +654,11 @@ def run_vwap3_backtest(
                 continue
 
             peak_idx = int(projection["peak_idx"])
+            freeze_idx = int(projection["freeze_idx"])
             target = float(projection["target"])
             event = rows[event_idx]
             peak_row = rows[peak_idx]
+            freeze_row = rows[freeze_idx]
             event_high = _safe_float(event.get("high"))
             event_low = _safe_float(event.get("low"))
             event_open = _safe_float(event.get("open"))
@@ -644,7 +668,7 @@ def run_vwap3_backtest(
             path = _event_path(
                 rows,
                 event_idx,
-                peak_idx,
+                freeze_idx,
                 target,
                 future_trading_days=future_trading_days,
             )
@@ -668,6 +692,11 @@ def run_vwap3_backtest(
                 "projection_peak_time": peak_row.get("dt_et"),
                 "projection_peak_trade_date": str(peak_row.get("trade_date") or ""),
                 "projection_peak_close": round(peak_close, 6),
+                "projection_freeze_time": freeze_row.get("dt_et"),
+                "projection_freeze_trade_date": str(freeze_row.get("trade_date") or ""),
+                "projection_freeze_close": round(_safe_float(freeze_row.get("close")), 6),
+                "projection_bars_to_freeze": int(projection["bars_to_freeze"]),
+                "projection_freeze_reason": str(projection["freeze_reason"]),
                 "projection_peak_vwap": round(float(projection["vwap"]), 6),
                 "projection_peak_std": round(float(projection["std"]), 6),
                 "projection_bars_from_displacement": int(projection["bars_from_displacement"]),
