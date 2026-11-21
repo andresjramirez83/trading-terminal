@@ -44,7 +44,7 @@ export default function PreTradeAIAnalysis({ symbol }: Props) {
     try {
       const next = await analyzeAIChart(symbol, selectedPattern, "");
       setReport(next);
-      sendAIMarkupCommand({ mode: "set", symbol, marks: next.annotations || [], projections: next.projections, multiTimeframe: next.multi_timeframe, patternMatch: next.pattern_match });
+      sendAIMarkupCommand({ mode: "set", symbol, marks: next.annotations || [], projections: next.projections, multiTimeframe: next.multi_timeframe, patternMatch: next.pattern_match, displacementFvgSweep: next.displacement_fvg_sweep });
       sendAIMarkupCommand({ mode: "view", symbol, view: overlayMode });
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "Analysis unavailable");
@@ -92,6 +92,25 @@ export default function PreTradeAIAnalysis({ symbol }: Props) {
       {error && <div role="alert" style={{ color: "#fca5a5", fontSize: 11 }}>{error}</div>}
       {report && <div style={{ display: "grid", gap: 8, fontSize: 11, lineHeight: 1.5 }}>
         <div>{report.annotations?.length ?? 0} measured research marks available. Clean mode draws only a small selection for the active timeframe.</div>
+        {report.displacement_fvg_sweep && <div style={{ border: "1px solid #365b90", borderRadius: 8, padding: 9, display: "grid", gap: 5 }}>
+          <strong style={{ color: "#93c5fd" }}>RALLY → RETRACEMENT FVG → RANGE SWEEP / RECLAIM</strong>
+          <b>{report.displacement_fvg_sweep.status.replaceAll("_", " ").toUpperCase()}
+            {report.displacement_fvg_sweep.historical_only ? " · historical only" : ""}</b>
+          {(() => {
+            const candidate = report.displacement_fvg_sweep?.setup || report.displacement_fvg_sweep?.watch;
+            if (!candidate) return <span>No qualifying pre-existing bearish gap and range sequence in recent closed 5m candles.</span>;
+            return <>
+              <span>Initial rally: ${candidate.gap.rally_low.toFixed(3)} → ${candidate.gap.rally_high.toFixed(3)}</span>
+              <span>Consolidation: {candidate.zone.candles} bars · {candidate.zone.touches} separated low tests near ${candidate.zone.low.toFixed(3)}</span>
+              <span style={{ color: "#fcd34d" }}>Pre-existing bearish FVG: ${candidate.gap.low.toFixed(3)}–${candidate.gap.high.toFixed(3)} (potential target, not guaranteed)</span>
+              {report.displacement_fvg_sweep?.setup && <>
+                <span>Sweep low ${report.displacement_fvg_sweep.setup.sweep_low.toFixed(3)} · reclaim {report.displacement_fvg_sweep.setup.reclaim_quality.replaceAll("_", " ")}</span>
+                <span>Watch failure below ${report.displacement_fvg_sweep.setup.invalidation.toFixed(3)}</span>
+              </>}
+            </>;
+          })()}
+          <small style={{ color: "#94a3b8" }}>FVG formed before the sweep. Early phone alerts use completed 1m candles; confirmation requires a closed 5m candle. No automated order placement.</small>
+        </div>}
         {report.pattern_match && <div style={{ border: "1px solid #365b90", borderRadius: 8, padding: 9, display: "grid", gap: 6 }}>
           <strong style={{ color: "#93c5fd" }}>SAVED PATTERN · OBSERVED CANDLE STAGES</strong>
           <b>{report.pattern_match.reference_name} · {report.pattern_match.timeframe}</b>

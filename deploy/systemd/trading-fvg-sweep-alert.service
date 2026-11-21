@@ -1,0 +1,20 @@
+[Unit]
+Description=Trading Terminal FVG Sweep Pushover Alerts (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/trading-terminal/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/trading-terminal/backend
+EnvironmentFile=-/opt/trading-terminal/backend/.env
+EnvironmentFile=-/etc/trading-terminal/ai.env
+EnvironmentFile=-/etc/trading-terminal/fvg-sweep-alerts.env
+ExecStart=/opt/trading-terminal/backend/venv/bin/python -m app.workers.fvg_sweep_alert_worker
+Restart=on-failure
+RestartSec=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
