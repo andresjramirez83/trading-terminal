@@ -2454,11 +2454,32 @@ SCANNER_MIN_PRICE = float(os.getenv("SCANNER_MIN_PRICE", "0.5") or "0.5")
 SCANNER_MAX_PRICE = float(os.getenv("SCANNER_MAX_PRICE", "20.0") or "20.0")
 SCANNER_MIN_VOLUME = max(0, int(os.getenv("SCANNER_MIN_VOLUME", "500000") or "500000"))
 SCANNER_MIN_CHANGE_PCT = float(os.getenv("SCANNER_MIN_CHANGE_PCT", "3.0") or "3.0")
-# Performance profile: VWAP +3 Target is the only active background scanner.
-# The other scanner implementations remain registered for compatibility, but
-# they are not executed by the background loop.
+# Additional scanners are opt-in. Keep VWAP +3 as the default so existing
+# deployments do not suddenly multiply their market-data/API workload.
 SCANNER_ID = "vwap3_target"
-SCANNER_BACKGROUND_IDS = (SCANNER_ID,)
+SCANNER_BACKGROUND_IDS = tuple(dict.fromkeys(
+    [SCANNER_ID] + [
+        value.strip() for value in os.getenv("SCANNER_BACKGROUND_IDS", "").split(",")
+        if value.strip() and value.strip() != SCANNER_ID
+    ]
+))
+# Seconds between runs for each *secondary* scanner. The primary VWAP scanner
+# continues on SCANNER_INTERVAL_SECONDS. At most one secondary is due per cycle.
+SCANNER_SECONDARY_INTERVALS = {
+    "overnight_runner": 300,
+    "ifvg_htf": 300,
+    "gap_atr_runner": 900,
+    "hourly_sweep_runner": 300,
+    "liquidity_reclaim": 300,
+}
+SCANNER_SECONDARY_INTERVALS = {
+    scanner_id: max(
+        SCANNER_INTERVAL_SECONDS,
+        int(os.getenv(f"SCANNER_INTERVAL_{scanner_id.upper()}", str(seconds)) or seconds),
+    )
+    for scanner_id, seconds in SCANNER_SECONDARY_INTERVALS.items()
+}
+scanner_next_run_monotonic: Dict[str, float] = {}
 SCANNER_WORKFLOW = os.getenv("BACKGROUND_SCANNER_WORKFLOW", "auto").strip().lower() or "auto"
 SCANNER_MIN_PM_RANGE_PCT = float(os.getenv("BACKGROUND_SCANNER_MIN_PM_RANGE_PCT", "4.5") or "4.5")
 SCANNER_MIN_PM_DOLLAR_VOLUME = float(os.getenv("BACKGROUND_SCANNER_MIN_PM_DOLLAR_VOLUME", "500000") or "500000")
@@ -4112,11 +4133,29 @@ async def run_background_scanner_loop() -> None:
                 except Exception as exc:
                     return scanner_id, None, str(exc)
 
-            background_definitions = [
-                item
-                for item in registry.list()
-                if str(item.get("id") or "") in SCANNER_BACKGROUND_IDS
+            # Always run the existing primary VWAP scanner. Schedule one slower
+            # secondary per cycle to avoid firing all API-heavy scans together.
+            definitions_by_id = {
+                str(item.get("id") or ""): item for item in registry.list()
+            }
+            background_definitions = [definitions_by_id[SCANNER_ID]]
+            now_monotonic = time.monotonic()
+            due_secondary = [
+                scanner_id for scanner_id in SCANNER_BACKGROUND_IDS
+                if scanner_id != SCANNER_ID
+                and scanner_id in SCANNER_SECONDARY_INTERVALS
+                and scanner_id in definitions_by_id
+                and scanner_next_run_monotonic.get(scanner_id, 0) <= now_monotonic
             ]
+            if due_secondary:
+                selected_secondary = min(
+                    due_secondary,
+                    key=lambda scanner_id: scanner_next_run_monotonic.get(scanner_id, 0),
+                )
+                background_definitions.append(definitions_by_id[selected_secondary])
+                scanner_next_run_monotonic[selected_secondary] = (
+                    now_monotonic + SCANNER_SECONDARY_INTERVALS[selected_secondary]
+                )
             completed = await asyncio.gather(
                 *(run_registered_scanner(item) for item in background_definitions)
             )
@@ -4217,10 +4256,14 @@ def scanner_cache_status(scanner_id: Optional[str] = None) -> Dict[str, Any]:
     selected_last_run = scanner_cache_last_runs.get(selected_id)
     return {
         "ok": selected_error is None,
-        "enabled": SCANNER_BACKGROUND_ENABLED,
-        "running": bool(scanner_task and not scanner_task.done()),
+        "enabled": SCANNER_BACKGROUND_ENABLED and selected_id in SCANNER_BACKGROUND_IDS,
+        "running": bool(scanner_task and not scanner_task.done()) and selected_id in SCANNER_BACKGROUND_IDS,
+        "scheduled_interval_seconds": (
+            SCANNER_INTERVAL_SECONDS if selected_id == SCANNER_ID
+            else SCANNER_SECONDARY_INTERVALS.get(selected_id)
+        ),
         "status": scanner_last_status,
-        "last_run": selected_last_run.isoformat() if selected_last_run else (scanner_last_run.isoformat() if scanner_last_run else None),
+        "last_run": selected_last_run.isoformat() if selected_last_run else None,
         "last_error": selected_error,
         "run_count": scanner_run_count,
         "interval_seconds": SCANNER_INTERVAL_SECONDS,

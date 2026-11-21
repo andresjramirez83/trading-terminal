@@ -12,6 +12,7 @@ import React, {
 import {
   API_BASE,
   fetchScannerCache,
+  fetchScannerDefinitions,
 } from "../../services/api";
 
 import { dailyPracticeUniverseEngine } from "../../trading/practice/DailyPracticeUniverseEngine";
@@ -911,7 +912,10 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       refreshInFlight = true;
 
       try {
-        const normalizedDefinitions = [VWAP3_TARGET_WATCHLIST]
+        // Load all server-registered scanner definitions. Fallback preserves
+        // the existing VWAP watchlist if the definition endpoint is unavailable.
+        const serverDefinitions = await fetchScannerDefinitions().catch(() => [VWAP3_TARGET_WATCHLIST]);
+        const normalizedDefinitions = (serverDefinitions.length ? serverDefinitions : [VWAP3_TARGET_WATCHLIST])
           .map((definition) => ({
             ...definition,
             id: normalizeWatchlistId(definition.id),
@@ -949,6 +953,12 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
             ...userWatchlists,
             ...normalizedDefinitions.map((definition) => {
               const cached = cachedById.get(definition.id);
+              // Preserve the last successful rows when the cache request fails.
+              // A successful cache with rows: [] still correctly clears a list.
+              if (cached === null) {
+                const previous = current.find((item) => item.id === definition.id);
+                if (previous) return previous;
+              }
               const rows = Array.isArray(cached?.rows) ? cached.rows : [];
               const symbols = rows
                 .map((row) => cachedScannerRowToWatchlistSymbol(row, definition))

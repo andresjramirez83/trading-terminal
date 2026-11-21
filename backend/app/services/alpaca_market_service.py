@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 import logging
 import os
 import time
@@ -112,7 +113,8 @@ class AlpacaMarketService:
     Timestamps are always Unix milliseconds.
     """
 
-    _shared_client: Optional[httpx.AsyncClient] = None
+    _clients_by_event_loop: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = weakref.WeakKeyDictionary()
+
     _bars_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
     _asset_universe_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
     _cache_max_items = 384
@@ -200,8 +202,14 @@ class AlpacaMarketService:
 
     @classmethod
     def _client(cls, timeout: httpx.Timeout) -> httpx.AsyncClient:
-        if cls._shared_client is None or cls._shared_client.is_closed:
-            cls._shared_client = httpx.AsyncClient(
+        # An httpx.AsyncClient's connection pool can contain asyncio objects
+        # belonging to the loop where it was first used. Reusing one global
+        # client from scanner tasks and short-lived asyncio.run() loops can
+        # cause 'Event loop is closed' / 'bound to a different event loop'.
+        loop = asyncio.get_running_loop()
+        client = cls._clients_by_event_loop.get(loop)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
                 timeout=timeout,
                 follow_redirects=True,
                 http2=False,
@@ -211,12 +219,15 @@ class AlpacaMarketService:
                     keepalive_expiry=45.0,
                 ),
             )
-        return cls._shared_client
+            cls._clients_by_event_loop[loop] = client
+        return client
 
     @classmethod
     async def close_shared_client(cls) -> None:
-        client = cls._shared_client
-        cls._shared_client = None
+        # Only close the client owned by the current event loop. Other loops
+        # manage their own client lifetimes; cross-loop aclose() is unsafe.
+        loop = asyncio.get_running_loop()
+        client = cls._clients_by_event_loop.pop(loop, None)
         if client is not None and not client.is_closed:
             await client.aclose()
 

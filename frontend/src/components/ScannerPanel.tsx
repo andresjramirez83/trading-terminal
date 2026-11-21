@@ -5,6 +5,7 @@ import { useWatchlists } from "./watchlists/WatchlistContext";
 import {
   fetchOvernightSnapshots,
   fetchScannerCache,
+  fetchScannerDefinitions,
   refreshScannerCache,
   saveAfterhoursSnapshot,
   fetchSelectedAlertSymbols,
@@ -415,11 +416,20 @@ export default function ScannerPanel({
 }: ScannerPanelProps) {
   const isWorkspace = mode === "workspace";
   const { activeSymbol, setActiveSymbol } = useActiveSymbol();
-  const { replaceSymbols } = useWatchlists();
+  const { replaceSymbols, syncScannerWatchlists } = useWatchlists();
   const currentSelectedSymbol = normalizeSymbol(selectedSymbol || activeSymbol);
 
-  const [definitions] = useState<ScannerDefinition[]>([VWAP3_SCANNER_DEFINITION]);
+  const [definitions, setDefinitions] = useState<ScannerDefinition[]>([VWAP3_SCANNER_DEFINITION]);
   const [selectedScannerId, setSelectedScannerId] = useState("vwap3_target");
+  useEffect(() => {
+    let cancelled = false;
+    void fetchScannerDefinitions()
+      .then((items) => {
+        if (!cancelled && items.length) setDefinitions(items);
+      })
+      .catch((error) => console.warn("[ScannerPanel] scanner definitions unavailable", error));
+    return () => { cancelled = true; };
+  }, []);
   const [data, setData] = useState<ScannerResponse | null>(null);
   const [snapshotDates, setSnapshotDates] = useState<string[]>([]);
   const [latestSnapshot, setLatestSnapshot] = useState("");
@@ -654,22 +664,14 @@ export default function ScannerPanel({
   };
 
   useEffect(() => {
-    definitions.forEach((definition) => {
-      const watchlistId = normalizeWatchlistId(definition.id);
-      if (!watchlistId || watchlistId === "scanner") return;
+    // Sync the scanner menu without erasing previously cached symbol lists.
+    syncScannerWatchlists(definitions);
+  }, [definitions, syncScannerWatchlists]);
 
-      replaceSymbols(watchlistId, [], {
-        name: definition.name || titleCaseWatchlistName(definition.id),
-        type: "scanner",
-        description:
-          definition.description ??
-          `Scanner-generated symbols for ${
-            definition.name || titleCaseWatchlistName(definition.id)
-          }.`,
-        allowEmpty: true,
-      });
-    });
-  }, [definitions, replaceSymbols]);
+  useEffect(() => {
+    setData(null);
+    setCacheStatus(null);
+  }, [selectedScannerId]);
 
   useEffect(() => {
     if (!isWorkspace) return;
@@ -778,11 +780,10 @@ export default function ScannerPanel({
 
       // The backend cache is shared and is normally populated by the automatic
       // overnight runner. Never show those rows under a different module name.
-      if (
-        responseData &&
-        (!responseScannerId || responseScannerId === requestedScannerId)
-      ) {
-        setData(responseData);
+      if (!responseData || !responseScannerId || responseScannerId === requestedScannerId) {
+        setData(responseData ?? null);
+      } else {
+        setData(null);
       }
 
       const activeError = cacheResponse.last_error;
@@ -1221,6 +1222,11 @@ export default function ScannerPanel({
                 : "Scanner"}
             </div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>{summaryText}</div>
+            {cacheStatus && cacheStatus.enabled === false ? (
+              <div style={{ fontSize: 12, color: "#facc15", marginTop: 6 }}>
+                Background scan not enabled. No automatic updates for this scanner.
+              </div>
+            ) : null}
             {data?.meta?.combined_fallback ? (
               <div style={{ fontSize: 12, color: "#facc15", marginTop: 6 }}>
                 Combined fallback → Live:{" "}

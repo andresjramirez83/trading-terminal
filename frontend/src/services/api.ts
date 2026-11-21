@@ -450,12 +450,9 @@ export async function fetchVwap3SetupHistory(
   return parseJson<Vwap3SetupHistoryResponse>(res);
 }
 
-const ENABLED_SCANNER_IDS = new Set(["vwap3_target"]);
-
 export async function fetchScannerDefinitions(): Promise<ScannerDefinition[]> {
   const res = await fetch(`${API_BASE}/scanner-v2/list`);
-  const definitions = await parseJson<ScannerDefinition[]>(res);
-  return definitions.filter((definition) => ENABLED_SCANNER_IDS.has(definition.id));
+  return parseJson<ScannerDefinition[]>(res);
 }
 
 export async function fetchOvernightSnapshots(
