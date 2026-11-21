@@ -18,10 +18,10 @@ TIMEFRAMES: dict[str, TimeframeConfig] = {
     "1m": TimeframeConfig("1m", 1, "minute", timedelta(days=5), 5),
     "2m": TimeframeConfig("2m", 2, "minute", timedelta(days=10), 10, "1m"),
     "3m": TimeframeConfig("3m", 3, "minute", timedelta(days=10), 10, "1m"),
-    "5m": TimeframeConfig("5m", 5, "minute", timedelta(days=30), 15, "1m"),
+    "5m": TimeframeConfig("5m", 5, "minute", timedelta(days=10), 15, "1m"),
     "10m": TimeframeConfig("10m", 10, "minute", timedelta(days=60), 20, "1m"),
-    "15m": TimeframeConfig("15m", 15, "minute", timedelta(days=90), 30, "1m"),
-    "30m": TimeframeConfig("30m", 30, "minute", timedelta(days=180), 45, "1m"),
+    "15m": TimeframeConfig("15m", 15, "minute", timedelta(days=15), 30, "1m"),
+    "30m": TimeframeConfig("30m", 30, "minute", timedelta(days=30), 45, "1m"),
     "45m": TimeframeConfig("45m", 45, "minute", timedelta(days=365), 60, "1m"),
 
     "1h": TimeframeConfig("1h", 1, "hour", timedelta(days=90), 60),
