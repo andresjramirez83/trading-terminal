@@ -1,3 +1,4 @@
+import CollapsibleCard from "./CollapsibleCard";
 import type { CSSProperties } from "react";
 import { useTradeHistoryStore } from "../../../../trading/hooks/useTradeHistoryStore";
 import TradeJournalWidget from "./trading/TradeJournalWidget";
@@ -15,7 +16,8 @@ export default function CoachWorkspacePanel({
 
   return (
     <div style={styles.panel}>
-      <section style={styles.headerCard}>
+      <CollapsibleCard workspace="coach" id="intro" title="Coach Overview">
+<section style={styles.headerCard}>
         <div style={styles.headerRow}>
           <div>
             <div style={styles.kicker}>AI Coach Workspace</div>
@@ -32,8 +34,10 @@ export default function CoachWorkspacePanel({
           1m/5m market structure, demand/FVG support, liquidity sweeps, and Level 2 research.
         </div>
       </section>
+</CollapsibleCard>
 
-      <PreTradeAIAnalysis symbol={safeSymbol} />
+      <CollapsibleCard workspace="coach" id="pretrade" title="Pre-Trade AI Analysis"><PreTradeAIAnalysis symbol={safeSymbol} /></CollapsibleCard>
+      <CollapsibleCard workspace="coach" id="journal" title="Trade Reviews & Coach Research">
       <TradeJournalWidget
         trades={historyStore.journalTrades}
         coachReviews={historyStore.vwap3CoachReviews}
@@ -41,6 +45,7 @@ export default function CoachWorkspacePanel({
         personalSummary={historyStore.vwap3CoachPersonalSummary}
         showCoach
       />
+      </CollapsibleCard>
     </div>
   );
 }
@@ -90,8 +95,8 @@ const styles: Record<string, CSSProperties> = {
   },
   description: {
     marginTop: 9,
-    fontSize: 10,
-    lineHeight: 1.45,
+    fontSize: 12,
+    lineHeight: 1.6,
     color: "#94a3b8",
   },
 };

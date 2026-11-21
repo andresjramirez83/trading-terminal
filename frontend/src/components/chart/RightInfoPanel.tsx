@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import type { RightPanelWorkspace } from "./right-panel/RightPanelTypes";
 import type { ChartState } from "./ChartState";
 import { getSharedExecutionGateway } from "../../trading/execution/ExecutionGateway";
@@ -73,6 +73,32 @@ export default function RightInfoPanel({
   chartState,
 }: Props) {
   const [workspace, setWorkspace] = useState<RightPanelWorkspace>("trade");
+  const [panelWidth, setPanelWidth] = useState(() => {
+    try { return Math.max(300, Math.min(650, Number(localStorage.getItem("chartv2.rightPanelWidth")) || 340)); }
+    catch { return 340; }
+  });
+  const [coachZoom, setCoachZoom] = useState(() => {
+    try { return Math.max(1, Math.min(1.6, Number(localStorage.getItem("chartv2.coachZoom")) || 1.2)); }
+    catch { return 1.2; }
+  });
+  const dragStart = useRef<{ x: number; width: number } | null>(null);
+  useEffect(() => {
+    try { localStorage.setItem("chartv2.rightPanelWidth", String(panelWidth)); } catch { /* ignored */ }
+  }, [panelWidth]);
+  useEffect(() => {
+    try { localStorage.setItem("chartv2.coachZoom", String(coachZoom)); } catch { /* ignored */ }
+  }, [coachZoom]);
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      if (!dragStart.current) return;
+      setPanelWidth(Math.max(300, Math.min(650, dragStart.current.width + dragStart.current.x - event.clientX)));
+    };
+    const stop = () => { dragStart.current = null; document.body.style.cursor = ""; };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); window.removeEventListener("pointercancel", stop); document.body.style.cursor = ""; };
+  }, []);
   const executionGateway = getSharedExecutionGateway();
   const [orderSummary, setOrderSummary] = useState(() => {
     const snapshot = executionGateway.getSnapshot();
@@ -136,7 +162,8 @@ export default function RightInfoPanel({
     <aside
       style={{
         // RIGHT_PANEL_SCROLL_LOCK_20260904
-        width: 340,
+        width: panelWidth,
+        position: "relative",
         flexShrink: 0,
         height: "100%",
         minHeight: 0,
@@ -149,6 +176,16 @@ export default function RightInfoPanel({
         zIndex: 25,
       }}
     >
+      <div
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          dragStart.current = { x: event.clientX, width: panelWidth };
+          document.body.style.cursor = "col-resize";
+        }}
+        title="Drag to resize right panel"
+        style={{ position: "absolute", width: 7, height: "100%", marginLeft: -4, cursor: "col-resize", zIndex: 30 }}
+      />
       <div
         style={{
           flexShrink: 0,
@@ -260,6 +297,20 @@ export default function RightInfoPanel({
         </button>
       </div>
 
+      {workspace === "coach" && (
+        <div style={{ display: "flex", gap: 8, padding: "6px 10px", alignItems: "center", color: "#cbd5e1", fontSize: 11 }}>
+          <span style={{ fontWeight: 800 }}>Coach text</span>
+          <select aria-label="Coach text size" value={coachZoom} onChange={(event) => setCoachZoom(Number(event.target.value))}
+            style={{ background: "#162033", color: "#fff", border: "1px solid #334155", borderRadius: 5, padding: "4px 7px" }}>
+            <option value={1}>Small</option><option value={1.2}>Medium</option>
+            <option value={1.4}>Large</option><option value={1.6}>XL</option>
+          </select>
+          <button type="button" onClick={() => setPanelWidth(520)}
+            style={{ marginLeft: "auto", color: "#bfdbfe", background: "transparent", border: "none", cursor: "pointer" }}>
+            Wide
+          </button>
+        </div>
+      )}
       <div
         style={{
           flex: 1,
@@ -288,7 +339,7 @@ export default function RightInfoPanel({
 
           {workspace === "news" && <NewsWorkspacePanel symbol={symbol} />}
 
-          {workspace === "coach" && <CoachWorkspacePanel symbol={symbol} />}
+          {workspace === "coach" && <div style={{ zoom: coachZoom }}><CoachWorkspacePanel symbol={symbol} /></div>}
 
           {workspace === "level2" && <Level2WorkspacePanel symbol={symbol} />}
         </Suspense>

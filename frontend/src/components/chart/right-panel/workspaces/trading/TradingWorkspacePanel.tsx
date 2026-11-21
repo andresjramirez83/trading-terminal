@@ -1,3 +1,4 @@
+import CollapsibleCard from "../CollapsibleCard";
 import { lazy, Suspense, useEffect, useState, type CSSProperties } from "react";
 import AccountWidget from "./AccountWidget";
 import QuickOrderWidget from "./QuickOrderWidget";
@@ -245,7 +246,8 @@ export default function TradingWorkspacePanel({
         </div>
       </div>
 
-      <section style={styles.statusCard}>
+      <CollapsibleCard workspace="trade" id="execution" title="Execution Hub">
+<section style={styles.statusCard}>
         <div style={styles.modeSelector}>
           {(["paper", "live"] as const).map((mode) => {
             const active = store.executionMode === mode;
@@ -369,10 +371,12 @@ export default function TradingWorkspacePanel({
           Refresh Alpaca
         </button>
       </section>
+</CollapsibleCard>
 
-      <AccountWidget account={store.account} />
+      <CollapsibleCard workspace="trade" id="account" title="Account"><AccountWidget account={store.account} /></CollapsibleCard>
 
-      <section style={styles.moduleCard}>
+      <CollapsibleCard workspace="trade" id="orderEntry" title="Order Entry">
+<section style={styles.moduleCard}>
         <div style={styles.tabRow}>
           {TABS.map((tab) => {
             const active = activeTab === tab.id;
@@ -438,8 +442,10 @@ export default function TradingWorkspacePanel({
           )}
         </div>
       </section>
+</CollapsibleCard>
 
-      <CurrentPositionWidget
+      <CollapsibleCard workspace="trade" id="position" title="Current Position">
+<CurrentPositionWidget
         position={store.currentPosition}
         stats={store.currentPositionStats}
         currentPrice={safePrice}
@@ -465,8 +471,10 @@ export default function TradingWorkspacePanel({
         onClosePositionPercent={store.closePositionPercent}
         onFlattenAllPositions={store.flattenAllPositions}
       />
+</CollapsibleCard>
 
-      <OrdersCenterWidget
+      <CollapsibleCard workspace="trade" id="orders" title="Working Orders & Positions">
+<OrdersCenterWidget
         orders={store.allOpenOrders}
         positions={store.allPositions}
         rawPositions={store.allRawPositions}
@@ -475,8 +483,9 @@ export default function TradingWorkspacePanel({
         mode={store.executionMode === "live" ? "live" : "paper"}
         onCancelOrder={store.cancelOpenOrder}
       />
+</CollapsibleCard>
 
-      <FilledOrdersWidget orders={historyStore.filledOrders} />
+      <CollapsibleCard workspace="trade" id="fills" title="Order Fills"><FilledOrdersWidget orders={historyStore.filledOrders} /></CollapsibleCard>
 
       <section style={styles.practiceToggleCard}>
         <div>
@@ -509,17 +518,21 @@ export default function TradingWorkspacePanel({
         </Suspense>
       )}
 
-      <PerformanceWidget
+      <CollapsibleCard workspace="trade" id="performance" title="Trade Performance">
+<PerformanceWidget
         symbol={safeSymbol}
         performance={historyStore.performance}
       />
+</CollapsibleCard>
 
-      <TradeJournalWidget
+      <CollapsibleCard workspace="trade" id="journal" title="Trade History">
+<TradeJournalWidget
         trades={historyStore.journalTrades}
         coachReviews={historyStore.vwap3CoachReviews}
         coachStudy={historyStore.vwap3CoachStudy}
         personalSummary={historyStore.vwap3CoachPersonalSummary}
       />
+</CollapsibleCard>
     </div>
   );
 }

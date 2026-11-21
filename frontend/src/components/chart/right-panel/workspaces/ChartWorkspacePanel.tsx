@@ -1,3 +1,4 @@
+import CollapsibleCard from "./CollapsibleCard";
 import DecisionEngineWidget from "../widgets/DecisionEngineWidget";
 import MarketStoryWidget from "../widgets/MarketStoryWidget";
 import MarketObjectsWidget from "../widgets/MarketObjectsWidget";
@@ -27,47 +28,47 @@ export default function ChartWorkspacePanel() {
           Decision Engine
       ========================================================== */}
 
-      <DecisionEngineWidget />
+      <CollapsibleCard workspace="chart" id="DecisionEngineWidget" title="Decision Engine"><DecisionEngineWidget /></CollapsibleCard>
 
-      <MarketStoryWidget />
+      <CollapsibleCard workspace="chart" id="MarketStoryWidget" title="Market Story"><MarketStoryWidget /></CollapsibleCard>
 
-      <MarketObjectsWidget />
+      <CollapsibleCard workspace="chart" id="MarketObjectsWidget" title="Market Objects"><MarketObjectsWidget /></CollapsibleCard>
 
-      <LiquidityWidget />
+      <CollapsibleCard workspace="chart" id="LiquidityWidget" title="Liquidity"><LiquidityWidget /></CollapsibleCard>
 
-      <TradeReadinessWidget />
+      <CollapsibleCard workspace="chart" id="TradeReadinessWidget" title="Trade Readiness"><TradeReadinessWidget /></CollapsibleCard>
 
-      <PerformanceIndicatorsWidget />
+      <CollapsibleCard workspace="chart" id="PerformanceIndicatorsWidget" title="Performance Indicators"><PerformanceIndicatorsWidget /></CollapsibleCard>
 
       {/* ==========================================================
           Market Analysis
       ========================================================== */}
 
-      <StructureWidget />
+      <CollapsibleCard workspace="chart" id="StructureWidget" title="Structure"><StructureWidget /></CollapsibleCard>
 
-      <MomentumWidget />
+      <CollapsibleCard workspace="chart" id="MomentumWidget" title="Momentum"><MomentumWidget /></CollapsibleCard>
 
-      <CompressionWidget />
+      <CollapsibleCard workspace="chart" id="CompressionWidget" title="Compression"><CompressionWidget /></CollapsibleCard>
 
-      <TrendStrengthWidget />
+      <CollapsibleCard workspace="chart" id="TrendStrengthWidget" title="Trend Strength"><TrendStrengthWidget /></CollapsibleCard>
 
-      <BalanceWidget />
+      <CollapsibleCard workspace="chart" id="BalanceWidget" title="Balance"><BalanceWidget /></CollapsibleCard>
 
       {/* ==========================================================
           Trade Analysis
       ========================================================== */}
 
-      <EntryQualityWidget />
+      <CollapsibleCard workspace="chart" id="EntryQualityWidget" title="Entry Quality"><EntryQualityWidget /></CollapsibleCard>
 
-      <RiskWidget />
+      <CollapsibleCard workspace="chart" id="RiskWidget" title="Risk"><RiskWidget /></CollapsibleCard>
 
       {/* ==========================================================
           Reference
       ========================================================== */}
 
-      <VWAPWidget />
+      <CollapsibleCard workspace="chart" id="VWAPWidget" title="VWAP"><VWAPWidget /></CollapsibleCard>
 
-      <KeyStatsWidget />
+      <CollapsibleCard workspace="chart" id="KeyStatsWidget" title="Key Stats"><KeyStatsWidget /></CollapsibleCard>
     </div>
   );
 }

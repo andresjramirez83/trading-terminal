@@ -1,3 +1,4 @@
+import CollapsibleCard from "./CollapsibleCard";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   fetchSymbolIntelligence,
@@ -13,6 +14,7 @@ type Props = {
 
 function Card({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) {
   return (
+    <CollapsibleCard workspace="news" id={title.replace(/\d+/g, "").trim().toLowerCase().replace(/[^a-z]+/g, "-")} title={title}>
     <section
       style={{
         borderRadius: 9,
@@ -37,6 +39,7 @@ function Card({ title, children, action }: { title: string; children: ReactNode;
       </div>
       {children}
     </section>
+    </CollapsibleCard>
   );
 }
 

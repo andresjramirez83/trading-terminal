@@ -1,3 +1,4 @@
+import CollapsibleCard from "./CollapsibleCard";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE } from "../../../../services/api";
 
@@ -338,6 +339,7 @@ export default function Level2WorkspacePanel({ symbol }: { symbol: string }) {
 
       {snapshot && (
         <>
+          <CollapsibleCard workspace="level2" id="breakout" title="Breakout Pressure">
           {breakout && (
             <div
               style={{
@@ -390,7 +392,9 @@ export default function Level2WorkspacePanel({ symbol }: { symbol: string }) {
               </div>
             </div>
           )}
+          </CollapsibleCard>
 
+          <CollapsibleCard workspace="level2" id="intelligence" title="Book Intelligence">
           <div
             style={{
               border: "1px solid rgba(148,163,184,.14)",
@@ -423,7 +427,9 @@ export default function Level2WorkspacePanel({ symbol }: { symbol: string }) {
               valueColor="#f87171"
             />
           </div>
+          </CollapsibleCard>
 
+          <CollapsibleCard workspace="level2" id="orderbook" title="Live Order Book">
           <div style={{ border: "1px solid rgba(148,163,184,.14)", borderRadius: 10, overflow: "hidden", background: "rgba(2,6,23,.62)" }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 44px", padding: "6px", color: "#64748b", fontSize: 9, fontWeight: 900, borderBottom: "1px solid rgba(148,163,184,.12)" }}>
               <span>PRICE</span>
@@ -467,6 +473,7 @@ export default function Level2WorkspacePanel({ symbol }: { symbol: string }) {
               <span>{lastUpdate ? new Date(lastUpdate).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) : ""}</span>
             </div>
           </div>
+          </CollapsibleCard>
         </>
       )}
 

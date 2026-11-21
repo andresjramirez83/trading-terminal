@@ -1,3 +1,4 @@
+import CollapsibleCard from "./CollapsibleCard";
 import React, { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
 import { useActiveSymbol } from "../../ActiveSymbolContext";
@@ -709,6 +710,7 @@ function Card({
   children: ReactNode;
 }) {
   return (
+    <CollapsibleCard workspace="watchlists" id={title.toLowerCase().replace(/[^a-z]+/g, "-")} title={title}>
     <section style={styles.card}>
       <div style={styles.cardHeader}>
         <div style={styles.cardTitle}>{title}</div>
@@ -717,6 +719,7 @@ function Card({
 
       <div style={styles.cardBody}>{children}</div>
     </section>
+    </CollapsibleCard>
   );
 }
 
