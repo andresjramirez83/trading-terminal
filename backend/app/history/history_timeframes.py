@@ -24,9 +24,9 @@ TIMEFRAMES: dict[str, TimeframeConfig] = {
     "30m": TimeframeConfig("30m", 30, "minute", timedelta(days=180), 45, "1m"),
     "45m": TimeframeConfig("45m", 45, "minute", timedelta(days=365), 60, "1m"),
 
-    "1h": TimeframeConfig("1h", 1, "hour", timedelta(days=730), 60),
-    "2h": TimeframeConfig("2h", 2, "hour", timedelta(days=730), 60, "1h"),
-    "4h": TimeframeConfig("4h", 4, "hour", timedelta(days=1460), 60, "1h"),
+    "1h": TimeframeConfig("1h", 1, "hour", timedelta(days=90), 60),
+    "2h": TimeframeConfig("2h", 2, "hour", timedelta(days=90), 60, "1h"),
+    "4h": TimeframeConfig("4h", 4, "hour", timedelta(days=180), 60, "1h"),
 
     "1d": TimeframeConfig("1d", 1, "day", timedelta(days=3650), 300),
     "1w": TimeframeConfig("1w", 1, "week", timedelta(days=7300), 900, "1d"),

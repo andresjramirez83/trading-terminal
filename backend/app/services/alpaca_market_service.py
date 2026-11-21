@@ -904,12 +904,16 @@ class AlpacaMarketService:
 
         live_request = selected_date is None
         ttl = self._cache_ttl(normalized_tf) if live_request else 3600.0
+        cache_bucket = int(time.time() // ttl) if live_request else 0
+        # A rolling window changes every second. Cache by requested lookback
+        # and the existing per-timeframe refresh bucket instead, so repeated
+        # chart switches reuse data without changing the live refresh cadence.
+        # Keep explicit historical dates isolated from rolling chart requests.
         range_key = (
             f"date={selected_date}"
             if selected_date
-            else f"start={int(start.timestamp())}|end={int(end.timestamp())}"
+            else f"lookback={lookback or '-'}|default_s={int(default_lookback.total_seconds())}"
         )
-        cache_bucket = int(time.time() // ttl) if live_request else 0
         cache_key = (
             f"{symbol}|{normalized_tf}|{normalized_session}|"
             f"{self.feed}|{self.overnight_feed}|"

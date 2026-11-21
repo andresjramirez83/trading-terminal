@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import List
 
@@ -38,15 +39,6 @@ class AlpacaHistoryProvider:
         start = datetime.fromtimestamp(start_ms / 1000, timezone.utc)
         end = datetime.fromtimestamp(end_ms / 1000, timezone.utc)
 
-        sip_rows = await self._alpaca._historical_bars(
-            symbol=symbol,
-            timeframe=alpaca_timeframe,
-            start=start,
-            end=end,
-            feed=self._alpaca.feed,
-        )
-
-        overnight_rows = []
         should_fetch_overnight = (
             self._alpaca.include_overnight
             and normalized_session in {"extended", "overnight"}
@@ -54,19 +46,39 @@ class AlpacaHistoryProvider:
             and self._alpaca.overnight_feed != self._alpaca.feed
         )
 
+        sip_request = self._alpaca._historical_bars(
+            symbol=symbol,
+            timeframe=alpaca_timeframe,
+            start=start,
+            end=end,
+            feed=self._alpaca.feed,
+        )
         if should_fetch_overnight:
-            try:
-                overnight_rows = await self._alpaca._historical_bars(
-                    symbol=symbol,
-                    timeframe=alpaca_timeframe,
-                    start=start,
-                    end=end,
-                    feed=self._alpaca.overnight_feed,
-                )
-            except Exception:
-                # SIP data should still load even when BOATS is unavailable for
-                # the account, symbol, or requested date range.
-                overnight_rows = []
+            overnight_request = self._alpaca._historical_bars(
+                symbol=symbol,
+                timeframe=alpaca_timeframe,
+                start=start,
+                end=end,
+                feed=self._alpaca.overnight_feed,
+            )
+            # Wait for both feeds together. A BOATS failure must not hide valid
+            # SIP results; a SIP failure must still propagate to the caller.
+            sip_result, overnight_result = await asyncio.gather(
+                sip_request, overnight_request, return_exceptions=True
+            )
+            if isinstance(sip_result, BaseException):
+                raise sip_result
+            sip_rows = sip_result
+            overnight_rows = (
+                [] if isinstance(overnight_result, Exception) else overnight_result
+            )
+            if isinstance(overnight_result, BaseException) and not isinstance(
+                overnight_result, Exception
+            ):
+                raise overnight_result
+        else:
+            sip_rows = await sip_request
+            overnight_rows = []
 
         rows = self._alpaca._merge_rows(overnight_rows, sip_rows)
         rows = self._alpaca._filter_session(rows, normalized_session)
