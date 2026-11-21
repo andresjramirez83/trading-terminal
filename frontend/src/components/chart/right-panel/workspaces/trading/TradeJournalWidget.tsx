@@ -238,7 +238,9 @@ export default function TradeJournalWidget({
       </div>
 
       {showCoach ? (
-        <div style={styles.notice}>
+        <details style={styles.noticeDetails}>
+          <summary style={styles.noticeToggle}>How AI Trade Reviews work</summary>
+          <div style={styles.notice}>
           Closed trades are automatically reconstructed through the available session.
           The coach now grades entry, stop placement, exit execution, and the trade
           thesis separately; checks whether your planned target or stop was hit later;
@@ -246,7 +248,8 @@ export default function TradeJournalWidget({
           liquidity sweeps, EMA/VWAP context, and recorded Level 2 behavior. Current-day
           reviews keep updating through the end of extended trading. Coach timestamps
           display in Pacific Time.
-        </div>
+          </div>
+        </details>
       ) : null}
 
       {showCoach && personalSummary && personalSummary.scannerMatchedTrades > 0 ? (
@@ -360,6 +363,12 @@ export default function TradeJournalWidget({
         </div>
       ) : null}
 
+      {showCoach && trades.length > 0 ? (
+        <div style={styles.reviewGuide}>
+          Select a trade to open its details, then expand only the AI analysis sections you need. Replay remains available for each trade.
+        </div>
+      ) : null}
+
       {trades.length === 0 ? (
         <div style={styles.empty}>No completed Alpaca round-trip trades found yet. Journal times display in Pacific Time.</div>
       ) : (
@@ -398,7 +407,12 @@ export default function TradeJournalWidget({
                   </div>
                 </div>
 
-                <div style={styles.metaGrid}>
+                <details style={styles.tradeDetails}>
+                  <summary style={styles.tradeDetailsToggle}>
+                    Trade details &amp; AI review
+                    <span style={styles.tradeDetailsHint}>Expand / collapse</span>
+                  </summary>
+                  <div style={styles.metaGrid}>
                   <Meta label="Side" value={trade.side.toUpperCase()} />
                   <Meta label="Shares" value={String(trade.shares)} />
                   <Meta label="Entry" value={money(trade.entry)} />
@@ -420,6 +434,8 @@ export default function TradeJournalWidget({
                     </div>
                   )
                 ) : null}
+
+                </details>
 
                 <button
                   type="button"
@@ -677,10 +693,10 @@ function CoachSection({
   children: React.ReactNode;
 }) {
   return (
-    <div style={styles.coachSection}>
-      <div style={styles.coachSectionTitle}>{title}</div>
-      {children}
-    </div>
+    <details style={styles.coachSection}>
+      <summary style={styles.coachSectionTitle}>{title}</summary>
+      <div style={styles.coachSectionContent}>{children}</div>
+    </details>
   );
 }
 
@@ -1100,6 +1116,39 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center",
   },
   list: { display: "grid", gap: 10 },
+  tradeDetails: {
+    marginTop: 8,
+    border: "1px solid rgba(96,165,250,.22)",
+    borderRadius: 10,
+    padding: "0 9px 9px",
+  },
+  tradeDetailsToggle: {
+    padding: "10px 2px",
+    color: "#bfdbfe",
+    fontSize: 13,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  tradeDetailsHint: {
+    marginLeft: 8,
+    color: "#94a3b8",
+    fontSize: 11,
+    fontWeight: 500,
+  },
+  reviewGuide: {
+    color: "#cbd5e1",
+    fontSize: 12,
+    lineHeight: 1.5,
+    marginBottom: 10,
+  },
+  noticeDetails: { marginBottom: 10 },
+  noticeToggle: {
+    fontSize: 12,
+    color: "#93c5fd",
+    fontWeight: 750,
+    padding: "8px 2px",
+    cursor: "pointer",
+  },
   tradeCard: {
     border: "1px solid rgba(148,163,184,.16)",
     background: "rgba(2,6,23,.55)",
@@ -1174,7 +1223,7 @@ const styles: Record<string, React.CSSProperties> = {
   coachSummary: {
     marginTop: 8,
     color: "#dbeafe",
-    fontSize: 10,
+    fontSize: 13,
     lineHeight: 1.45,
   },
   coachMetrics: {
@@ -1185,16 +1234,21 @@ const styles: Record<string, React.CSSProperties> = {
   },
   coachSection: {
     marginTop: 10,
-    borderTop: "1px solid rgba(148,163,184,.14)",
-    paddingTop: 9,
+    border: "1px solid rgba(148,163,184,.22)",
+    background: "rgba(2,6,23,.28)",
+    borderRadius: 10,
+    padding: "0 10px",
   },
   coachSectionTitle: {
-    marginBottom: 7,
+    padding: "11px 0",
     color: "#e2e8f0",
-    fontSize: 10,
-    fontWeight: 900,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
+    fontSize: 12,
+    fontWeight: 850,
+    letterSpacing: 0.2,
+    cursor: "pointer",
+  },
+  coachSectionContent: {
+    paddingBottom: 12,
   },
   coachSectionEmpty: {
     color: "#94a3b8",
@@ -1205,7 +1259,7 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "8px 0 0 18px",
     padding: 0,
     color: "#cbd5e1",
-    fontSize: 10,
+    fontSize: 12,
     lineHeight: 1.45,
   },
   coachStudyRef: {
@@ -1279,7 +1333,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#dbeafe",
     borderRadius: 10,
     padding: 8,
-    fontSize: 10,
+    fontSize: 12,
     lineHeight: 1.45,
   },
   coachSectionMiniTitle: {
