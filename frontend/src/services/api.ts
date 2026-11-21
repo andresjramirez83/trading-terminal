@@ -65,9 +65,13 @@ async function parseJson<T>(res: Response): Promise<T> {
 
 type BarsCacheEntry = {
   expiresAt: number;
+  retainUntil: number;
   data: BarsResponse;
 };
 
+// Keep old snapshots for quick timeframe switching, but do not treat them as
+// fresh beyond the existing 45-second API TTL.
+const BARS_CACHE_RETENTION_MS = 10 * 60_000;
 const BARS_CACHE_TTL_MS = 45_000;
 const MAX_BARS_CACHE_ENTRIES = 120;
 const barsCache = new Map<string, BarsCacheEntry>();
@@ -75,7 +79,7 @@ const barsInflight = new Map<string, Promise<BarsResponse>>();
 
 function pruneBarsCache(now = Date.now()): void {
   for (const [key, entry] of Array.from(barsCache.entries())) {
-    if (entry.expiresAt <= now) barsCache.delete(key);
+    if (entry.retainUntil <= now) barsCache.delete(key);
   }
 
   while (barsCache.size > MAX_BARS_CACHE_ENTRIES) {
@@ -180,6 +184,45 @@ export function clearBarsCache(symbol?: string): void {
   }
 }
 
+type BarsRequestOptions = {
+    date?: string;
+    lookback?: string;
+    session?: "regular" | "extended";
+    forceRefresh?: boolean;
+    limit?: number;
+    signal?: AbortSignal;
+};
+
+// Synchronous read, including retained-but-expired data. Only the chart's
+// live-view fast path consumes stale snapshots; ordinary API callers keep
+// normal fresh-only caching semantics.
+export function peekCachedBars(
+  symbol: string,
+  timeframe: string,
+  options?: BarsRequestOptions,
+): { data: BarsResponse; fresh: boolean } | null {
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const normalizedTimeframe = timeframe.trim().toLowerCase();
+  const normalizedDate = String(options?.date ?? "").trim();
+  const normalizedLookback = normalizedDate
+    ? ""
+    : normalizeLookback(normalizedTimeframe, options?.lookback);
+  const normalizedSession = options?.session === "regular"
+    ? "regular"
+    : options?.session === "extended" ? "extended" : undefined;
+  const limit = Math.max(50, Math.min(5000,
+    Math.floor(options?.limit ?? defaultBarsLimit(normalizedTimeframe))));
+  const key = `${normalizedSymbol}|${normalizedTimeframe}|${normalizedDate}|${normalizedLookback}|${normalizedSession ?? ""}|${limit}`;
+  const now = Date.now();
+  pruneBarsCache(now);
+  const entry = barsCache.get(key);
+  if (!entry || entry.retainUntil <= now) return null;
+  // Refresh recency for LRU eviction without prolonging stale retention.
+  barsCache.delete(key);
+  barsCache.set(key, entry);
+  return { data: entry.data, fresh: entry.expiresAt > now };
+}
+
 export async function fetchBars(
   symbol: string,
   timeframe: string = "5m",
@@ -267,8 +310,10 @@ export async function fetchBars(
   })
     .then((res) => parseJson<BarsResponse>(res))
     .then((data) => {
+      const storedAt = Date.now();
       barsCache.set(cacheKey, {
-        expiresAt: Date.now() + BARS_CACHE_TTL_MS,
+        expiresAt: storedAt + BARS_CACHE_TTL_MS,
+        retainUntil: storedAt + BARS_CACHE_RETENTION_MS,
         data,
       });
       pruneBarsCache();

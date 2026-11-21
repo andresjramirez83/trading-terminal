@@ -176,11 +176,10 @@ export class ChartAutoScaleManager {
 
   buildPriceScaleRange(input: BuildPriceScaleRangeInput): PriceRange | null {
     if (this.focusedPriceRange) {
-      const focusedRange = mergeRanges(
-        this.focusedPriceRange,
-        input.analysisRange,
-      );
-      return focusedRange ? this.applyVerticalPan(focusedRange) : null;
+      // Shift+drag focuses the selected candles. Including analysis levels
+      // located far outside that selection makes the candles look flat.
+      // Keep the focus range independent of analysis overlays until reset.
+      return this.applyVerticalPan(this.focusedPriceRange);
     }
 
     const mode = input.mode ?? this.mode;

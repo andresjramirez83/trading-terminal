@@ -5,6 +5,7 @@ import type { Time } from "lightweight-charts";
 import {
   connectChartV2BarsSocket,
   fetchBars,
+  peekCachedBars,
   type LiveBarMessage,
 } from "../../services/api";
 
@@ -37,6 +38,25 @@ export function normalizeLiveBar(bar: LiveBarMessage | any): CleanBar | null {
   }
 
   return cleanBar;
+}
+
+// A synchronous read permits the chart to paint existing history before any
+// fetch starts. Replay history remains on its separate code path.
+export function peekHistoricalBars(params: {
+  symbol: string;
+  timeframe: string;
+  lookback?: string;
+  limit?: number;
+}): { bars: CleanBar[]; fresh: boolean } | null {
+  const snapshot = peekCachedBars(params.symbol, params.timeframe, {
+    lookback: params.lookback ?? "5d",
+    session: "extended",
+    limit: params.limit ?? 500,
+  });
+  if (!snapshot) return null;
+  const rawBars = Array.isArray(snapshot.data) ? snapshot.data : snapshot.data?.bars ?? [];
+  const bars = rawBars.map((bar: any) => normalizeLiveBar(bar)).filter(Boolean) as CleanBar[];
+  return bars.length ? { bars, fresh: snapshot.fresh } : null;
 }
 
 export async function loadHistoricalBars(params: {

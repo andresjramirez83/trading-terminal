@@ -1,11 +1,12 @@
 // src/components/chart/ChartPanel.tsx
 
 import { memo, useEffect, useRef, useState } from "react";
+import type { Time } from "lightweight-charts";
 
 import { ChartEngine } from "./ChartEngine";
 import type { ChartState } from "./ChartState";
-import type { CrosshairInfo, LiveStatus, StudyVisibility } from "./ChartTypes";
-import { connectLiveBars, loadHistoricalBars } from "./LiveDataEngine";
+import type { CleanBar, CrosshairInfo, LiveStatus, StudyVisibility } from "./ChartTypes";
+import { connectLiveBars, loadHistoricalBars, peekHistoricalBars } from "./LiveDataEngine";
 import { getSharedReplayRuntime } from "../../trading/replay/ReplayRuntime";
 import {
   MARKET_DATA_MODE_CHANGE_EVENT,
@@ -389,6 +390,13 @@ function getHistoricalRequest(timeframe: string): {
 function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<ChartEngine | null>(null);
+  // Remember which symbol currently owns the chart's visible time window.
+  // Do not carry the viewport across symbols or between replay and live mode.
+  const liveViewportContextRef = useRef<{ symbol: string; timeframe: string } | null>(null);
+  // A delayed history refresh must not replace a candle already delivered by
+  // the live websocket. Retain the latest live bar for cold-start reconciliation.
+  const liveBarRevisionRef = useRef(0);
+  const latestLiveBarRef = useRef<{ symbol: string; timeframe: string; bar: CleanBar } | null>(null);
   const drawingEngineRef = useRef<DrawingEngine | null>(null);
   const marketObjectDrawingBridgeRef = useRef<MarketObjectDrawingBridge | null>(null);
   const chartIntelligenceBridgeRef = useRef<ChartIntelligenceBridge | null>(null);
@@ -2322,6 +2330,26 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         setChartState(null);
         chartIntelligenceBridgeRef.current?.reset();
         replayIndexRef.current = -1;
+        // Capture the outgoing chart's actual clock-time window BEFORE loading
+        // another timeframe. Logical candle indexes are not interchangeable
+        // between 1m / 5m / 15m / 1h charts.
+        const previousWindow =
+          marketDataMode === "live" && liveViewportContextRef.current?.symbol === symbol
+            ? engine.chart.timeScale().getVisibleRange()
+            : null;
+        // getVisibleRange() omits empty space to the right of the newest bar.
+        // Keep the portion of the screen the user has intentionally left blank.
+        const rightBlankFraction = (): number => {
+          const logical = engine.chart.timeScale().getVisibleLogicalRange();
+          const lastBarIndex = engine.getBars().length - 1;
+          if (!logical || lastBarIndex < 0) return 0;
+          const width = logical.to - logical.from;
+          if (!Number.isFinite(width) || width <= 0) return 0;
+          return Math.max(0, Math.min(0.85, (logical.to - lastBarIndex) / width));
+        };
+        const previousRightBlankFraction = previousWindow ? rightBlankFraction() : 0;
+        liveViewportContextRef.current =
+          marketDataMode === "live" ? { symbol, timeframe } : null;
         engine.setMarketContext(symbol, timeframe);
         tradeEngineRef.current?.setWorkspace({ symbol, timeframe });
 
@@ -2359,6 +2387,81 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         }
 
         const historyRequest = getHistoricalRequest(timeframe);
+        const cached = peekHistoricalBars({ symbol, timeframe, ...historyRequest });
+        const revisionAtStart = liveBarRevisionRef.current;
+        let historyAlreadyApplied = false;
+        const applyHistory = (bars: CleanBar[], reason: string) => {
+          if (cancelled || controller.signal.aborted) return;
+          // On first load use the window from the outgoing timeframe. On a
+          // background refresh use the CURRENT viewport in case the user has
+          // zoomed or panned since the cached candles appeared.
+          const visibleWindow = historyAlreadyApplied
+            ? engine.chart.timeScale().getVisibleRange()
+            : previousWindow;
+          const blankFraction = historyAlreadyApplied
+            ? rightBlankFraction()
+            : previousRightBlankFraction;
+          engine.setMarketContext(symbol, timeframe);
+          engine.setBars(bars);
+          // If a websocket bar arrived before this history finished loading,
+          // merge it using the existing OHLC-preserving updateBar behavior.
+          const latest = latestLiveBarRef.current;
+          if (latest && latest.symbol === symbol && latest.timeframe === timeframe) {
+            engine.updateBar(latest.bar);
+          }
+          drawingEngineRef.current?.setWorkspace(symbol, timeframe);
+          marketObjectDrawingBridgeRef.current?.setWorkspace({ symbol, timeframe });
+          tradeEngineRef.current?.setWorkspace({ symbol, timeframe });
+          commitChartState(engine, reason);
+          engine.setStudyVisibility(studyVisibility);
+          setCrosshairInfo(engine.getLastBarInfo());
+          engine.resize();
+          // Restore the same real time interval, not the same candle count.
+          // If the destination timeframe has no data in that interval, fall
+          // back to the familiar fit-to-content behavior instead of blanking.
+          const destinationBars = engine.getBars();
+          const firstTime = Number(destinationBars[0]?.time);
+          const lastTime = Number(destinationBars[destinationBars.length - 1]?.time);
+          const rangeFrom = typeof visibleWindow?.from === "number"
+            ? visibleWindow.from : Number.NaN;
+          const rangeTo = typeof visibleWindow?.to === "number"
+            ? visibleWindow.to : Number.NaN;
+          const overlaps = Number.isFinite(firstTime) && Number.isFinite(lastTime)
+            && Number.isFinite(rangeFrom) && Number.isFinite(rangeTo)
+            && rangeTo >= firstTime && rangeFrom <= lastTime;
+          if (visibleWindow && overlaps) {
+            try {
+              const scale = engine.chart.timeScale();
+              scale.setVisibleRange(visibleWindow as { from: Time; to: Time });
+              // Preserve where the last candle sits horizontally. In particular,
+              // don't snap it to the right edge after a user pans left to leave
+              // room for future bars. Use destination logical indexes because
+              // 1m and 5m have very different numbers of candles.
+              if (blankFraction > 0.005 && blankFraction < 0.85) {
+                const aligned = scale.getVisibleLogicalRange();
+                const lastIndex = destinationBars.length - 1;
+                if (aligned && lastIndex > aligned.from) {
+                  const to = aligned.from + (lastIndex - aligned.from) / (1 - blankFraction);
+                  if (Number.isFinite(to) && to > aligned.from && to - aligned.from < 100000) {
+                    scale.setVisibleLogicalRange({ from: aligned.from, to });
+                  }
+                }
+              }
+            } catch {
+              engine.fitContent();
+            }
+          } else {
+            engine.fitContent();
+          }
+          historyAlreadyApplied = true;
+        };
+
+        if (cached) {
+          // Show previously viewed history now, even if its network TTL expired.
+          applyHistory(cached.bars, "historical-bars-cache-hit");
+          if (cached.fresh) return;
+        }
+
         const bars = await loadHistoricalBars({
           symbol,
           timeframe,
@@ -2366,25 +2469,23 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           limit: historyRequest.limit,
           signal: controller.signal,
         });
+        if (cancelled || controller.signal.aborted) return;
+        if (!bars.length && cached) return;
 
-        if (cancelled) return;
-
-        engine.setMarketContext(symbol, timeframe);
-        engine.setBars(bars);
-        drawingEngineRef.current?.setWorkspace(symbol, timeframe);
-        marketObjectDrawingBridgeRef.current?.setWorkspace({ symbol, timeframe });
-        tradeEngineRef.current?.setWorkspace({ symbol, timeframe });
-        commitChartState(engine, "historical-bars-loaded");
-        engine.setStudyVisibility(studyVisibility);
-        setCrosshairInfo(engine.getLastBarInfo());
-        engine.resize();
-        engine.fitContent();
+        // When refreshing a displayed snapshot, leave newer live candles in
+        // place rather than resetting the chart with an older HTTP response.
+        if (cached && liveBarRevisionRef.current !== revisionAtStart) return;
+        applyHistory(bars, cached ? "historical-bars-refreshed" : "historical-bars-loaded");
       } catch (err) {
         if (cancelled || (err instanceof Error && err.name === "AbortError")) {
           return;
         }
         console.error("ChartPanelV2 load failed", err);
-        setLiveStatus("disconnected");
+        // The websocket can still work, and a cached chart can remain visible.
+        // Do not label the live connection disconnected solely for HTTP failure.
+        if (!peekHistoricalBars({ symbol, timeframe, ...getHistoricalRequest(timeframe) })) {
+          setLiveStatus("disconnected");
+        }
       }
     }
 
@@ -2495,6 +2596,8 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         const engine = engineRef.current;
         if (!engine) return;
 
+        liveBarRevisionRef.current += 1;
+        latestLiveBarRef.current = { symbol, timeframe, bar };
         engine.setMarketContext(symbol, timeframe);
         engine.updateBar(bar);
         commitLiveChartState(engine);
