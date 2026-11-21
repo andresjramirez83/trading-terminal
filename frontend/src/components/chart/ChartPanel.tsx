@@ -1,5 +1,3 @@
-import { AIMarkupLayer } from "./ai/AIMarkupLayer";
-import { listenAIMarkupCommands } from "./ai/aiMarkupEvents";
 // src/components/chart/ChartPanel.tsx
 
 import { memo, useEffect, useRef, useState } from "react";
@@ -391,7 +389,6 @@ function getHistoricalRequest(timeframe: string): {
 function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<ChartEngine | null>(null);
-  const aiMarkupLayerRef = useRef<AIMarkupLayer | null>(null);
   const drawingEngineRef = useRef<DrawingEngine | null>(null);
   const marketObjectDrawingBridgeRef = useRef<MarketObjectDrawingBridge | null>(null);
   const chartIntelligenceBridgeRef = useRef<ChartIntelligenceBridge | null>(null);
@@ -945,7 +942,6 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   useEffect(() => {
     symbolRef.current = symbol;
     timeframeRef.current = timeframe;
-    aiMarkupLayerRef.current?.setContext(symbol, timeframe);
   }, [symbol, timeframe]);
 
   useEffect(() => {
@@ -953,10 +949,6 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     if (!container) return;
 
     const engine = new ChartEngine(container);
-    const aiMarkupLayer = new AIMarkupLayer(engine.chart, engine.series.candles, engine.getContainer());
-    aiMarkupLayer.setContext(symbolRef.current, timeframeRef.current);
-    aiMarkupLayerRef.current = aiMarkupLayer;
-    const unsubscribeAIMarks = listenAIMarkupCommands((command) => aiMarkupLayer.command(command));
     const drawingEngine = new DrawingEngine(
       engine.chart,
       engine.series.candles,
@@ -1701,9 +1693,6 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
       marketObjectDrawingBridgeRef.current = null;
       drawingEngine.destroy();
       drawingEngineRef.current = null;
-      unsubscribeAIMarks();
-      aiMarkupLayer.destroy();
-      aiMarkupLayerRef.current = null;
       engine.destroy();
       engineRef.current = null;
     };
@@ -2322,6 +2311,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
 
     async function load() {
       try {
@@ -2374,6 +2364,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
           timeframe,
           lookback: historyRequest.lookback,
           limit: historyRequest.limit,
+          signal: controller.signal,
         });
 
         if (cancelled) return;
@@ -2389,6 +2380,9 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         engine.resize();
         engine.fitContent();
       } catch (err) {
+        if (cancelled || (err instanceof Error && err.name === "AbortError")) {
+          return;
+        }
         console.error("ChartPanelV2 load failed", err);
         setLiveStatus("disconnected");
       }
@@ -2398,6 +2392,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [
     marketDataMode,
