@@ -1,8 +1,8 @@
-import type { AIMarkup, AIProjections, AIMultiTimeframe, AILiquiditySweepMatch } from "../../../services/aiAnalysis";
+import type { AIMarkup, AIProjections, AIMultiTimeframe, AILiquiditySweepMatch, AIDisplacementFVGSweep } from "../../../services/aiAnalysis";
 
 export type AIOverlayMode = "clean" | "detailed" | "hidden";
 export type AIMarkupCommand =
-  | { mode: "set"; symbol: string; marks: AIMarkup[]; projections?: AIProjections; multiTimeframe?: AIMultiTimeframe; patternMatch?: AILiquiditySweepMatch }
+  | { mode: "set"; symbol: string; marks: AIMarkup[]; projections?: AIProjections; multiTimeframe?: AIMultiTimeframe; patternMatch?: AILiquiditySweepMatch; displacementFvgSweep?: AIDisplacementFVGSweep }
   | { mode: "view"; symbol: string; view: AIOverlayMode }
   | { mode: "toggle" | "paths" | "clear"; symbol: string };
 

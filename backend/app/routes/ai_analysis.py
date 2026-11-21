@@ -18,6 +18,7 @@ from app.services.ai_chart_annotations import build_ai_annotations
 from app.services.ai_chart_projections import build_ai_projections
 from app.services.ai_mtf_fvg_respect import build_mtf_fvg_respect
 from app.services.ai_liquidity_sweep_match import match_saved_liquidity_sweep
+from app.services.ai_displacement_fvg_sweep import build_displacement_fvg_sweep
 from app.services.ai_pattern_library import get_pattern_image, list_patterns, save_pattern
 from app.services.ai_vision_service import chart_png, vision_analyze
 import httpx
@@ -186,6 +187,29 @@ async def _market_report(symbol: str, include_multi_timeframe: bool = False, ref
     report["rank_points"] = _score(report)
     closed_one, closed_five = closed_bars(one, 1), closed_bars(five, 5)
     report["annotations"] = build_ai_annotations(closed_one, closed_five, report.get("structure") or {})
+    # Dedicated causal setup: target is chosen from gaps known BEFORE its sweep.
+    strategy = build_displacement_fvg_sweep(closed_five)
+    report["displacement_fvg_sweep"] = strategy
+    candidate = strategy.get("setup") or strategy.get("watch")
+    if candidate:
+        gap = candidate["gap"]
+        zone = candidate["zone"]
+        report["annotations"].extend([
+            {"id": "dfs-liquidity-zone", "kind": "zone", "tone": "context", "timeframe": "5m",
+             "low": zone["low"], "high": min(zone["high"], zone["low"] * 1.02),
+             "label": f"Range lows · {zone['touches']} tests", "source": "closed_bars"},
+            {"id": "dfs-fvg-target", "kind": "zone", "tone": "watch", "timeframe": "5m",
+             "low": gap["low"], "high": gap["high"], "label": "Pre-sweep bearish FVG target",
+             "source": "closed_bars"},
+        ])
+        if strategy.get("setup"):
+            setup = strategy["setup"]
+            for stage in setup["stages"]:
+                report["annotations"].append({
+                    "id": "dfs-" + stage["stage"], "kind": "marker", "tone": "confirmed" if stage["stage"] == "reclaim" else "watch",
+                    "timeframe": "5m", "time_ms": stage["time_ms"], "price": stage["price"],
+                    "label": "Fast reclaim" if stage["stage"] == "reclaim" else "Sweep below range", "source": "closed_bars",
+                })
     projected = build_ai_projections(closed_one, closed_five)
     if errors:
         # Never display a directional forward path as live when market bars failed.

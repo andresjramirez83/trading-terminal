@@ -95,10 +95,31 @@ export type AILiquiditySweepMatch = {
   reasons: string[]; method: string; last_closed_time_ms?: number | null;
 };
 
+export type AIDisplacementFVGSweep = {
+  status: "insufficient_data" | "not_found" | "watching_range" | "swept_waiting_reclaim" |
+    "reclaimed" | "invalidated" | "target_touched" | "inverted" | "inversion_held" | "inversion_failed";
+  matched: boolean; timeframe: "5m"; historical_only: boolean; method: string;
+  last_closed_time_ms?: number;
+  watch?: { zone: AISweepRange; gap: AISweepGap } | null;
+  setup?: { id: string; sweep_time_ms: number; sweep_low: number;
+    reclaim_time_ms: number | null; reclaim_quality: string;
+    lower_wick_fraction: number; close_location: number;
+    invalidation: number; zone: AISweepRange; gap: AISweepGap;
+    stage_time_ms: number; target_touched: boolean;
+    stages: {stage: "sweep" | "reclaim"; time_ms: number; price: number}[];
+  } | null;
+};
+export type AISweepRange = { low: number; high: number; touches: number; candles: number;
+  start_time_ms: number; end_time_ms: number };
+export type AISweepGap = { id: string; formed_time_ms: number; low: number; high: number;
+  original_low: number; original_high: number; timeframe: "5m"; status_at_sweep: string;
+  rally_low: number; rally_high: number };
+
 export type AIReport = {
   symbol: string;
   annotations?: AIMarkup[];
   pattern_match?: AILiquiditySweepMatch;
+  displacement_fvg_sweep?: AIDisplacementFVGSweep;
   projections?: AIProjections;
   multi_timeframe?: AIMultiTimeframe;
   as_of?: string;

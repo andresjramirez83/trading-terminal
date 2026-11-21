@@ -1,5 +1,5 @@
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import type { AIMarkup, AIProjections, AIMultiTimeframe, AILiquiditySweepMatch } from "../../../services/aiAnalysis";
+import type { AIMarkup, AIProjections, AIMultiTimeframe, AILiquiditySweepMatch, AIDisplacementFVGSweep } from "../../../services/aiAnalysis";
 import { selectCleanAIView } from "./aiCleanViewModel";
 import type { AIMarkupCommand, AIOverlayMode } from "./aiMarkupEvents";
 
@@ -23,6 +23,7 @@ export class AIMarkupLayer {
   private projections: AIProjections | null = null;
   private multiTimeframe: AIMultiTimeframe | null = null;
   private patternMatch: AILiquiditySweepMatch | null = null;
+  private displacementFvgSweep: AIDisplacementFVGSweep | null = null;
   private viewMode: AIOverlayMode = "clean";
   private symbol = "";
   private timeframe = "5m";
@@ -53,7 +54,7 @@ export class AIMarkupLayer {
 
   setContext(symbol: string, timeframe: string): void {
     const next = symbol.trim().toUpperCase();
-    if (next !== this.symbol) { this.marks = []; this.projections = null; this.multiTimeframe = null; this.patternMatch = null; this.visible = true; this.pathsVisible = true; }
+    if (next !== this.symbol) { this.marks = []; this.projections = null; this.multiTimeframe = null; this.patternMatch = null; this.displacementFvgSweep = null; this.visible = true; this.pathsVisible = true; }
     this.symbol = next;
     this.timeframe = String(timeframe).toLowerCase();
     this.schedule();
@@ -69,6 +70,7 @@ export class AIMarkupLayer {
       this.projections = message.projections ?? null;
       this.multiTimeframe = message.multiTimeframe ?? null;
       this.patternMatch = message.patternMatch ?? null;
+      this.displacementFvgSweep = message.displacementFvgSweep ?? null;
       this.visible = true;
       this.pathsVisible = true;
     } else if (message.mode === "view") {
@@ -76,7 +78,7 @@ export class AIMarkupLayer {
       this.visible = message.view !== "hidden";
     } else if (message.mode === "toggle") this.visible = !this.visible;
     else if (message.mode === "paths") this.pathsVisible = !this.pathsVisible;
-    else if (message.mode === "clear") { this.marks = []; this.projections = null; this.multiTimeframe = null; this.patternMatch = null; }
+    else if (message.mode === "clear") { this.marks = []; this.projections = null; this.multiTimeframe = null; this.patternMatch = null; this.displacementFvgSweep = null; }
     this.schedule();
   }
 
@@ -99,6 +101,10 @@ export class AIMarkupLayer {
     g.clearRect(0, 0, width, height);
     if (!this.visible || this.viewMode === "hidden") return;
     if (this.viewMode === "clean") {
+      if (this.timeframe === "5m" && (this.displacementFvgSweep?.setup || this.displacementFvgSweep?.watch)) {
+        this.renderFvgSweep(width, height);
+        return;
+      }
       if (this.patternMatch && this.patternMatch.timeframe === this.timeframe) {
         this.renderSavedPattern(width, height);
         return;
@@ -380,6 +386,67 @@ export class AIMarkupLayer {
     }
     if (match.status === "invalidated") this.smallTag(g,8,20,"Historical setup invalidated","#fb7185",plotWidth,height);
     else if (match.historical_only) this.smallTag(g,8,20,"Historical pattern · not live","#facc15",plotWidth,height);
+    g.restore();
+  }
+
+  /** Closed-candle historical marks. FVG band predates sweep; no future-price path. */
+  private renderFvgSweep(width: number, height: number): void {
+    const strategy = this.displacementFvgSweep;
+    const candidate = strategy?.setup || strategy?.watch;
+    if (!strategy || !candidate || this.timeframe !== "5m") return;
+    const plotWidth = Math.min(width, this.chart.timeScale().width());
+    if (plotWidth < 100) return;
+    const g = this.ctx;
+    const tx = (value: number): number | null => {
+      const x = this.chart.timeScale().timeToCoordinate(Math.floor(value/1000) as Time);
+      return x == null || !Number.isFinite(x) ? null : Number(x);
+    };
+    const py = (price: number): number | null => {
+      const y = this.series.priceToCoordinate(price);
+      return y == null || !Number.isFinite(y) ? null : Number(y);
+    };
+    const band = (low: number, high: number, left: number, right: number,
+                  color: string, fill: string, label: string) => {
+      const yl = py(low), yh = py(high);
+      if (yl === null || yh === null || right <= left + 5) return;
+      const top = Math.min(yl, yh), tall = Math.max(3, Math.abs(yl-yh));
+      if (top > height || top+tall < 0) return;
+      g.fillStyle = fill; g.strokeStyle = color; g.lineWidth = 1;
+      g.fillRect(left,top,right-left,tall);
+      g.strokeRect(left+.5,top+.5,right-left-1,tall);
+      this.smallTag(g,left+3,Math.max(15,top-3),label,color,plotWidth,height);
+    };
+    g.save(); g.beginPath(); g.rect(0,0,plotWidth,height); g.clip();
+    g.globalAlpha = strategy.historical_only ? .62 : 1;
+    const start = tx(candidate.zone.start_time_ms);
+    const end = tx(candidate.zone.end_time_ms);
+    const sweep = strategy.setup ? tx(strategy.setup.sweep_time_ms) : end;
+    if (start !== null && end !== null) {
+      band(candidate.zone.low,Math.min(candidate.zone.high,candidate.zone.low*1.02),
+        Math.max(1,start),Math.min(plotWidth, Math.max(end + 14,sweep || 0)),
+        "#93c5fd","rgba(96,165,250,.13)",`${candidate.zone.touches} liquidity low tests`);
+    }
+    const formed = tx(candidate.gap.formed_time_ms);
+    if (formed !== null) {
+      band(candidate.gap.low,candidate.gap.high,Math.max(1,formed),Math.min(plotWidth,Math.max(formed+25,(sweep ?? end ?? formed)+90)),
+        "#fbbf24","rgba(250,204,21,.15)","Pre-sweep bearish FVG target");
+    }
+    if (strategy.setup) {
+      for (const stage of strategy.setup.stages) {
+        const x = tx(stage.time_ms), y = py(stage.price);
+        if (x === null || y === null || x < 4 || x > plotWidth-4 || y < 8 || y > height-8) continue;
+        const clr = stage.stage === "sweep" ? "#fb7185" : "#34d399";
+        g.strokeStyle = clr; g.lineWidth = 2.5; g.beginPath(); g.arc(x,y,7,0,Math.PI*2); g.stroke();
+        this.smallTag(g,x+9,y-9,stage.stage === "sweep" ? "Sweep" : "Fast reclaim",clr,plotWidth,height);
+      }
+      const stopY = py(strategy.setup.invalidation);
+      if (stopY !== null && sweep !== null && stopY >= 10 && stopY < height-10) {
+        g.strokeStyle = "#fb7185"; g.lineWidth = 1.3; g.setLineDash([4,5]);
+        g.beginPath(); g.moveTo(sweep,stopY); g.lineTo(Math.min(plotWidth-6,sweep+90),stopY); g.stroke();g.setLineDash([]);
+        this.smallTag(g,sweep+45,stopY-4,"Invalidation watch","#fb7185",plotWidth,height);
+      }
+    }
+    if (strategy.historical_only) this.smallTag(g,8,20,"Historical setup · not live","#fbbf24",plotWidth,height);
     g.restore();
   }
 
