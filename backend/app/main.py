@@ -2912,6 +2912,17 @@ async def fetch_bars_for_day_async(
     ]
 
 
+def _run_market_bars_sync(awaitable: Any) -> Any:
+    """Close the temporary loop's Alpaca HTTP client before asyncio.run exits."""
+    async def _execute() -> Any:
+        try:
+            return await awaitable
+        finally:
+            await AlpacaMarketService.close_shared_client()
+
+    return asyncio.run(_execute())
+
+
 def fetch_bars_range(
     symbol: str,
     timeframe: str,
@@ -2922,7 +2933,7 @@ def fetch_bars_range(
 ) -> tuple[List[Candle], date]:
     """Synchronous Alpaca wrapper for legacy worker-thread alert paths."""
 
-    return asyncio.run(
+    return _run_market_bars_sync(
         fetch_bars_range_async(
             symbol,
             timeframe,
@@ -2941,7 +2952,7 @@ def fetch_bars_for_day(
     limit_bars: Optional[int] = MAX_BARS_DEFAULT,
     session: str = "regular",
 ) -> List[Candle]:
-    return asyncio.run(
+    return _run_market_bars_sync(
         fetch_bars_for_day_async(
             symbol,
             timeframe,
