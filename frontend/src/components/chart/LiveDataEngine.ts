@@ -49,8 +49,9 @@ export async function loadHistoricalBars(params: {
    */
   date?: string;
 
-  lookback?: string;
+   lookback?: string;
   limit?: number;
+  signal?: AbortSignal;
 }): Promise<CleanBar[]> {
   const cleanSymbol = String(params.symbol || "SPY").trim().toUpperCase();
   const cleanTimeframe = String(params.timeframe || "5m").trim().toLowerCase();
@@ -63,6 +64,7 @@ export async function loadHistoricalBars(params: {
     session: "extended",
     limit: params.limit ?? 500,
     forceRefresh: false,
+    signal: params.signal,
   });
 
 
