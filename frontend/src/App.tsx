@@ -7,7 +7,7 @@ import { ActiveSymbolProvider } from "./components/chart/ActiveSymbolContext";
 import { WatchlistProvider } from "./components/watchlists/WatchlistContext";
 import { WorkspaceProvider } from "./components/workspace/WorkspaceContext";
 
-import ChartV2Page from "./pages/ChartV2Page";
+const ChartV2Page = lazy(() => import("./pages/ChartV2Page"));
 
 const ScannerPage = lazy(() => import("./pages/ScannerPage"));
 
