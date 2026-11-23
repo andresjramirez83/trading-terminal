@@ -189,15 +189,14 @@ export class ChartAutoScaleManager {
       return mergedRange ? this.applyVerticalPan(mergedRange) : null;
     }
 
-    const recentBars = input.bars.slice(-650);
-    const recentRange = buildRangeFromBars(recentBars);
-
-    if (!recentRange) {
-      const mergedRange = mergeRanges(input.baseRange, input.analysisRange);
-      return mergedRange ? this.applyVerticalPan(mergedRange) : null;
-    }
-
-    const mergedRange = mergeRanges(recentRange, input.analysisRange);
+    // ChartEngine passes only the candles in the visible time window here.
+    // Avoid old off-screen spikes distorting the scale (or clipping an
+    // important wick inside the viewport).
+    const visibleRange = buildRangeFromBars(input.bars);
+    const mergedRange = mergeRanges(
+      visibleRange ?? input.baseRange,
+      input.analysisRange,
+    );
     return mergedRange ? this.applyVerticalPan(mergedRange) : null;
   }
 }

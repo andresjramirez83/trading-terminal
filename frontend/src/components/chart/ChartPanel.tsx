@@ -1657,16 +1657,31 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     window.addEventListener("pointerup", handleOverlayPointerUp, true);
     window.addEventListener("pointercancel", handleOverlayPointerCancel, true);
 
-    const resize = () => engine.resize();
+    // Panel dragging changes the chart container without resizing the window.
+    // Observe its actual size, without resetting zoom or visible time range.
+    let resizeFrame: number | null = null;
+    const resize = () => {
+      if (resizeFrame !== null) return;
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = null;
+        engine.resize();
+      });
+    };
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(resize)
+      : null;
+    resizeObserver?.observe(container);
     window.addEventListener("resize", resize);
 
     const resizeTimer = window.setTimeout(() => {
-      resize();
+      engine.resize();
       engine.fitContent();
     }, 0);
 
     return () => {
       window.clearTimeout(resizeTimer);
+      resizeObserver?.disconnect();
+      if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
       window.removeEventListener("resize", resize);
       unsubscribeCrosshair();
       unsubscribeClick();

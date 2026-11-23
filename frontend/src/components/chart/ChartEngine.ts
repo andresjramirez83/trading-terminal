@@ -613,7 +613,7 @@ export class ChartEngine {
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
-      title: "VWAP",
+      title: "V",
     });
 
     const ema9 = this.chart.addSeries(LineSeries, {
@@ -621,7 +621,7 @@ export class ChartEngine {
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
-      title: "EMA 9",
+      title: "E9",
     });
 
     const ema20 = this.chart.addSeries(LineSeries, {
@@ -629,7 +629,7 @@ export class ChartEngine {
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
-      title: "EMA 20",
+      title: "E20",
     });
 
     const ema50 = this.chart.addSeries(LineSeries, {
@@ -637,7 +637,7 @@ export class ChartEngine {
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
-      title: "EMA 50",
+      title: "E50",
     });
 
     const poc = this.chart.addSeries(LineSeries, {
@@ -646,7 +646,7 @@ export class ChartEngine {
       lineStyle: LineStyle.Solid,
       priceLineVisible: false,
       lastValueVisible: true,
-      title: "POC",
+      title: "P",
     });
 
     const pocUpper1 = this.chart.addSeries(LineSeries, {
@@ -691,7 +691,7 @@ export class ChartEngine {
       lineStyle: LineStyle.Dashed,
       priceLineVisible: false,
       lastValueVisible: true,
-      title: "POC +3σ",
+      title: "P+3σ",
     });
 
     const pocLower3 = this.chart.addSeries(LineSeries, {
@@ -700,7 +700,7 @@ export class ChartEngine {
       lineStyle: LineStyle.Dashed,
       priceLineVisible: false,
       lastValueVisible: true,
-      title: "POC -3σ",
+      title: "P-3σ",
     });
 
     this.series = {
@@ -2439,15 +2439,52 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     }
   }
 
+  private getVisibleAutoscaleBars(): CleanBar[] {
+    const range = this.chart.timeScale().getVisibleLogicalRange();
+    if (!range || !this.bars.length) {
+      return this.bars.slice(-120);
+    }
+
+    // Lightweight Charts logical indexes correspond to the chronological
+    // candle array. Include partially visible candles at either edge.
+    const first = Math.max(0, Math.floor(range.from));
+    const last = Math.min(this.bars.length - 1, Math.ceil(range.to));
+    return last >= first ? this.bars.slice(first, last + 1) : [];
+  }
+
+  private getSelectedAnalysisPriceRange(): {
+    minValue: number;
+    maxValue: number;
+  } | null {
+    const id = this.analysisStore.getSelectedId();
+    if (!id) return null;
+    const selected = this.analysisStore.getAll().find((item) => item.id === id);
+    if (!selected) return null;
+
+    const prices: number[] = [];
+    for (const line of selected.lines) {
+      const price = Number(line.price);
+      if (Number.isFinite(price) && price > 0) prices.push(price);
+    }
+    if (selected.zone) {
+      for (const price of [selected.zone.low, selected.zone.high]) {
+        if (Number.isFinite(price) && price > 0) prices.push(price);
+      }
+    }
+    return prices.length
+      ? { minValue: Math.min(...prices), maxValue: Math.max(...prices) }
+      : null;
+  }
+
   private buildAutoScalePriceRange(
     baseRange: { minValue: number; maxValue: number } | null,
   ): { minValue: number; maxValue: number } | null {
     return this.autoScaleManager.buildPriceScaleRange({
       baseRange,
-      bars: this.bars,
-      analysisRange: this.analysisStore.getAutoScalePriceRange(
-        this.fxAnalysisSettings,
-      ),
+      bars: this.getVisibleAutoscaleBars(),
+      // In ordinary Price mode prioritize visible candles and the selected
+      // level, not every historic analysis object far off-screen.
+      analysisRange: this.getSelectedAnalysisPriceRange(),
     });
   }
 
@@ -2455,9 +2492,10 @@ setMarketContext(symbol?: string, timeframe?: string): void {
     const range = this.analysisStore.getAutoScalePriceRange(
       this.fxAnalysisSettings,
     );
+    const selectedId = this.analysisStore.getSelectedId() ?? "none";
     const nextKey = range
-      ? `${range.minValue}:${range.maxValue}`
-      : "none";
+      ? `${range.minValue}:${range.maxValue}:${selectedId}`
+      : `none:${selectedId}`;
 
     if (!force && nextKey === this.fxAutoScaleRangeKey) return;
 
@@ -2695,6 +2733,7 @@ setMarketContext(symbol?: string, timeframe?: string): void {
 
     this.analysisStore.select(hit?.resultId ?? null);
     this.renderFxAnalysis();
+    this.refreshFxAutoScaleIfNeeded(true);
 
     return hit != null;
   }

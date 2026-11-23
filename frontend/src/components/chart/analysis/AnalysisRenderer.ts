@@ -186,7 +186,7 @@ export class AnalysisRenderer {
         lineWidth: visualWidth,
         priceLineVisible: false,
         lastValueVisible: false,
-        title: showLabel ? result.zone.title : "",
+        title: "", // Compact scale badge; zone remains on chart.
         priceScaleId: "right",
         autoscaleInfoProvider: () => null,
       });
@@ -225,7 +225,7 @@ export class AnalysisRenderer {
         lineStyle: line.lineStyle,
         priceLineVisible: showLabel,
         lastValueVisible: showLabel,
-        title: showLabel ? line.title : "",
+        title: "", // The price badge remains, without the long title.
         priceScaleId: "right",
         autoscaleInfoProvider: () => null,
       });
