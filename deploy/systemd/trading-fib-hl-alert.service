@@ -1,0 +1,18 @@
+[Unit]
+Description=Trading Terminal Fibonacci HL Sweep Alerts (1m 5m 15m)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/trading-terminal/backend
+EnvironmentFile=-/opt/trading-terminal/backend/.env
+EnvironmentFile=-/etc/trading-terminal/ai.env
+EnvironmentFile=-/etc/trading-terminal/fvg-sweep-alerts.env
+Environment=TT_FIB_HL_ALERTS_ENABLED=1
+ExecStart=/opt/trading-terminal/backend/venv/bin/python -B -m app.workers.fib_hl_sweep_alert_worker
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
