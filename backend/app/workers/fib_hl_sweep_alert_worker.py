@@ -42,6 +42,7 @@ MINUTE_MS = 60_000
 TIMEFRAMES = (1, 5, 15)
 # Last processed candle signature and its confirmed chart HLs (per timeframe).
 _POINTS_CACHE: Dict[tuple, tuple] = {}
+_DISCOVERY_CURSOR = 0
 
 
 def symbols_to_monitor() -> List[str]:
@@ -323,7 +324,22 @@ async def tick(
     seen: Dict[str, int], *, initial: bool, path: Path, sender=send_pushover
 ) -> None:
     """Scan all 3 TFs; early 5/15m sweeps use completed 1m candles."""
-    symbols = symbols_to_monitor()
+    global _DISCOVERY_CURSOR
+    monitored_symbols = symbols_to_monitor()
+    symbols = list(monitored_symbols)
+    try:
+        from app.services.scanner_universe_service import get_scanner_universe
+        from app.services.market_data_provider import get_market_data_provider
+        universe = await get_scanner_universe(market=get_market_data_provider(), limit=1000, min_limit=1000)
+        candidates = [s for s in universe if SYM_RE.fullmatch(s) and s not in monitored_symbols]
+        if candidates:
+            batch = max(5, min(30, int(os.getenv("TT_FIB_HL_DISCOVERY_BATCH", "20"))))
+            offset = _DISCOVERY_CURSOR % len(candidates)
+            symbols.extend((candidates + candidates)[offset:offset + batch])
+            _DISCOVERY_CURSOR += batch
+            log.info("Fib stock discovery: universe=%d scanning=%d cursor=%d", len(candidates), len(symbols), _DISCOVERY_CURSOR)
+    except Exception as exc:
+        log.warning("Fib stock discovery failed: %s", str(exc)[:180])
     if not symbols:
         log.info("No configured symbols or watchlist symbols to scan")
         return
@@ -376,6 +392,8 @@ async def tick(
                 except Exception as exc:
                     log.warning("Fib HL signal storage failed: %s", str(exc)[:160])
                 for event in events:
+                    if symbol not in monitored_symbols:
+                        continue
                     if event["key"] in seen:
                         continue
                     if not initial:
