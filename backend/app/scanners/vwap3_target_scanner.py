@@ -520,8 +520,15 @@ def _status_from_rows(rows: List[Dict[str, Any]], record: Dict[str, Any]) -> Dic
             confirmation_time = row_time
         if strong_confirmation_time is None and close > displacement_high:
             strong_confirmation_time = row_time
-        if invalidation_time is None and idx > freeze_idx and displacement_low > 0 and low <= displacement_low:
-            invalidation_time = row_time
+        if invalidation_time is None and idx > freeze_idx:
+            if str(record.get("grade") or "") == "A+":
+                band = _safe_float(record.get("lower_3std_price"))
+                if band > 0 and close < band and row_time:
+                    close_at = datetime.fromisoformat(row_time).astimezone(ET) + timedelta(minutes=5)
+                    if close_at <= datetime.now(ET):
+                        invalidation_time = row_time
+            elif displacement_low > 0 and low <= displacement_low:
+                invalidation_time = row_time
 
         # Target was not allowed to count until after the freeze confirmation.
         if idx > freeze_idx and target_hit_time is None and high >= target:
