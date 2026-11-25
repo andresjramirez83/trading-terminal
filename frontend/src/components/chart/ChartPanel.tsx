@@ -2406,6 +2406,18 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
         const revisionAtStart = liveBarRevisionRef.current;
         let historyAlreadyApplied = false;
         const applyHistory = (bars: CleanBar[], reason: string) => {
+          // Skip redundant full-chart rebuilds when refreshed OHLCV is unchanged.
+          if (historyAlreadyApplied && reason === "historical-bars-refreshed") {
+            const current = engine.getBars();
+            const unchanged = current.length === bars.length && current.every((bar, index) => {
+              const next = bars[index];
+              return Number(bar.time) === Number(next.time) &&
+                bar.open === next.open && bar.high === next.high &&
+                bar.low === next.low && bar.close === next.close &&
+                bar.volume === next.volume;
+            });
+            if (unchanged) return;
+          }
           if (cancelled || controller.signal.aborted) return;
           // On first load use the window from the outgoing timeframe. On a
           // background refresh use the CURRENT viewport in case the user has
