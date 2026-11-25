@@ -4,6 +4,7 @@ import {
   CandlestickSeries,
   ColorType,
   createChart,
+  createSeriesMarkers,
   CrosshairMode,
   HistogramSeries,
   LineSeries,
@@ -13,6 +14,7 @@ import {
   type HistogramData,
   type IChartApi,
   type IPriceLine,
+  type ISeriesMarkersPluginApi,
   type LineData,
   type MouseEventParams,
   type Time,
@@ -1640,6 +1642,22 @@ export class ChartEngine {
     this.scheduleVwap3OverlayRender();
   }
 
+  private fibLines: IPriceLine[] = [];
+  private fibSweepAt: number | null = null;
+  private fibMarkers: ISeriesMarkersPluginApi<Time> | null = null;
+  setFibHlSweepOverlay(v: {hl_price:number;sweep_low:number;sweep_time:string} | null): void {
+    for (const line of this.fibLines) this.series.candles.removePriceLine(line);
+    this.fibLines = [];
+    this.fibSweepAt = v ? Date.parse(v.sweep_time) / 1000 : null;
+    if (v) for (const [price,color,title] of [[v.hl_price,"#eab308","FIB HL SUPPORT"],[v.sweep_low,"#fb7185","SWEEP LOW"]] as const) if (Number.isFinite(price) && price > 0) this.fibLines.push(this.series.candles.createPriceLine({price,color,lineWidth:2,lineStyle:LineStyle.Dashed,axisLabelVisible:true,title}));
+    if (!this.fibMarkers) this.fibMarkers = createSeriesMarkers(this.series.candles, []);
+    this.refreshFibMarker();
+  }
+  private refreshFibMarker(): void {
+    const t = this.fibSweepAt;
+    const candle = t === null ? undefined : this.bars.find(b => Math.abs(Number(b.time) - t) < 2);
+    this.fibMarkers?.setMarkers(candle ? [{time:candle.time,position:"belowBar",shape:"arrowUp",color:"#fb7185",text:"HL SWEEP"}] : []);
+  }
   setBars(bars: CleanBar[]): void {
     this.bars = trimBarsForTimeframe(bars, this.timeframe);
     this.invalidateDerivedStateCache();
@@ -1660,6 +1678,7 @@ export class ChartEngine {
     }));
 
     this.series.candles.setData(candleBars);
+    this.refreshFibMarker();
     this.series.volume.setData(volumeBars);
     this.series.vwap.setData(buildVwapBars(this.bars));
     this.series.ema9.setData(buildEmaBars(this.bars, 9));

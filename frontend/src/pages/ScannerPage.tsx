@@ -183,7 +183,7 @@ export default function ScannerPage() {
           {["Symbol","TF","Higher Low","Fib %","Sweep Low","Status","Time (ET)"].map(h=><th key={h} style={{padding:8}}>{h}</th>)}
         </tr></thead><tbody>
           {fibSignals.slice(0,60).map(r=><tr key={r.key}>
-            <td style={{padding:8}}><button type="button" onClick={()=>handleSelectSymbol(r.symbol)}>{r.symbol}</button></td>
+            <td style={{padding:8}}><button type="button" onClick={()=>{handleSelectSymbol(r.symbol);window.sessionStorage.setItem("fib-hl-chart-request",JSON.stringify(r));window.localStorage.setItem("chartv2.timeframe",r.timeframe);handleBackToChart();}}>{r.symbol}</button></td>
             <td>{r.timeframe}</td>
             <td>{r.hl_price == null ? "—" : `$${r.hl_price.toFixed(4)}`}</td>
             <td>{r.fib_pct == null ? "—" : `${r.fib_pct.toFixed(1)}%`}</td>

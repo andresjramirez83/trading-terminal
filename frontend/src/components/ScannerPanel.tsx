@@ -1147,6 +1147,7 @@ export default function ScannerPanel({
       }
     }
 
+    if (selectedScannerId === "fib_hl_liquidity") { const hit = (data?.rows ?? []).find(r => String(r.symbol ?? "").toUpperCase() === clean); if (hit) { window.sessionStorage.setItem("fib-hl-chart-request", JSON.stringify(hit)); window.localStorage.setItem("chartv2.timeframe", String((hit as {timeframe?:string}).timeframe || "15m")); setActiveSymbol(clean, "scanner"); onSelectSymbol?.(clean); window.location.assign("/chart"); return; } }
     setActiveSymbol(clean, "scanner");
     onSelectSymbol?.(clean);
   }

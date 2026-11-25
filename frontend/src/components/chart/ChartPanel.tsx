@@ -82,6 +82,7 @@ import {
 } from "../../services/api";
 
 const TIMEFRAME_STORAGE_KEY = "chartv2.timeframe";
+function readFibSweep(symbol:string,tf:string):{hl_price:number;sweep_low:number;sweep_time:string}|null { try { const r=JSON.parse(sessionStorage.getItem("fib-hl-chart-request")||"null"); if(r && String(r.symbol).toUpperCase()===symbol.toUpperCase() && String(r.timeframe).toLowerCase()===tf.toLowerCase() && Number(r.hl_price)>0 && Number(r.sweep_low)>0 && !Number.isNaN(Date.parse(r.sweep_time))) return {hl_price:Number(r.hl_price),sweep_low:Number(r.sweep_low),sweep_time:String(r.sweep_time)}; } catch {} return null; }
 const STUDY_STORAGE_KEY = "chartv2.studyVisibility";
 const RIGHT_PANEL_COLLAPSED_KEY = "chartv2.rightPanelCollapsed";
 const DRAWING_STYLE_STORAGE_KEY = "chartv2.drawingStyle";
@@ -422,6 +423,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
   );
   const symbolRef = useRef(symbol);
   const timeframeRef = useRef(timeframe);
+  useEffect(() => { engineRef.current?.setFibHlSweepOverlay(readFibSweep(symbol,timeframe)); }, [symbol,timeframe]);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>("connecting");
   const [crosshairInfo, setCrosshairInfo] = useState<CrosshairInfo | null>(
     null,
@@ -1047,6 +1049,7 @@ function ChartPanel({ timeframe: initialTimeframe = "5m" }: Props) {
     engine.activateInteractionTool(getInteractionToolId(drawingTool));
 
     engineRef.current = engine;
+    engine.setFibHlSweepOverlay(readFibSweep(symbolRef.current,timeframeRef.current));
     drawingEngineRef.current = drawingEngine;
     marketObjectDrawingBridgeRef.current = marketObjectDrawingBridge;
     tradeEngineRef.current = tradeEngine;
