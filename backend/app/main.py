@@ -112,6 +112,18 @@ app.include_router(level2_router)
 app.include_router(backtest_router)
 app.include_router(history_router)
 
+@app.get("/fib-hl-signals")
+def read_fib_hl_signals():
+    """Recent Fibonacci HL scanner signals; no market-data requests."""
+    path = Path(__file__).resolve().parent / "data" / "app_state" / "fib_hl_scanner_signals.json"
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"signals": []}
+    if not isinstance(rows, list):
+        return {"signals": []}
+    return {"signals": [row for row in rows if isinstance(row, dict)][:250]}
+
 
 class Candle(BaseModel):
     time: int

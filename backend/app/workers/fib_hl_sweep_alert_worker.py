@@ -127,6 +127,10 @@ def _sweep_event(symbol, timeframe, event, *, early):
         "symbol": symbol,
         "stage": "SWEEP",
         "timeframe": time_label,
+        "hl_price": float(event["reference_low"]),
+        "fib_pct": round(100 * float(event["reference_fib_fraction"]), 2),
+        "sweep_low": float(event["sweep_low"]),
+        "sweep_time": event["sweep_time"],
         "message": (
             f"{symbol} {time_label} FIB HL SWEEP WATCH" + (" (early 1m warning)" if early else "") + ". "
             f"Wick broke a chart-confirmed HL ${float(event['reference_low']):.4f} "
@@ -245,6 +249,12 @@ def observed_alerts(
             "symbol": symbol,
             "stage": stage,
             "timeframe": f"{timeframe_minutes}m",
+            "hl_price": float(event["reference_low"]),
+            "fib_pct": round(100 * float(event["reference_fib_fraction"]), 2),
+            "sweep_low": float(event["sweep_low"]),
+            "sweep_time": event["sweep_time"],
+            "signal_time": signal_time,
+            "bars_to_reclaim": int(event["bars_to_reclaim"]),
             "message": (
                 f"{symbol} {timeframe_minutes}m FIB HL {stage} RECLAIM CONFIRMED. "
                 f"Chart-confirmed HL ${float(event['reference_low']):.4f}; "
@@ -283,6 +293,31 @@ def send_pushover(event: Dict[str, str]) -> None:
     if response.json().get("status") != 1:
         raise RuntimeError("Pushover declined the notification")
 
+
+def persist_scanner_signals(events):
+    """Keep recent scanner results separate from notification dedup state."""
+    if not events:
+        return
+    import json
+    target = STATE_FILE.with_name("fib_hl_scanner_signals.json")
+    try:
+        previous = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = []
+    if not isinstance(previous, list):
+        previous = []
+    merged = {str(r["key"]): r for r in previous if isinstance(r, dict) and r.get("key")}
+    stamp = datetime.now(ET).isoformat()
+    for event in events:
+        key = str(event.get("key") or "")
+        if not key:
+            continue
+        row = {k: v for k, v in event.items() if k != "message"}
+        row["detected_at"] = merged.get(key, {}).get("detected_at", stamp)
+        merged[key] = row
+    latest = sorted(merged.values(), key=lambda r: r.get("detected_at", ""), reverse=True)[:250]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(latest), encoding="utf-8")
 
 async def tick(
     seen: Dict[str, int], *, initial: bool, path: Path, sender=send_pushover
@@ -336,6 +371,10 @@ async def tick(
                             observed_alerts, symbol, rows[tf], now_ms,
                             points[tf], tf,
                         )
+                try:
+                    persist_scanner_signals(events)
+                except Exception as exc:
+                    log.warning("Fib HL signal storage failed: %s", str(exc)[:160])
                 for event in events:
                     if event["key"] in seen:
                         continue
