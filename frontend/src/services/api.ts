@@ -71,7 +71,7 @@ type BarsCacheEntry = {
 
 // Keep old snapshots for quick timeframe switching, but do not treat them as
 // fresh beyond the existing 45-second API TTL.
-const BARS_CACHE_RETENTION_MS = 10 * 60_000;
+const BARS_CACHE_RETENTION_MS = 30 * 60_000;
 const BARS_CACHE_TTL_MS = 45_000;
 const MAX_BARS_CACHE_ENTRIES = 120;
 const barsCache = new Map<string, BarsCacheEntry>();
