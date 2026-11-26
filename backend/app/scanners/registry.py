@@ -4,6 +4,7 @@ from app.scanners.gap_atr_runner import GapAtrRunnerScanner
 from app.scanners.hourly_sweep_runner import HourlySweepRunnerScanner
 from app.scanners.liquidity_reclaim_scanner import LiquidityReclaimScanner
 from app.scanners.vwap3_target_scanner import VWAP3TargetScanner
+from app.scanners.momentum_volume_runner import MomentumVolumeRunnerScanner
 
 
 import json
@@ -42,6 +43,7 @@ class ScannerRegistry:
             HourlySweepRunnerScanner(),
             LiquidityReclaimScanner(),
             VWAP3TargetScanner(),
+            MomentumVolumeRunnerScanner(),
             FibHLScanner(),
         ]
         self.scanners = {scanner.id: scanner for scanner in scanners}
