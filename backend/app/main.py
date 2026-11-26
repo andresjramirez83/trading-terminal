@@ -2470,7 +2470,7 @@ SCANNER_MIN_CHANGE_PCT = float(os.getenv("SCANNER_MIN_CHANGE_PCT", "3.0") or "3.
 # deployments do not suddenly multiply their market-data/API workload.
 SCANNER_ID = "vwap3_target"
 SCANNER_BACKGROUND_IDS = tuple(dict.fromkeys(
-    [SCANNER_ID] + [
+    [SCANNER_ID, "momentum_volume_runner"] + [
         value.strip() for value in os.getenv("SCANNER_BACKGROUND_IDS", "").split(",")
         if value.strip() and value.strip() != SCANNER_ID
     ]
@@ -2483,6 +2483,7 @@ SCANNER_SECONDARY_INTERVALS = {
     "gap_atr_runner": 900,
     "hourly_sweep_runner": 300,
     "liquidity_reclaim": 300,
+    "momentum_volume_runner": 120,
 }
 SCANNER_SECONDARY_INTERVALS = {
     scanner_id: max(
@@ -4189,6 +4190,14 @@ async def run_background_scanner_loop() -> None:
                     scanner_caches[scanner_id] = result
                     scanner_cache_last_runs[scanner_id] = completed_at
                     scanner_cache_errors.pop(scanner_id, None)
+                    if scanner_id == "momentum_volume_runner":
+                        try:
+                            from app.services.mvr_alerts import dispatch_mvr_alerts
+                            info = await asyncio.to_thread(dispatch_mvr_alerts, result)
+                            if info.get("sent") or info.get("warning"):
+                                print(f"[mvr-alert] {info}", flush=True)
+                        except Exception as exc:
+                            print(f"[mvr-alert] error: {exc}", flush=True)
                 elif error:
                     scanner_cache_errors[scanner_id] = error
                     cycle_errors.append(f"{scanner_id}: {error}")
