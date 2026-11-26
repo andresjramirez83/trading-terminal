@@ -710,6 +710,7 @@ DEMAND_ZONE_ALERT_STATE_FILE = APP_STATE_DIR / "demand_zone_alert_state.json"
 
 demand_zone_alert_task: Optional[asyncio.Task] = None
 demand_zone_alert_zone_cache: Dict[str, List[Dict[str, Any]]] = {}
+demand_zone_alert_bar_cache: Dict[str, List[Dict[str, Any]]] = {}
 demand_zone_alert_runtime_state: Dict[str, Dict[str, Any]] = {}
 demand_zone_alert_last_check: Optional[datetime] = None
 demand_zone_alert_last_zone_refresh: Optional[datetime] = None
@@ -3540,9 +3541,11 @@ def _merge_bulk_bar_maps(*maps: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Li
 
 async def _refresh_demand_zone_cache(symbols: List[str]) -> None:
     global demand_zone_alert_zone_cache, demand_zone_alert_last_zone_refresh
+    global demand_zone_alert_bar_cache
 
     if not symbols:
         demand_zone_alert_zone_cache = {}
+        demand_zone_alert_bar_cache = {}
         demand_zone_alert_last_zone_refresh = datetime.now(timezone.utc)
         return
 
@@ -3579,13 +3582,16 @@ async def _refresh_demand_zone_cache(symbols: List[str]) -> None:
 
     merged = _merge_bulk_bar_maps(overnight_rows, sip_rows)
     next_cache: Dict[str, List[Dict[str, Any]]] = {}
+    next_bar_cache: Dict[str, List[Dict[str, Any]]] = {}
     for symbol in symbols:
         rows = merged.get(symbol, [])
         if len(rows) > DEMAND_ZONE_ALERT_MAX_BARS:
             rows = rows[-DEMAND_ZONE_ALERT_MAX_BARS:]
         next_cache[symbol] = build_active_demand_zones(rows, max_bars=DEMAND_ZONE_ALERT_MAX_BARS)
+        next_bar_cache[symbol] = rows[-26:]
 
     demand_zone_alert_zone_cache = next_cache
+    demand_zone_alert_bar_cache = next_bar_cache
     demand_zone_alert_last_zone_refresh = datetime.now(timezone.utc)
     print(
         f"[demand-zone-alert] zones refreshed symbols={len(symbols)} "
@@ -3712,15 +3718,14 @@ async def run_demand_zone_alert_loop() -> None:
                 previous_state = str(entry.get("state") or "unknown")
                 event: Optional[str] = None
 
-                if current_state == "near":
-                    # Near is a one-time heads-up per zone. Do not fire another
-                    # near alert merely because price bounced out of the zone.
-                    if not bool(entry.get("near_sent")) and previous_state != "inside":
+                # Notify only on a fresh, closed, volume-backed bullish rebound.
+                if current_state == "near" and price >= float(zone.get("top") or 0):
+                    from app.services.demand_zone_alert_service import confirmed_demand_reaction
+                    confirmed_at = confirmed_demand_reaction(
+                        demand_zone_alert_bar_cache.get(symbol, []), zone, now_ms=now_ms,
+                    )
+                    if confirmed_at is not None and int(entry.get("last_reaction_ms") or 0) != confirmed_at:
                         event = "near"
-                elif current_state == "inside" and previous_state != "inside":
-                    last_inside = _parse_iso_utc(entry.get("inside_sent_at"))
-                    if last_inside is None or (now - last_inside).total_seconds() >= DEMAND_ZONE_ALERT_INSIDE_COOLDOWN_SECONDS:
-                        event = "inside"
 
                 if event:
                     distance_pct = float(location.get("distance_pct") or 0.0)
@@ -3733,6 +3738,7 @@ async def run_demand_zone_alert_loop() -> None:
                         source_map.get(symbol, []),
                     )
                     sent_at = datetime.now(timezone.utc).isoformat()
+                    entry["last_reaction_ms"] = confirmed_at
                     if event == "near":
                         entry["near_sent"] = True
                         entry["near_sent_at"] = sent_at

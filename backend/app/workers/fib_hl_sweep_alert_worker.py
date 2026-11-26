@@ -394,6 +394,8 @@ async def tick(
                 for event in events:
                     if symbol not in monitored_symbols:
                         continue
+                    if event.get("stage") not in ("IMMEDIATE", "DELAYED"):
+                        continue
                     if event["key"] in seen:
                         continue
                     if not initial:

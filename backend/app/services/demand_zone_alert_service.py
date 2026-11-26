@@ -464,6 +464,30 @@ def nearest_relevant_zone(zones: Iterable[Dict[str, Any]], price: float) -> Opti
     return dict(candidates[0][1])
 
 
+def confirmed_demand_reaction(raw_bars: Iterable[Dict[str, Any]], zone: Dict[str, Any], *, now_ms: int) -> Optional[int]:
+    """Return the closed 5m candle timestamp only for a volume-backed bullish zone reclaim."""
+    bars = normalize_bars(raw_bars, now_ms=now_ms)
+    if len(bars) < 21:
+        return None
+    candle = bars[-1]
+    age_ms = now_ms - (int(candle["time"]) + 300_000)
+    if not 0 <= age_ms <= 360_000:
+        return None
+    avg_volume = sum(row["volume"] for row in bars[-21:-1]) / 20
+    o, h, l, c, v = (candle[key] for key in ("open", "high", "low", "close", "volume"))
+    span = h - l
+    if avg_volume <= 0 or span <= 0 or c <= o or h < max(o, c) or l > min(o, c):
+        return None
+    if v < avg_volume * 1.5 or v * c < 50_000:
+        return None
+    if (c - o) / span < 0.5 or (h - c) / span > 0.25:
+        return None
+    bottom = float(zone.get("bottom") or 0)
+    top = float(zone.get("top") or 0)
+    if not (0 < bottom <= top and l <= top and h >= bottom and c > top):
+        return None
+    return int(candle["time"])
+
 def classify_zone_location(price: float, zone: Dict[str, Any], near_pct: float = 1.0) -> Dict[str, Any]:
     current = _safe_float(price)
     bottom = _safe_float(zone.get("bottom"))

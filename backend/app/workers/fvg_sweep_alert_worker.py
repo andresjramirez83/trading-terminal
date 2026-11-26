@@ -149,6 +149,8 @@ async def tick(seen: Dict[str,int], *, initial: bool, path: Path, sender=_pushov
                 hint = early_one_minute_hint(one,report,now_ms=now_ms)
                 events = observed_alerts(symbol,report,hint,now_ms)
                 for event in events:
+                    if event.get('stage') != 'reclaimed':
+                        continue
                     if event['key'] in seen:
                         continue
                     if initial:
