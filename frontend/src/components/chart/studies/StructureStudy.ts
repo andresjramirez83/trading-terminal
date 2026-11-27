@@ -146,8 +146,10 @@ function classifyStructurePivots(bars: CleanBar[], pivots: StructurePivot[], set
     const label = previous === undefined ? (high ? "H" : "L") : Math.abs(pivot.price - previous) <= 1e-9 ? (high ? "EQH" : "EQL") : high ? (pivot.price > previous ? "HH" : "LH") : (pivot.price > previous ? "HL" : "LL");
     if (high) previousHigh = pivot.price;
     else previousLow = pivot.price;
+    // Pullback labels require structural breakout confirmation.
+    if (label === "HL" || label === "LH") continue;
     if (high ? !settings.showHighs : !settings.showLows) continue;
-    const color = label === "HH" ? settings.bullishHighColor : label === "HL" ? settings.bullishLowColor : label === "LH" ? settings.bearishHighColor : label === "LL" ? settings.bearishLowColor : settings.pendingColor;
+    const color = label === "HH" ? settings.bullishHighColor : label === "LL" ? settings.bearishLowColor : settings.pendingColor;
     lines.push({ id: layer + "-" + pivot.side + "-" + String(bars[pivot.index].time), layer, side: pivot.side, label: (prefix + label) as StructureLabel, price: pivot.price, pointTime: bars[pivot.index].time as Time, confirmationTime: bars[pivot.confirmationIndex].time as Time, startTime: bars[pivot.index].time as Time, endTime: bars[pivot.confirmationIndex].time as Time, color, lineWidth: internal ? 1 : settings.lineWidth, lineStyle: internal ? "dashed" : "solid", pending: false });
   }
   return lines;
@@ -162,6 +164,7 @@ function detectStructureBreaks(bars: CleanBar[], pivots: StructurePivot[], setti
   let lowBroken = false;
   let bias = 0;
   let cursor = 0;
+  const pullbackPivots = internal ? pivots : detectStructurePivots(bars, Math.min(settings.internalSwingStrength, settings.swingStrength), settings.priceSource);
   for (let t = 0; t < bars.length - 1; t++) {
     const close = bars[t].close;
     const bullish = high !== undefined && !highBroken && close > high.price + 1e-9;
@@ -170,6 +173,25 @@ function detectStructureBreaks(bars: CleanBar[], pivots: StructurePivot[], setti
     if (direction !== 0) {
       const pivot = direction === 1 ? high : low;
       const choch = bias !== 0 && bias !== direction;
+      if (pivot && !choch) {
+        const side = direction === 1 ? "low" : "high";
+        const candidates = pullbackPivots.filter(p => p.side === side && p.index > pivot.index && p.confirmationIndex <= t);
+        const previous = direction === 1 ? low : high;
+        const candidate = candidates.reduce<StructurePivot | undefined>((best, p) => !best || (direction === 1 ? p.price <= best.price : p.price >= best.price) ? p : best, undefined);
+        if (candidate && previous && (direction === 1 ? candidate.price > previous.price + 1e-9 : candidate.price < previous.price - 1e-9)) {
+          const label = ((internal ? "i" : "") + (direction === 1 ? "HL" : "LH")) as StructureLabel;
+          if (direction === 1) {
+            low = candidate;
+            lowBroken = false;
+          } else {
+            high = candidate;
+            highBroken = false;
+          }
+          const pointTime = bars[candidate.index].time as Time;
+          const id = layer + "-confirmed-pullback-" + side + "-" + String(pointTime);
+          if ((direction === 1 ? settings.showLows : settings.showHighs) && !lines.some(line => line.id === id)) lines.push({ id, layer, side, label, price: candidate.price, pointTime, confirmationTime: bars[t].time as Time, startTime: pointTime, endTime: bars[t].time as Time, color: direction === 1 ? settings.bullishLowColor : settings.bearishHighColor, lineWidth: internal ? 1 : settings.lineWidth, lineStyle: internal ? "dashed" : "solid", pending: false });
+        }
+      }
       bias = direction;
       if (direction === 1) highBroken = true;
       else lowBroken = true;
@@ -181,11 +203,15 @@ function detectStructureBreaks(bars: CleanBar[], pivots: StructurePivot[], setti
     while (cursor < pivots.length && pivots[cursor].confirmationIndex === t) {
       const pivot = pivots[cursor++];
       if (pivot.side === "high") {
-        high = pivot;
-        highBroken = false;
+        if (!high || highBroken || (bias >= 0 && pivot.price > high.price + 1e-9)) {
+          high = pivot;
+          highBroken = false;
+        }
       } else {
-        low = pivot;
-        lowBroken = false;
+        if (!low || lowBroken || (bias <= 0 && pivot.price < low.price - 1e-9)) {
+          low = pivot;
+          lowBroken = false;
+        }
       }
     }
   }
