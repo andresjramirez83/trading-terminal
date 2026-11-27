@@ -1082,7 +1082,7 @@ export default function ScannerPanel({
       data?.scanner_id ?? selectedScannerId
     );
 
-    if (selectedScannerWatchlistId && selectedScannerWatchlistId !== "scanner") {
+    if (selectedScannerWatchlistId && selectedScannerWatchlistId !== "scanner" && !cachedScannerEntries.some(([id]) => normalizeWatchlistId(id) === selectedScannerWatchlistId)) {
       replaceSymbols(selectedScannerWatchlistId, watchlistRows, {
         name: data?.scanner_name ?? titleCaseWatchlistName(selectedScannerId),
         type: "scanner",
@@ -1109,6 +1109,7 @@ export default function ScannerPanel({
     });
 
     grouped.forEach((items, groupKey) => {
+      if (cachedScannerEntries.some(([id]) => normalizeWatchlistId(id) === groupKey)) return;
       replaceSymbols(groupKey, items, {
         name: titleCaseWatchlistName(groupKey),
         type: "scanner",
