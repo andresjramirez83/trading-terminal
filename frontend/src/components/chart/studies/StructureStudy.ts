@@ -3,7 +3,7 @@
 import type { Time } from "lightweight-charts";
 
 import {
-  buildMarketStructure,
+  buildBodyMarketStructure,
   type MarketStructurePointType,
   type PendingMarketStructurePointType,
 } from "../analysis/MarketStructureEngine";
@@ -121,7 +121,7 @@ export function buildStructureStudyLines(
 
   if (!settings.enabled || bars.length === 0) return [];
 
-  const structure = buildMarketStructure(bars, settings.swingStrength);
+  const structure = buildBodyMarketStructure(bars, settings.swingStrength);
   const visiblePoints = structure.points
     .filter((point) => {
       const high = isHighLabel(point.type);

@@ -221,6 +221,7 @@ function averageTrueRange(
 }
 
 type StructureConfirmationProfile = {
+  atrBars?: CleanBar[];
   timeframeSeconds: number;
   minimumBarsAfterExtreme: number;
   atrRetracementMultiplier: number;
@@ -364,8 +365,8 @@ function meaningfulPullbackDistance(
    * make a very obvious pullback look artificially too small (the JEM case).
    */
   const preExtremeIndex = Math.max(0, extremeIndex - 1);
-  const preExtremeAtr = averageTrueRange(bars, preExtremeIndex, 14);
-  const fallbackAtr = averageTrueRange(bars, extremeIndex, 14);
+  const preExtremeAtr = averageTrueRange(profile.atrBars ?? bars, preExtremeIndex, 14);
+  const fallbackAtr = averageTrueRange(profile.atrBars ?? bars, extremeIndex, 14);
   const atr = preExtremeAtr > 0 ? preExtremeAtr : fallbackAtr;
   const price = Math.max(
     0.000001,
@@ -512,6 +513,7 @@ function isConsolidatingAfterExtreme(
   extremeIndex: number,
   currentIndex: number,
   direction: "bullish" | "bearish",
+  profile: StructureConfirmationProfile,
 ): boolean {
   const startIndex = extremeIndex + 1;
   const barCount = currentIndex - startIndex + 1;
@@ -520,7 +522,7 @@ function isConsolidatingAfterExtreme(
   // recognizable range before declaring the directional leg complete.
   if (barCount < 4) return false;
 
-  const atr = averageTrueRange(bars, extremeIndex, 14);
+  const atr = averageTrueRange(profile.atrBars ?? bars, extremeIndex, 14);
   if (!(atr > 0)) return false;
 
   const start = Math.max(startIndex, currentIndex - 7);
@@ -584,6 +586,7 @@ function isSwingHigh(
   bars: CleanBar[],
   index: number,
   strength: number,
+  bodyMode = false,
 ): boolean {
   const current = bars[index];
   if (!isFiniteBar(current)) return false;
@@ -593,7 +596,7 @@ function isSwingHigh(
     const right = bars[index + offset];
 
     if (!isFiniteBar(left) || !isFiniteBar(right)) return false;
-    if (current.high <= left.high || current.high <= right.high) return false;
+    if ((bodyMode ? current.high < left.high : current.high <= left.high) || current.high <= right.high) return false;
   }
 
   return true;
@@ -603,6 +606,7 @@ function isSwingLow(
   bars: CleanBar[],
   index: number,
   strength: number,
+  bodyMode = false,
 ): boolean {
   const current = bars[index];
   if (!isFiniteBar(current)) return false;
@@ -612,7 +616,7 @@ function isSwingLow(
     const right = bars[index + offset];
 
     if (!isFiniteBar(left) || !isFiniteBar(right)) return false;
-    if (current.low >= left.low || current.low >= right.low) return false;
+    if ((bodyMode ? current.low > left.low : current.low >= left.low) || current.low >= right.low) return false;
   }
 
   return true;
@@ -621,6 +625,7 @@ function isSwingLow(
 function getSeedSwings(
   bars: CleanBar[],
   swingStrength: number,
+  bodyMode = false,
 ): SwingPoint[] {
   const swings: SwingPoint[] = [];
 
@@ -629,7 +634,7 @@ function getSeedSwings(
     index < bars.length - swingStrength;
     index += 1
   ) {
-    if (isSwingHigh(bars, index, swingStrength)) {
+    if (isSwingHigh(bars, index, swingStrength, bodyMode)) {
       swings.push({
         index,
         price: bars[index].high,
@@ -637,7 +642,7 @@ function getSeedSwings(
       });
     }
 
-    if (isSwingLow(bars, index, swingStrength)) {
+    if (isSwingLow(bars, index, swingStrength, bodyMode)) {
       swings.push({
         index,
         price: bars[index].low,
@@ -957,6 +962,7 @@ function tryFinalizeBullishBreak(
     highestWick.index,
     currentIndex,
     "bullish",
+    profile,
   );
 
   if (!meaningfulPullback && !consolidatedAfterExtreme) return;
@@ -1036,6 +1042,7 @@ function tryFinalizeBearishBreak(
     lowestWick.index,
     currentIndex,
     "bearish",
+    profile,
   );
 
   if (!meaningfulPullback && !consolidatedAfterExtreme) return;
@@ -1347,9 +1354,15 @@ function calculateStrength(state: StructureState): number {
  *
  * Manual MarketStructureTool drawings are not modified.
  */
+export function buildBodyMarketStructure(bars: CleanBar[], swingStrength = 3): MarketStructureResult {
+  const bodyBars = bars.map(bar => ({ ...bar, high: Math.max(bar.open, bar.close), low: Math.min(bar.open, bar.close) }));
+  return buildMarketStructure(bodyBars, swingStrength, bars);
+}
+
 export function buildMarketStructure(
   bars: CleanBar[],
   swingStrength = 3,
+  originalBars?: CleanBar[],
 ): MarketStructureResult {
   const normalizedStrength = Math.max(1, Math.floor(swingStrength));
 
@@ -1365,7 +1378,7 @@ export function buildMarketStructure(
   }
 
   const seedStrength = Math.max(1, Math.min(2, normalizedStrength));
-  const seedSwings = getSeedSwings(bars, seedStrength);
+  const seedSwings = getSeedSwings(bars, seedStrength, originalBars !== undefined);
   const initial = findInitialStructure(seedSwings);
 
   if (!initial) {
@@ -1391,7 +1404,7 @@ export function buildMarketStructure(
 
   const processingStart =
     Math.max(initial.high.index, initial.low.index) + 1;
-  const confirmationProfile = getStructureConfirmationProfile(bars);
+  const confirmationProfile = { ...getStructureConfirmationProfile(bars), atrBars: originalBars ?? bars };
 
   for (let index = processingStart; index < bars.length; index += 1) {
     tryFinalizeBullishBreak(
@@ -1444,7 +1457,7 @@ export function buildMarketStructure(
   const bullish = state.trend === "bullish";
   const bearish = state.trend === "bearish";
 
-  const scoredPoints = applyLegConfidence(bars, state.points);
+  const scoredPoints = applyLegConfidence(originalBars ?? bars, state.points);
   const latestConfirmedPoint = scoredPoints.at(-1);
   const latestLegConfidence = latestConfirmedPoint?.confidence ?? 50;
   const latestLegQuality =
