@@ -291,9 +291,9 @@ function createStructureLabelElement(
     : "rgba(2, 6, 23, 0.92)";
   element.style.border = `1px solid ${line.color}`;
   element.style.color = line.color;
-  element.style.fontSize = "9px";
-  element.style.fontWeight = "900";
-  element.style.opacity = line.pending ? "0.9" : "1";
+  element.style.fontSize = line.layer === "internal" ? "8px" : "9px";
+  element.style.fontWeight = line.layer === "internal" ? "600" : "900";
+  element.style.opacity = line.layer === "internal" ? "0.75" : line.pending ? "0.9" : "1";
   element.style.lineHeight = "14px";
   element.style.whiteSpace = "nowrap";
   element.style.pointerEvents = "none";
