@@ -352,7 +352,7 @@ function getHistoricalRequest(timeframe: string): {
   // non-1m/5m timeframe as a five-day chart. This is also what lets custom
   // intraday intervals (7m, 90m, 3h, 6h, etc.) open with useful context.
   if (normalized === "1m" || normalized === "1min") {
-    return { lookback: "10d", limit: 2000 };
+    return { lookback: "10d", limit: 5000 };
   }
 
   const match = normalized.match(/^(\d+)(m|h)$/);
@@ -361,22 +361,25 @@ function getHistoricalRequest(timeframe: string): {
     const intervalMinutes = match[2] === "h" ? amount * 60 : amount;
 
     if (intervalMinutes <= 5) {
-      return { lookback: "10d", limit: 1000 };
+      return { lookback: "30d", limit: 5000 };
     }
     if (intervalMinutes <= 15) {
-      return { lookback: "20d", limit: 1000 };
+      return { lookback: "60d", limit: 4000 };
+    }
+    if (intervalMinutes <= 30) {
+      return { lookback: "90d", limit: 3000 };
     }
     if (intervalMinutes <= 60) {
-      return { lookback: "30d", limit: 700 };
+      return { lookback: "180d", limit: 3000 };
     }
     if (intervalMinutes <= 240) {
-      return { lookback: "45d", limit: 800 };
+      return { lookback: "365d", limit: 1500 };
     }
     return { lookback: "180d", limit: 700 };
   }
 
   if (normalized === "1d") {
-    return { lookback: "2y", limit: 500 };
+    return { lookback: "5y", limit: 1500 };
   }
   if (normalized === "1w") {
     return { lookback: "5y", limit: 520 };

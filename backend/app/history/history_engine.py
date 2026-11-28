@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Protocol
 
 from app.history.history_aggregation import HistoryAggregation
@@ -35,11 +35,14 @@ class HistoryEngine:
         symbol: str,
         timeframe: str,
         session: str = "extended",
+        lookback_days: int | None = None,
     ) -> List[HistoryBar]:
         tf = get_timeframe(timeframe)
 
         now = datetime.now(timezone.utc)
-        start = now - tf.lookback
+        max_days = max(tf.lookback.days, {"1m": 10, "5m": 30, "15m": 60, "30m": 90, "1h": 180, "4h": 365}.get(tf.name, 0))
+        window = tf.lookback if lookback_days is None else timedelta(days=min(max(1, lookback_days), max_days))
+        start = now - window
 
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(now.timestamp() * 1000)
@@ -49,7 +52,7 @@ class HistoryEngine:
             symbol=symbol,
             timeframe=tf.name,
             session=session,
-            lookback_key=str(tf.lookback),
+            lookback_key=str(window),
         )
 
         cached_target = self.cache.get(target_key)
@@ -64,7 +67,7 @@ class HistoryEngine:
             symbol=symbol,
             timeframe=source_tf.name,
             session=session,
-            lookback_key=str(tf.lookback),
+            lookback_key=str(window),
         )
 
         source_bars = self.cache.get(source_key)

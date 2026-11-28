@@ -5198,8 +5198,7 @@ async def fetch_chart_bars_async(
             history_bars = await history_engine.get_history(
                 symbol=symbol,
                 timeframe=timeframe,
-                session=session,
-            )
+                session=session, lookback_days=resolve_lookback_days(lookback, timeframe) if lookback else None)
 
             bars = [
                 Candle(

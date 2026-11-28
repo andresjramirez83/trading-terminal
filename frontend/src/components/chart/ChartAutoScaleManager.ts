@@ -49,6 +49,30 @@ function buildRangeFromBars(bars: CleanBar[]): PriceRange | null {
   };
 }
 
+function buildSmartRangeFromBars(bars: CleanBar[]): PriceRange | null {
+  let minValue = Infinity;
+  let maxValue = -Infinity;
+  for (let i=0;i<bars.length;i++) {
+    const bar = bars[i];
+    const open = finitePrice(bar.open);
+    const close = finitePrice(bar.close);
+    const high = finitePrice(bar.high);
+    const low = finitePrice(bar.low);
+    if (open == null || close == null || high == null || low == null) continue;
+    const bodyHigh = Math.max(open,close);
+    const bodyLow = Math.min(open,close);
+    const nearby = bars.slice(Math.max(0,i-8),i).concat(bars.slice(i+1,i+9)).map(b => b.high-b.low).filter(v => Number.isFinite(v) && v>0).sort((a,b) => a-b);
+    const median = nearby.length ? nearby[Math.floor(nearby.length/2)] : high-low;
+    const allowance = Math.max(median*4,(bodyHigh-bodyLow)*2,bodyHigh*0.02,0.0001);
+    const smartHigh = nearby.length>=4 ? Math.max(bodyHigh,Math.min(high,bodyHigh+allowance)) : high;
+    const smartLow = nearby.length>=4 ? Math.min(bodyLow,Math.max(low,bodyLow-allowance)) : low;
+    minValue = Math.min(minValue,smartLow,bodyLow);
+    maxValue = Math.max(maxValue,smartHigh,bodyHigh);
+  }
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue) || minValue>maxValue) return null;
+  return {minValue,maxValue};
+}
+
 function padRange(range: PriceRange): PriceRange {
   const minValue = finitePrice(range.minValue);
   const maxValue = finitePrice(range.maxValue);
@@ -61,7 +85,7 @@ function padRange(range: PriceRange): PriceRange {
     const padding = Math.max(Math.abs(minValue) * 0.03, 0.01);
 
     return {
-      minValue: minValue - padding,
+      minValue: Math.max(minValue*0.01,minValue-padding),
       maxValue: maxValue + padding,
     };
   }
@@ -70,7 +94,7 @@ function padRange(range: PriceRange): PriceRange {
   const padding = Math.max(span * 0.08, Math.abs(maxValue) * 0.002, 0.01);
 
   return {
-    minValue: minValue - padding,
+    minValue: Math.max(minValue*0.01,minValue-padding),
     maxValue: maxValue + padding,
   };
 }
@@ -117,7 +141,7 @@ export class ChartAutoScaleManager {
   }
 
   setFocusedBars(bars: CleanBar[]): boolean {
-    const range = buildRangeFromBars(bars);
+    const range = buildSmartRangeFromBars(bars) ?? buildRangeFromBars(bars);
 
     if (!range) {
       this.focusedPriceRange = null;
@@ -192,11 +216,8 @@ export class ChartAutoScaleManager {
     // ChartEngine passes only the candles in the visible time window here.
     // Avoid old off-screen spikes distorting the scale (or clipping an
     // important wick inside the viewport).
-    const visibleRange = buildRangeFromBars(input.bars);
-    const mergedRange = mergeRanges(
-      visibleRange ?? input.baseRange,
-      input.analysisRange,
-    );
+    const visibleRange = buildSmartRangeFromBars(input.bars);
+    const mergedRange = visibleRange ?? input.baseRange;
     return mergedRange ? this.applyVerticalPan(mergedRange) : null;
   }
 }

@@ -1,3 +1,4 @@
+import { detectStructuralPatterns, patternBoundaryAt, type StructuralPattern } from "./ConsolidationStudy";
 // src/components/chart/studies/StudyRenderer.ts
 
 import type { IChartApi, Time } from "lightweight-charts";
@@ -254,7 +255,11 @@ function createStructureLineElement(
   y: number,
 ): HTMLDivElement {
   const element = document.createElement("div");
-  const width = Math.max(12, right - left);
+  const emphasized = line.layer !== "internal" && !line.pending && !line.label.endsWith(" Break");
+  const choch = line.label.endsWith("CHoCH");
+  const paired = line.label === "HL" || line.label === "LH";
+  const weight = emphasized ? Math.max(choch ? 4 : 3,line.lineWidth) : line.lineWidth;
+  const width = Math.max(paired || choch || line.label.endsWith("BOS") ? 1 : 12,right-left);
 
   element.title = `${line.label} ${line.price}`;
   element.style.position = "absolute";
@@ -262,12 +267,48 @@ function createStructureLineElement(
   element.style.top = `${y}px`;
   element.style.width = `${width}px`;
   element.style.height = "0";
-  element.style.borderTop = `${line.lineWidth}px ${
+  element.style.borderTop = `${weight}px ${
     line.lineStyle === "dashed" ? "dashed" : "solid"
   } ${line.color}`;
   element.style.pointerEvents = "none";
   element.style.transform = "translateY(-50%)";
 
+  if (line.label.endsWith("CHoCH")) {
+    const shortChoch = right-left < 20;
+    element.style.opacity = "1";
+    element.style.zIndex = "4";
+    if (shortChoch) {
+      const extendedWidth = Math.max(32,right-left+16);
+      const extendedLeft = left-(extendedWidth-(right-left))/2;
+      element.style.left = extendedLeft+"px";
+      element.style.width = extendedWidth+"px";
+      element.style.height = "0px";
+      element.style.borderTop = "4px solid " + line.color;
+      element.style.filter = "drop-shadow(0 0 3px " + line.color + ")";
+      const marker = document.createElement("div");
+      Object.assign(marker.style,{
+        position:"absolute",
+        right:"-3px",
+        top:"-5px",
+        width:"6px",
+        height:"6px",
+        borderRadius:"50%",
+        background:line.color,
+        pointerEvents:"none"
+      });
+      element.appendChild(marker);
+    }
+  }
+
+  if (line.label.endsWith("CHoCH")) {
+    element.style.boxShadow = "0 0 0 1px rgba(255,255,255,0.95)";
+    element.style.filter = "none";
+  }
+
+  if (emphasized) {
+    element.style.filter = "drop-shadow(0 0 1px rgba(255,255,255,0.85)) drop-shadow(0 0 3px " + line.color + ")";
+    element.style.opacity = "1";
+  }
   return element;
 }
 
@@ -777,7 +818,76 @@ export class StudyRenderer {
       }
     }
 
+    const consolidationBars = this.latestContext?.bars ?? [];
+    const consolidationRanges: StructuralPattern[] = this.structureVisible
+      ? detectStructuralPatterns(consolidationBars, "hybrid")
+      : [];
+    const consolidationIndices = new Map(consolidationBars.map((bar,index) => [bar.time,index] as const));
+    const hidePatternStructure = (line: StructureStudyLine): boolean => {
+      // Always preserve major trend structure.
+      if (line.layer === "major") return false;
+
+      const point = consolidationIndices.get(
+        line.pointTime as typeof consolidationBars[number]["time"]
+      );
+
+      const confirmation = consolidationIndices.get(
+        line.confirmationTime as typeof consolidationBars[number]["time"]
+      );
+
+      if (point === undefined || confirmation === undefined) return false;
+
+      const isBreak =
+        line.label.endsWith("BOS") ||
+        line.label.endsWith("CHoCH") ||
+        line.label.endsWith(" Break");
+
+      return consolidationRanges.some(pattern => {
+        const last = pattern.breakout
+          ? pattern.endIndex - 1
+          : pattern.endIndex;
+
+        // Preserve structure originating outside the formation.
+        if (point < pattern.startIndex || point > last) return false;
+        if (confirmation < pattern.startIndex || confirmation > last) return false;
+
+        const boundary = patternBoundaryAt(pattern, point);
+        const tolerance = pattern.tolerance;
+
+        // Preserve levels significantly outside the formation.
+        if (line.price > boundary.high + tolerance) return false;
+        if (line.price < boundary.low - tolerance) return false;
+
+        if (isBreak) {
+          // Preserve potential meaningful boundary breaks.
+          for (const index of [point, confirmation]) {
+            const edge = patternBoundaryAt(pattern, index);
+            const close = consolidationBars[index].close;
+
+            if (close > edge.high + tolerance / 2) return false;
+            if (close < edge.low - tolerance / 2) return false;
+          }
+        }
+
+        // Minor structure contained within a confirmed formation.
+        return true;
+      });
+    };
+
+    const structurePriority = (line: StructureStudyLine) => line.label.endsWith(" Break") ? 0 : (line.label.endsWith("CHoCH") ? 100 : 0) + (line.layer === "major" ? 30 : line.layer === "external" ? 20 : 10) + (line.pending ? 0 : 5);
+    const structureBarSpacing = timeScale.options().barSpacing;
+    const visibleStructureLabels: {line: StructureStudyLine; x: number; y: number}[] = [];
+    const placedStructureLabels: {left:number; right:number; top:number; bottom:number; line:StructureStudyLine; y:number}[] = [];
     for (const line of this.structureLines) {
+      const hiddenByPattern = hidePatternStructure(line);
+
+      const confirmedSwing =
+        line.layer === "external" &&
+        !line.pending &&
+        ["HH","HL","LH","LL"].includes(line.label);
+
+      if (hiddenByPattern && !confirmedSwing) continue;
+
       const startX = timeScale.timeToCoordinate(line.startTime as Time);
       const endX = timeScale.timeToCoordinate(line.endTime as Time);
       const y = this.series.priceToCoordinate(line.price);
@@ -800,9 +910,48 @@ export class StudyRenderer {
         continue;
       }
 
-      fragment.appendChild(
-        createStructureLineElement(line, left, right, y),
+      if (!hiddenByPattern) fragment.appendChild(
+        createStructureLineElement(line.label.endsWith("CHoCH") ? {...line,lineWidth:line.layer === "internal" ? 2 : 3,lineStyle:"solid",color:line.side === "high" ? "#22c55e" : "#ef4444"} : line, left, right, y),
       );
+
+      if (!hiddenByPattern && line.layer === "external" && !line.pending && (line.label === "HL" || line.label === "LH") && right-left >= Math.max(54,structureBarSpacing*1.8) && isVisibleX(right)) {
+        const levelLabel=document.createElement("div");
+        levelLabel.textContent=line.label;
+        Object.assign(levelLabel.style,{
+          position:"absolute",
+          left:(right-5)+"px",
+          top:(y+(line.label==="HL" ? 4 : -4))+"px",
+          transform:line.label==="HL" ? "translate(-100%,0)" : "translate(-100%,-100%)",
+          color:line.color,
+          fontSize:"12px",
+          fontWeight:"800",
+          textShadow:"0 0 3px #000000, 0 0 5px #000000",
+          pointerEvents:"none",
+          zIndex:"6"
+        });
+        fragment.appendChild(levelLabel);
+      }
+      let labelY = y;
+
+      if (confirmedSwing) {
+        const index = consolidationIndices.get(
+          line.pointTime as typeof consolidationBars[number]["time"]
+        );
+
+        const bar = index === undefined
+          ? undefined
+          : consolidationBars[index];
+
+        if (bar) {
+          const wickY = this.series.priceToCoordinate(
+            line.side === "high" ? bar.high : bar.low
+          );
+
+          if (wickY !== null && Number.isFinite(wickY)) {
+            labelY = wickY;
+          }
+        }
+      }
 
       const pointX = timeScale.timeToCoordinate(line.pointTime as Time);
 
@@ -811,10 +960,146 @@ export class StudyRenderer {
         Number.isFinite(pointX) &&
         isVisibleX(pointX)
       ) {
-        fragment.appendChild(
-          createStructureLabelElement(line, pointX, y),
-        );
+        if ((line.layer !== "internal" || structureBarSpacing >= (line.label.endsWith("CHoCH") ? 5 : 8))) visibleStructureLabels.push({line,x:pointX,y:labelY});
       }
+    }
+    visibleStructureLabels.sort((a,b) => structurePriority(b.line)-structurePriority(a.line) || a.x-b.x);
+    for (const {line,x,y} of visibleStructureLabels) {
+      const choch = line.label.endsWith("CHoCH");
+      const name = line.label.replace(/^[mi]/,"");
+      if (placedStructureLabels.some(p => p.line.pointTime === line.pointTime && p.line.side === line.side && p.line.label.replace(/^[mi]/,"") === name && Math.abs(p.y-y) <= 3)) continue;
+      const element = createStructureLabelElement(line,x,y);
+      if (choch) {
+        const bullish = line.side === "high";
+        element.textContent = (bullish ? String.fromCharCode(8593) : String.fromCharCode(8595)) + " " + line.label;
+        Object.assign(element.style,{fontSize:"12px",fontWeight:"900",opacity:"1",color:"#ffffff",background:bullish ? "#166534" : "#991b1b",border:bullish ? "2px solid #4ade80" : "2px solid #f87171",padding:"2px 6px",lineHeight:"16px",zIndex:"5"});
+      }
+      const displayStructureLabel = (value: StructureStudyLine): string => {
+        if (value.layer === "external") return value.label;
+        if (value.layer === "major" && value.label.endsWith("CHoCH")) return "TCHoCH";
+        if (value.layer === "major" && value.label.endsWith("BOS")) return "TBOS";
+        if (value.label.endsWith("CHoCH") || value.label.endsWith("BOS") || value.label.endsWith("EQH") || value.label.endsWith("EQL")) return value.label;
+        const prefix = value.label.replace(/^[mi]/,"");
+        const state = prefix.startsWith("p") ? "p" : prefix.startsWith("d") ? "d" : "";
+        const high = value.side === "high";
+        return state + (value.layer === "major" ? (high ? "TH" : "TL") : value.layer === "internal" ? (high ? "IH" : "IL") : (high ? "HH" : "LL"));
+      };
+      element.textContent = displayStructureLabel(line);
+      Object.assign(element.style,{fontSize:choch || line.layer !== "internal" ? "11px" : "10px",fontWeight:choch ? "700" : "600",opacity:"1",textShadow:"0 1px 2px #000000",color:line.color,background:"transparent",border:"none",padding:"0px 2px",lineHeight:"14px",zIndex:"1"});
+      const width = (element.textContent?.length ?? 0)*7+10;
+      const height = 16;
+      const above = line.side === "high";
+      const clearance = choch ? 18 : 12;
+      const appendFloatingStructureLabel = (top: number) => {
+        element.style.top = top+"px";
+        element.style.transform = "translate(-50%,0)";
+        fragment.appendChild(element);
+      };
+      let placed = false;
+      for (let lane=0;lane<(structureBarSpacing < 8 ? 2 : 3);lane++) {
+        const top = above ? y-clearance-height-lane*20 : y+clearance+lane*20;
+        if (top < 0) continue;
+        const rect = {left:x-width/2,right:x+width/2,top,bottom:top+height,line,y};
+        if (placedStructureLabels.some(p => rect.left < p.right+3 && rect.right > p.left-3 && rect.top < p.bottom+3 && rect.bottom > p.top-3)) continue;
+        appendFloatingStructureLabel(top);
+        placedStructureLabels.push(rect);
+        placed = true;
+        break;
+      }
+      void placed;
+    }
+
+    if (this.structureVisible && this.latestContext) {
+      const bars = this.latestContext.bars;
+      const ns = "http://www.w3.org/2000/svg";
+
+      const svg = document.createElementNS(ns, "svg");
+
+      Object.assign(svg.style, {
+        position: "absolute",
+        left: "0",
+        top: "0",
+        width: "100%",
+        height: "100%",
+        pointerEvents: "none",
+        overflow: "hidden"
+      });
+
+      for (const pattern of consolidationRanges) {
+        const first = bars[pattern.startIndex];
+        const last = bars[pattern.endIndex];
+
+        if (!first || !last) continue;
+
+        const x1 = timeScale.timeToCoordinate(first.time as Time);
+        const x2 = timeScale.timeToCoordinate(last.time as Time);
+
+        if (x1 == null || x2 == null) continue;
+        if (!Number.isFinite(x1) || !Number.isFinite(x2)) continue;
+        if (!intersectsVisibleX(x1,x2)) continue;
+
+        const start = patternBoundaryAt(pattern,pattern.startIndex);
+        const end = patternBoundaryAt(pattern,pattern.endIndex);
+
+        const u1 = this.series.priceToCoordinate(start.high);
+        const u2 = this.series.priceToCoordinate(end.high);
+        const l1 = this.series.priceToCoordinate(start.low);
+        const l2 = this.series.priceToCoordinate(end.low);
+
+        if (u1 == null || u2 == null || l1 == null || l2 == null) continue;
+        if (![u1,u2,l1,l2].every(Number.isFinite)) continue;
+
+        const area = document.createElementNS(ns,"polygon");
+
+        area.setAttribute("points",
+          x1+","+u1+" "+x2+","+u2+" "+x2+","+l2+" "+x1+","+l1
+        );
+
+        area.setAttribute("fill","#eab308");
+        area.setAttribute("fill-opacity","0.065");
+        area.setAttribute("stroke","none");
+
+        svg.appendChild(area);
+
+        const drawBoundary = (y1:number,y2:number) => {
+          const line = document.createElementNS(ns,"line");
+          line.setAttribute("x1",String(x1));
+          line.setAttribute("y1",String(y1));
+          line.setAttribute("x2",String(x2));
+          line.setAttribute("y2",String(y2));
+          line.setAttribute("stroke","#facc15");
+          line.setAttribute("stroke-width","1.5");
+          line.setAttribute("stroke-opacity","0.9");
+          svg.appendChild(line);
+        };
+
+        drawBoundary(u1,u2);
+        drawBoundary(l1,l2);
+
+        const label = document.createElementNS(ns,"text");
+
+        const labelX = Math.max(8,x1+5);
+        const fraction = Math.max(0,Math.min(1,
+          (labelX-x1)/Math.max(1,x2-x1)
+        ));
+
+        const labelY = Math.max(12,u1+(u2-u1)*fraction-5);
+
+        label.setAttribute("x",String(labelX));
+        label.setAttribute("y",String(labelY));
+        label.setAttribute("fill","#facc15");
+        label.setAttribute("font-size","10");
+        label.setAttribute("font-weight","700");
+        label.setAttribute("stroke","#111827");
+        label.setAttribute("stroke-width","2");
+        label.setAttribute("paint-order","stroke");
+
+        label.textContent = pattern.kind;
+
+        svg.appendChild(label);
+      }
+
+      fragment.insertBefore(svg,fragment.firstChild);
     }
 
     for (const pattern of this.swingFailurePatterns) {
